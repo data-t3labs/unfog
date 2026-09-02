@@ -26,6 +26,10 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      # Routing graph packs (coverage v2): release assets have no CORS headers, so the packs listed in
+      # tools/build-graph/pages-mirror.json are mirrored from the graphs-v1 release into the Pages
+      # site (same origin as the app; Range → 206). Nothing is stored in git. docs/coverage-runbook.md
+      - run: node tools/build-graph/mirror-packs.mjs --out dist/graph/packs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

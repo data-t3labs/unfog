@@ -8,6 +8,7 @@
  * The result iterates OsmWay objects lazily, one at a time, for buildGraphTiles.
  */
 import { lowerBound } from '../../src/routing/graph-build';
+import { GRAPH_ZOOM, lonLatToGraphTile } from '../../src/routing/graph-format';
 import type { OsmWay } from '../../src/routing/osm-types';
 import { readOsmPbf } from './pbf-reader';
 
@@ -16,6 +17,9 @@ export interface LoadPbfOptions {
   keep?: (tags: Record<string, string>) => boolean;
   /** Keep only ways with at least one node inside [west, south, east, north]. */
   bbox?: [west: number, south: number, east: number, north: number];
+  /** Keep only ways with at least one node inside one of these zoom-`tileZoom` tiles ("x/y" keys). Combines with bbox (AND). */
+  tiles?: Set<string>;
+  tileZoom?: number;
   log?: (msg: string) => void;
 }
 
@@ -82,7 +86,7 @@ export function loadPbfWays(path: string, opts: LoadPbfOptions = {}): PbfWays {
   const missing = U - found;
   log(`pass 2: ${s2.nodes} nodes scanned, ${found}/${U} wanted resolved, ${missing} missing (${(pass2Ms / 1000).toFixed(1)} s)`);
 
-  // ---- bbox filter ----
+  // ---- bbox / tile filter ----
   let inBox: Uint8Array | undefined;
   let count = W;
   if (opts.bbox) {
@@ -96,6 +100,22 @@ export function loadPbfWays(path: string, opts: LoadPbfOptions = {}): PbfWays {
       }
     }
     log(`bbox filter: ${count}/${W} ways touch [${opts.bbox.join(', ')}]`);
+  }
+  if (opts.tiles) {
+    const tiles = opts.tiles, zoom = opts.tileZoom ?? GRAPH_ZOOM;
+    const prev = inBox;
+    inBox = new Uint8Array(W);
+    count = 0;
+    for (let wi = 0; wi < W; wi++) {
+      if (prev && !prev[wi]) continue;
+      for (let i = wayStart[wi]; i < wayStart[wi + 1]; i++) {
+        const u = refIdx[i], x = lon[u], y = lat[u];
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        const [tx, ty] = lonLatToGraphTile(x, y, zoom);
+        if (tiles.has(`${tx}/${ty}`)) { inBox[wi] = 1; count++; break; }
+      }
+    }
+    log(`tile filter: ${count}/${W} ways touch ${tiles.size} z${zoom} tiles`);
   }
 
   return {

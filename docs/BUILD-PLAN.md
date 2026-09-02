@@ -73,6 +73,16 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   texture. Heat keeps its ramp and legend; the dim layer is the same ink at 0.50 (0.68 by day). Tokens live in
   `src/app/settings.ts` `NIGHT_RENDER`. The overlay is inserted before the first symbol layer AFTER the last fill (plain
   "first symbol" put it under the buildings in `dark`). Routes keep their daytime paint (white casing on navy).
+- **Satellite** ("Basemap: Map / Dark / Satellite", feedback-1 2026-09-02): Esri World Imagery raster tiles (256 px, maxzoom 19,
+  credit "Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community") composed at runtime with the
+  OpenFreeMap `bright` style's symbol layers (street/place/water names, white on a dark halo; POI/transit/one-way arrows dropped)
+  — `src/map/satellite.ts`; imagery alone until the bright JSON is in memory. Overlay between imagery and labels. Render preset
+  `SATELLITE_RENDER`: near-black fog (6,8,12) at 0.9× the user's strength (0.80 → 0.72 — the photo is much darker than the bright map,
+  so full strength turned unexplored blocks into a black hole while the cleared edge was already obvious), cleared ground shows the
+  photo untinted; heat dim 0.72. Chrome theme dark. Tiles cached by the SW (`satellite` runtime cache, 3000 entries / 30 days).
+- **Live fog** (feedback-1): the recorder checkpoints every 5 s when points arrived and reports the touched z14 tiles; the map
+  reloads only the overlay tiles in view that cover them (`map.refreshTiles`, `src/map/tile-ids.ts`), the old bitmap staying up until
+  the new one lands; Stop / import / delete still do the full version-bump reload.
 
 ### 2.3 Routing
 - Graph tiles (`graph-format.ts`) z12, directed arcs with per-direction mode bits; merged in-memory per request set
@@ -88,6 +98,15 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
 - Turn penalty (2026-09-02, sweep-tuned): walk/bike searches add 12 m-equivalent per direction change ≥ ~40° (arc-labelled exact A*,
   admissible); Direct (λ=0) is never penalised; drive 0; loops 0 by default (straight legs thin loops). Cost ≈ 2.2× per penalised search.
 - Loop ranking: by pctNew (ties → closest to target length); loop names 'Most new'/'Balanced' (UI shows Loop A/B/C). Snap origin/destination to the nearest arc (grid-bucketed), split virtually.
+- **Off the network (feedback-1, 2026-09-02):** a pin snaps to the nearest usable arc up to 5 km away and the route carries a straight
+  `offroad` part between the pin and the snap point ("you walk to the street"): counted in lengthM, scored by cells along the line
+  (6 m samples, same 8-neighbour rule as arcs), walked at 4.8 km/h in every mode, drawn dashed, noted on the sheet when ≥ 50 m. An end
+  is only *moved* into the other end's component within 300 m (the cemetery case). Ends the network cannot join — different components,
+  a one-way trap, or no arc within 5 km of one end — get ONE Direct candidate: streets from the origin to its component's node nearest
+  the destination, a `straight` gap to the destination component's node nearest that exit, streets from there (`gapCandidate`); the
+  gap goes at the mode's speed. `RouteCandidate.parts` carries the kinds; NoRouteError is gone. No tile at all still throws
+  NoCoverageError, and the sheet offers "Route anyway (straight line)" (`RouteApi.directLine`) next to the downloads. Fog clears
+  along straight parts only when the user records there — a route is a suggestion. Loops are unchanged (SnapError within 5 km).
 - Loop mode ("Explore from here", shipped 2026-09-02): heading fan of 8, 2 via-points on a circle of radius ~0.22·T, own-route arcs ×5, ±25 % length window, keep 3 best; UI chips 2/3/5/8 km + 1–15 km slider.
 - Budget: < 2 s for a 10 km city route on an iPhone; graphs never materialise per-edge objects.
 
@@ -132,6 +151,48 @@ Only zlib-compressed PBFs are supported (BBBike/Geofabrik default); re-encode ot
 `osmium cat in.pbf -o out.pbf --output-format pbf,pbf_compression=zlib`.
 Tests: `npx vitest run src/routing tools` — the Vancouver cross-check and the prebuilt-region sanity checks skip when the
 extract / `public/graph/<region>` is absent.
+
+#### Coverage v2 — North America graph packs + auto-fetch (2026-09-02)
+data's ruling: the app always has low-res data of the whole world (straight-line floor, separate lane) and gets the
+high-res graph of the places you are automatically — no clicks; at least North America. Runbook: `docs/coverage-runbook.md`.
+- **Packs** (`src/routing/pack-format.ts`, "UFP1"): one file per z6 cell = 32 B header + 16 B/tile index (tx, ty, offset,
+  length; Morton order so a 5×5 neighbourhood is a few byte runs) + the deflated UFG1 z12 tiles. Published as assets of
+  ONE GitHub release (`graphs-v1`, prerelease) with `packs-index.json` (cells → url, bytes, indexBytes, tiles, builtAt,
+  source, sha256) — the storage of record. **Release assets serve `Range` as 206 but carry no CORS headers** on either
+  hop (github.com 302 → release-assets.githubusercontent.com): headless Chromium on the app origin fails every fetch
+  (measured 2026-09-02). So the deploy workflow mirrors the cells in `tools/build-graph/pages-mirror.json` from the
+  release into the Pages site (`mirror-packs.mjs` → `/unfog/graph/packs/`, same origin, Range → 206 verified, nothing in
+  git; ≤ 950 MB per site — the full continent needs sibling Pages sites of the same account, same origin, data's call).
+  A client reads a pack's index with one range request (`bytes=0-<indexBytes-1>`) and then only the tiles it needs.
+  Prebuilt `public/graph/{nyc,vancouver,saltspring}` stay as offline-precached regions; packs are the universal layer beneath.
+- **Pipeline** (`tools/build-graph/build-continent.ts` → `dist/continent.js`, resumable, `state.json`): `fetch` (Geofabrik
+  state/province/country extracts, `curl -C -`, md5) → `build` (cli.js per extract in a child with heap = 12× PBF, `--jobs`)
+  → `borders` → `merge` → `pack` → `publish` (gh, per-file retries, index uploaded last).
+- **Border merge is a way-level union, not a tile union** (`merge-tiles.ts`): each build only knows the junctions with its own
+  extract's streets, so at a border WA emits a→c (skipping OR-only junction b) and OR emits a'→b (skipping WA-only junction
+  a) — no union of tiles contains a→b. Tiles emitted by ≥ 2 extracts (B) plus their 1-ring are rebuilt from the union of
+  the ways touching ring2 of them (every way is complete in some extract → exact junctions). merge-tiles.test.ts: Williamsburg
+  split into two complete-way halves — per-half border tiles ≠ full build, naive union has junction-skipping arcs, union
+  rebuild == full build byte for byte (z12 and z15).
+- **Client** (not wired yet): `src/routing/pack-source.ts` `PackSource` — packs-index cached in IndexedDB `unfog-packs`
+  (`meta`, refreshed after 24 h), pack indexes per cell, tiles by coalesced byte ranges (≤ 32 KB gaps share a request, 4 in
+  flight), cached in store `tiles` ("x/y", size, lastUsed); `tilesFor(bbox)` / `getTile` / `coverage` / `fetchTiles` /
+  `listCached` / `evict`; tolerates a server that ignores Range. `src/routing/prefetch.ts` — pure policy + `Prefetcher`:
+  position (or idle map centre) enters a new z12 tile → 5×5 ring, centre first, ≤ 25 tiles per round, ≥ 5 s between
+  rounds for the same centre, position fixes out-rank map pans for 60 s, never offline or on `navigator.connection.saveData`,
+  150 MB budget with LRU eviction that spares the current ring. Tests: pack-source.test.ts (format, range math, PackSource
+  over fake fetch + fake-indexeddb), prefetch.test.ts (ring, throttle, budget, priorities).
+- Measured (pilot WA/NY/BC/OR/NJ/ID): builds 16–55 s each, RSS 2–11× PBF, tile bytes 0.16–0.32× PBF → NA ≈ 2.5–3 GB of packs.
+
+**Integration checklist (next step; owner of tiles-source.ts / route.worker / Data screen):**
+1. `RouteEngine.init(baseUrl)`: construct `new PackSource({ indexUrl: packsIndexUrl(baseUrl) })` next to `TileSource`; `await packs.init()` (never throws; offline keeps the cached index). The index exists once deploy.yml's mirror step has run (needs the lead to commit the workflow change + pages-mirror.json).
+2. `TileSource.getTile` fallback order: memory → prebuilt region → downloaded area (IDB `unfog-graph`) → `packs.getTile(x, y)` (network only when online). Cheapest wiring: give `TileSource` an optional `fallback: { getTile(x, y): Promise<GraphTile | null> }` and call it where `tile` is still null before `remember()`. Merge `packs.perf` into the perf diagnostics.
+3. `coverage(bbox)`: `available` should count `packs.coverage(bbox).cached`, and a new field `packable` (tiles a pack covers but not yet cached) lets the route sheet say "downloading…" instead of "no coverage". NoCoverageError only when `available + packable === 0`.
+4. Route request path: before searching, `await packs.fetchTiles(tilesInBBox(ellipseBbox))` when online so a first route in a new city fetches its tiles (~25 tiles × 100–400 KB) in one coalesced round per pack.
+5. Prefetch driver (main thread, `src/app`): `const pf = new Prefetcher(packsProxy)`; on every accepted geolocation fix `pf.notify(lon, lat, 'position')`; on map `moveend` while not recording `pf.notify(centre, 'map')`; every 10 s (and on `online`) `pf.tick(browserEnv())`. The worker owns IndexedDB, so expose `hasTile/fetchTiles/listCached/evict` on `RouteApi` (Comlink) or run the Prefetcher inside the worker with the env posted from the main thread.
+6. Data screen ("Routing data"): "Automatic — the streets around you download as you go (Wi-Fi and mobile; paused on Low Data Mode)"; list `packs.listCached()` grouped by cell/city with sizes and a "Clear" (`packs.clear()`); keep the Regions list (prebuilt) and Downloaded areas (Overpass) sections as they are; show `packs.indexAgeMs` as "coverage list updated N h ago".
+7. Service worker: leave github.com out of runtime caching (IndexedDB holds the tiles); the packs-index URL must be fetched with `cache: 'no-cache'` (PackSource already does).
+8. Straight-line floor stays the fallback when `tilesFor` returns nothing and `packable === 0`.
 
 ### 2.5 Imports / exports
 - FoW: `src/import/fow.ts` — accept .zip (any nesting; match tile files by NAME pattern; skip `.`/`__MACOSX`/`FoW-Sync-Lock`), bare tile
