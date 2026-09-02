@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="4"/></filter>
+    <linearGradient id="fog" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f3f5fa" stop-opacity="0.97"/>
+      <stop offset="1" stop-color="#b9c1d3" stop-opacity="0.3"/>
+    </linearGradient>
+    <clipPath id="r"><rect width="64" height="64" rx="14"/></clipPath>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#10141e"/>
+  <g clip-path="url(#r)">
+    <g transform="rotate(-29 32 32)" stroke="#39425a" stroke-width="1.2" stroke-linecap="round">
+      <path d="M-8 -20V84M0 -20V84M8 -20V84M16 -20V84M24 -20V84M32 -20V84M40 -20V84M48 -20V84M56 -20V84M64 -20V84M72 -20V84"/>
+      <path d="M-20 -8H84M-20 0H84M-20 8H84M-20 16H84M-20 24H84M-20 32H84M-20 40H84M-20 48H84M-20 56H84M-20 64H84M-20 72H84"/>
+    </g>
+    <g transform="rotate(-29 32 32)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 48H32V40H48V32H60" stroke="#ffffff" stroke-width="3.6"/>
+      <path d="M12 48H32V40H48V32H60" stroke="#ff8a3d" stroke-width="2.2"/>
+    </g>
+    <g filter="url(#soft)" fill="url(#fog)">
+      <ellipse cx="17" cy="16" rx="36" ry="26"/>
+      <ellipse cx="2" cy="42" rx="18" ry="14" opacity="0.8"/>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Unfog app icon: a fog bank lifting off a street grid, one glowing new route. No text. -->
+  <defs>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="34"/></filter>
+    <filter id="edge" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="14"/></filter>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="9"/></filter>
+    <linearGradient id="fog" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#f6f7fb" stop-opacity="1"/>
+      <stop offset="0.6" stop-color="#dfe3ec" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#c4cbda" stop-opacity="0.55"/>
+    </linearGradient>
+    <clipPath id="sq"><rect width="512" height="512"/></clipPath>
+  </defs>
+  <rect width="512" height="512" fill="#10141e"/>
+  <g clip-path="url(#sq)">
+    <!-- street grid (rotated like Williamsburg's) -->
+    <g transform="rotate(-32 256 256)" stroke="#2f374b" stroke-width="7" stroke-linecap="round">
+      <path d="M-64 -160V672M0 -160V672M64 -160V672M128 -160V672M192 -160V672M256 -160V672M320 -160V672M384 -160V672M448 -160V672M512 -160V672M576 -160V672"/>
+      <path d="M-160 -64H672M-160 0H672M-160 64H672M-160 128H672M-160 192H672M-160 256H672M-160 320H672M-160 384H672M-160 448H672M-160 512H672M-160 576H672"/>
+    </g>
+    <g transform="rotate(-32 256 256)" stroke="#414b63" stroke-width="9" stroke-linecap="round">
+      <path d="M192 -160V672M-160 320H672"/>
+    </g>
+    <!-- the new route -->
+    <g transform="rotate(-32 256 256)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M64 384H256V320H384V256H480" stroke="#ff8a3d" stroke-width="32" opacity="0.8" filter="url(#glow)"/>
+      <path d="M64 384H256V320H384V256H480" stroke="#ffffff" stroke-width="20"/>
+      <path d="M64 384H256V320H384V256H480" stroke="#ff8a3d" stroke-width="12.5"/>
+      <circle cx="480" cy="256" r="14" fill="#ff8a3d" stroke="#ffffff" stroke-width="6"/>
+    </g>
+    <!-- fog bank: dense top-left, dissolving towards the route -->
+    <g filter="url(#soft)" fill="url(#fog)">
+      <path d="M-60 -60H330c40 0 70 40 40 90-30 45-110 60-140 120-30 65-100 90-170 80-60-10-100 20-120 60V-60Z"/>
+      <ellipse cx="60" cy="60" rx="230" ry="150"/>
+      <ellipse cx="300" cy="-30" rx="230" ry="110"/>
+    </g>
+    <!-- curling wisps at the fog's edge (lifting off) -->
+    <g fill="none" stroke="#f6f7fb" stroke-linecap="round" filter="url(#edge)">
+      <path d="M312 150c46-40 96-8 76 34-14 30-58 30-70 4" stroke-width="22" opacity="0.85"/>
+      <path d="M120 292c-40-42 4-96 52-78 32 12 36 52 4 66" stroke-width="20" opacity="0.8"/>
+      <path d="M232 250c26-22 58-10 56 16" stroke-width="16" opacity="0.6"/>
+    </g>
+  </g>
+</svg>

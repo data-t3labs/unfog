@@ -1,0 +1,142 @@
+/**
+ * App settings: persisted in localStorage, observable. Render-related settings are turned into
+ * the RenderSettings the grid worker consumes (see ../grid/api.ts).
+ */
+import { DEFAULT_RENDER_SETTINGS, type RenderSettings } from '../grid/api';
+
+export type Basemap = 'bright' | 'dark';
+export type Units = 'metric' | 'imperial';
+export type OverlayLayer = 'fog' | 'heat' | 'off';
+
+export interface AppSettings {
+  basemap: Basemap;
+  units: Units;
+  layer: OverlayLayer;
+  /** Wide-feather sigma in cells, 2..6 (default 4.5). */
+  feather: number;
+  /** Halo strength 0..0.8 (default 0.65). */
+  halo: number;
+  /** 1 = cell + neighbours (~20 m core), 0 = the cell only (tight). */
+  coreRadius: 0 | 1;
+  /** Fog strength over never-visited ground, 0.5..0.95. */
+  fogAlpha: number;
+}
+
+const KEY = 'unfog.settings';
+
+export const DEFAULT_SETTINGS: AppSettings = {
+  basemap: 'bright',
+  units: 'metric',
+  layer: 'fog',
+  feather: DEFAULT_RENDER_SETTINGS.feather,
+  halo: DEFAULT_RENDER_SETTINGS.halo,
+  coreRadius: DEFAULT_RENDER_SETTINGS.coreRadius,
+  fogAlpha: DEFAULT_RENDER_SETTINGS.fogAlpha,
+};
+
+type Listener = (s: AppSettings, changed: Array<keyof AppSettings>) => void;
+const listeners = new Set<Listener>();
+let current: AppSettings = load();
+
+function load(): AppSettings {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return { ...DEFAULT_SETTINGS };
+    const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    return sanitize({ ...DEFAULT_SETTINGS, ...parsed });
+  } catch {
+    return { ...DEFAULT_SETTINGS };
+  }
+}
+
+function clamp(v: unknown, lo: number, hi: number, dflt: number): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : dflt;
+  return Math.min(hi, Math.max(lo, n));
+}
+
+function sanitize(s: AppSettings): AppSettings {
+  return {
+    basemap: s.basemap === 'dark' ? 'dark' : 'bright',
+    units: s.units === 'imperial' ? 'imperial' : 'metric',
+    layer: s.layer === 'heat' || s.layer === 'off' ? s.layer : 'fog',
+    feather: clamp(s.feather, 2, 6, DEFAULT_SETTINGS.feather),
+    halo: clamp(s.halo, 0, 0.8, DEFAULT_SETTINGS.halo),
+    coreRadius: s.coreRadius === 0 ? 0 : 1,
+    fogAlpha: clamp(s.fogAlpha, 0.5, 0.95, DEFAULT_SETTINGS.fogAlpha),
+  };
+}
+
+export function getSettings(): AppSettings {
+  return current;
+}
+
+export function updateSettings(patch: Partial<AppSettings>): AppSettings {
+  const next = sanitize({ ...current, ...patch });
+  const changed = (Object.keys(next) as Array<keyof AppSettings>).filter((k) => next[k] !== current[k]);
+  if (changed.length === 0) return current;
+  current = next;
+  try {
+    localStorage.setItem(KEY, JSON.stringify(current));
+  } catch {
+    /* private mode / quota — settings just don't persist */
+  }
+  for (const l of listeners) l(current, changed);
+  return current;
+}
+
+export function onSettingsChange(l: Listener): () => void {
+  listeners.add(l);
+  return () => listeners.delete(l);
+}
+
+/** Keys whose change requires re-rendering the overlay tiles. */
+export const RENDER_KEYS: ReadonlyArray<keyof AppSettings> = ['basemap', 'feather', 'halo', 'coreRadius', 'fogAlpha'];
+
+/** The RenderSettings handed to grid.renderTile for the current settings. */
+export function renderSettings(s: AppSettings = current): RenderSettings {
+  if (s.basemap === 'dark') {
+    // Over a dark basemap the fog is a light veil (as in the mockup's dark variant).
+    return {
+      ...DEFAULT_RENDER_SETTINGS,
+      fogColor: [205, 208, 218],
+      fogAlpha: Math.round(s.fogAlpha * 0.7 * 100) / 100,
+      feather: s.feather,
+      halo: s.halo,
+      coreRadius: s.coreRadius,
+      heatDim: 0.55,
+    };
+  }
+  return {
+    ...DEFAULT_RENDER_SETTINGS,
+    fogAlpha: s.fogAlpha,
+    feather: s.feather,
+    halo: s.halo,
+    coreRadius: s.coreRadius,
+  };
+}
+
+/** Small typed helpers for other localStorage-backed state (camera, backup dates, sessions). */
+export function readJSON<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function writeJSON(key: string, value: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function removeKey(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}

@@ -6,3 +6,4 @@ dev-dist/
 tools/build-graph/cache/
 test-results/
 playwright-report/
+tests/e2e/screenshots/
