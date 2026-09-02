@@ -20,6 +20,26 @@
     "bytes": 16823605
   },
   {
+    "id": "saltspring",
+    "name": "Salt Spring Island",
+    "zoom": 12,
+    "bbox": [
+      -123.62,
+      48.72,
+      -123.4,
+      48.9
+    ],
+    "builtAt": "2026-09-02T18:05:23.687Z",
+    "source": "Overpass (overpass-api.de) 2026-09-02",
+    "stats": {
+      "nodes": 2675,
+      "arcs": 6168,
+      "km": 718.4
+    },
+    "tileCount": 15,
+    "bytes": 277358
+  },
+  {
     "id": "vancouver",
     "name": "Metro Vancouver",
     "zoom": 12,
