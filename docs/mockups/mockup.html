@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Unfog mockup</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.9.0/dist/maplibre-gl.css">
+<style>
+  :root {
+    --bg: rgba(22, 23, 28, 0.86);
+    --bg-solid: #17181d;
+    --bg-2: rgba(38, 39, 46, 0.9);
+    --fg: #f4f4f6;
+    --fg-2: #a4a6ad;
+    --fg-3: #6d6f78;
+    --line: rgba(255,255,255,0.10);
+    --accent: #ff8a3d;
+    --accent-2: #ffc857;
+    --accent-3: #7fb2ff;
+    --blue: #0a84ff;
+    --red: #ff453a;
+    --radius: 14px;
+    --sb: 54px;      /* status bar height */
+    --home: 34px;    /* home indicator inset */
+  }
+  html.light {
+    --bg: rgba(250, 250, 252, 0.88);
+    --bg-solid: #fafafc;
+    --bg-2: rgba(232, 233, 238, 0.9);
+    --fg: #1a1b20;
+    --fg-2: #5c5e66;
+    --fg-3: #8e9099;
+    --line: rgba(0,0,0,0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased; color: var(--fg); }
+  #phone { position: relative; width: 393px; height: 852px; overflow: hidden; background: #0d0f14; }
+  #map { position: absolute; inset: 0; }
+  .maplibregl-ctrl-attrib { display: none; }
+
+  /* status bar + dynamic island */
+  #status { position: absolute; top: 0; left: 0; right: 0; height: var(--sb); z-index: 20;
+    display: flex; align-items: flex-end; justify-content: space-between; padding: 0 30px 12px 34px;
+    font-size: 16px; font-weight: 600; letter-spacing: -0.2px; pointer-events: none; }
+  #status .right { display: flex; gap: 6px; align-items: center; }
+  #island { position: absolute; top: 11px; left: 50%; transform: translateX(-50%); width: 125px; height: 37px;
+    background: #000; border-radius: 20px; z-index: 21; }
+
+  /* top chrome */
+  #top { position: absolute; top: var(--sb); left: 0; right: 0; padding: 8px 16px 0; z-index: 10;
+    display: flex; flex-direction: column; gap: 10px; }
+  .search { display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 14px;
+    background: var(--bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-radius: var(--radius); box-shadow: 0 4px 16px rgba(0,0,0,0.25); font-size: 17px; }
+  .search .ph { color: var(--fg-2); flex: 1; }
+  .search .val { color: var(--fg); flex: 1; font-weight: 500; }
+  .search svg { flex: none; }
+  .row { display: flex; justify-content: space-between; align-items: flex-start; }
+  .seg { display: inline-flex; background: var(--bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-radius: 11px; padding: 3px; box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
+  .seg button { appearance: none; border: 0; background: transparent; color: var(--fg-2); font: inherit;
+    font-size: 13px; font-weight: 600; padding: 7px 12px; border-radius: 9px; }
+  .seg button.on { background: var(--bg-2); color: var(--fg); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+  html.light .seg button.on { background: #fff; }
+  .legend { display: flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px; border-radius: 10px; font-size: 12px; font-weight: 600;
+    background: var(--bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-left: 4px; }
+  .legend .lbl { color: var(--fg-2); font-weight: 500; margin-right: 2px; }
+  .fab { width: 44px; height: 44px; border-radius: 12px; background: var(--bg); backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px); box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    display: flex; align-items: center; justify-content: center; }
+
+  /* bottom chrome */
+  #bottom { position: absolute; left: 0; right: 0; bottom: 0; z-index: 10; }
+  .float { position: absolute; bottom: calc(var(--home) + 50px + 12px); left: 16px; right: 16px;
+    display: flex; justify-content: space-between; align-items: flex-end; }
+  .chip { background: var(--bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    border-radius: 12px; padding: 10px 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.25); }
+  .chip .big { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+  .chip .sub { font-size: 12px; color: var(--fg-2); margin-top: 2px; }
+  .record { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 16px 0 14px;
+    border-radius: 22px; background: var(--bg); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25); font-size: 15px; font-weight: 600; }
+  .record .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--red);
+    box-shadow: 0 0 0 3px rgba(255,69,58,0.25); }
+  .tabs { height: calc(50px + var(--home)); padding: 6px 8px var(--home); display: flex;
+    background: var(--bg); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+    border-top: 1px solid var(--line); }
+  .tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; color: var(--fg-3);
+    font-size: 10px; font-weight: 500; }
+  .tab.on { color: var(--fg); }
+
+  /* route sheet */
+  .sheet { background: var(--bg-solid); border-radius: 18px 18px 0 0; padding: 8px 16px var(--home);
+    box-shadow: 0 -8px 32px rgba(0,0,0,0.35); }
+  .grab { width: 36px; height: 5px; border-radius: 3px; background: var(--fg-3); opacity: .5; margin: 0 auto 12px; }
+  .sheet h2 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.4px; display: flex; align-items: baseline; gap: 8px; }
+  .sheet h2 small { font-size: 13px; font-weight: 500; color: var(--fg-2); }
+  .modes { display: flex; gap: 8px; margin: 12px 0 14px; }
+  .modes button { appearance: none; border: 0; background: var(--bg-2); color: var(--fg-2); font: inherit;
+    font-size: 14px; font-weight: 600; padding: 8px 14px; border-radius: 20px; display: flex; gap: 6px; align-items: center; }
+  .modes button.on { background: var(--fg); color: var(--bg-solid); }
+  .slider { display: flex; align-items: center; justify-content: space-between; font-size: 13px; color: var(--fg-2); margin-bottom: 6px; }
+  .slider b { color: var(--fg); font-weight: 600; }
+  .track { position: relative; height: 4px; border-radius: 2px; background: var(--bg-2); margin: 8px 0 16px; }
+  .track .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 25%; background: var(--fg); border-radius: 2px; }
+  .track .thumb { position: absolute; left: 25%; top: 50%; width: 26px; height: 26px; margin: -13px 0 0 -13px; border-radius: 50%;
+    background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.35); }
+  .cands { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .cand { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; }
+  .cand.on { background: var(--bg-2); }
+  .cand .sw { width: 14px; height: 14px; border-radius: 4px; flex: none; }
+  .cand .t { flex: 1; }
+  .cand .name { font-size: 16px; font-weight: 600; }
+  .cand .st { font-size: 13px; color: var(--fg-2); margin-top: 1px; }
+  .cand .new { font-size: 15px; font-weight: 700; text-align: right; }
+  .cand .new small { display: block; font-size: 11px; font-weight: 500; color: var(--fg-2); }
+  .go { display: flex; align-items: center; justify-content: center; height: 50px; border-radius: 14px;
+    background: var(--accent); color: #1a0d05; font-size: 17px; font-weight: 700; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="phone">
+  <div id="map"></div>
+
+  <div id="island"></div>
+  <div id="status">
+    <span>9:41</span>
+    <span class="right">
+      <svg width="18" height="12" viewBox="0 0 18 12" fill="currentColor"><rect x="0" y="8" width="3" height="4" rx=".8"/><rect x="5" y="5.5" width="3" height="6.5" rx=".8"/><rect x="10" y="3" width="3" height="9" rx=".8"/><rect x="15" y="0" width="3" height="12" rx=".8"/></svg>
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="currentColor"><path d="M8 11.5a1.4 1.4 0 1 0 0-2.8 1.4 1.4 0 0 0 0 2.8Zm-3.2-3.6a4.6 4.6 0 0 1 6.4 0l-1.1 1.1a3 3 0 0 0-4.2 0l-1.1-1.1Zm-2.6-2.6a8.2 8.2 0 0 1 11.6 0l-1.1 1.1a6.6 6.6 0 0 0-9.4 0L2.2 5.3ZM-.3 2.8a11.8 11.8 0 0 1 16.6 0l-1.1 1.1a10.2 10.2 0 0 0-14.4 0L-.3 2.8Z"/></svg>
+      <svg width="27" height="13" viewBox="0 0 27 13" fill="none"><rect x=".5" y=".5" width="23" height="12" rx="3.5" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="20" height="9" rx="2" fill="currentColor"/><path d="M25 4.5v4a2 2 0 0 0 0-4Z" fill="currentColor" opacity=".4"/></svg>
+    </span>
+  </div>
+
+  <div id="top">
+    <div class="search" id="search">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <span class="ph" id="searchText">Where to?</span>
+    </div>
+    <div class="row">
+      <div></div>
+      <div style="display:flex;flex-direction:column;gap:10px;align-items:flex-end">
+        <div class="seg" id="seg"><button data-v="fog">Fog</button><button data-v="heat">Heat</button><button data-v="off">Off</button></div>
+        <div class="legend hidden" id="legend"><span class="lbl">visits</span><i style="background:#ffc65a"></i>1<i style="background:#ff9a3c"></i>2–3<i style="background:#ff5e3a"></i>4–6<i style="background:#ff2d55"></i>7+</div>
+        <div class="fab" id="locate">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3 10.5 13.5M21 3l-7 18-3.5-7.5L3 10l18-7Z"/></svg>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="bottom">
+    <div class="float" id="float">
+      <div class="chip"><div class="big" id="area">—</div><div class="sub">explored · <span id="newwk">—</span> new this week</div></div>
+      <div class="record"><span class="dot"></span>Record</div>
+    </div>
+    <div class="sheet hidden" id="sheet">
+      <div class="grab"></div>
+      <h2>Domino Park <small id="direct">—</small></h2>
+      <div class="modes">
+        <button class="on">Walk</button><button>Bike</button><button>Drive</button>
+      </div>
+      <div class="slider"><span>Detour budget</span><span><b>+25%</b> · up to <span id="budget">—</span></span></div>
+      <div class="track"><div class="fill"></div><div class="thumb"></div></div>
+      <div class="cands" id="cands"></div>
+      <div class="go">Go</div>
+    </div>
+    <div class="tabs" id="tabs">
+      <div class="tab on"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></svg>Map</div>
+      <div class="tab"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/></svg>Stats</div>
+      <div class="tab"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>Data</div>
+      <div class="tab"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5V14M12 17h.01"/></svg>Help</div>
+    </div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.9.0/dist/maplibre-gl.js"></script>
+<script src="mock.js"></script>
+</body>
+</html>

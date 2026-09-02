@@ -13,7 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "build-graph": "node tools/build-graph/cli.mjs"
+    "build-graph": "vite build --config tools/build-graph/vite.config.ts && node tools/build-graph/dist/cli.js"
   },
   "dependencies": {
     "cheap-ruler": "^4.1.0",
