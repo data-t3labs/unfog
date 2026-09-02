@@ -132,7 +132,7 @@ describe.skipIf(regions.length === 0)('prebuilt graph regions (skipped when publ
         // regions legitimately carry many small components (trails, private roads, bbox-edge
         // fragments of neighbouring islands) — Salt Spring measured walk 0.72 / bike 0.71 / drive
         // 0.78 across 35 components on 2026-09-02; its bar guards against a real regression only.
-        const minimum = region === 'saltspring' ? { walk: 0.65, other: 0.6 } : { walk: 0.85, other: 0.75 };
+        const minimum = manifest.id === 'saltspring' ? { walk: 0.65, other: 0.6 } : { walk: 0.85, other: 0.75 };
         expect(conn.walk.pct, 'walk').toBeGreaterThanOrEqual(minimum.walk);
         for (const m of ['bike', 'drive'] as const) expect(conn[m].pct, m).toBeGreaterThanOrEqual(minimum.other);
         expect(conn.walk.glueArcs).toBeGreaterThan(0);
