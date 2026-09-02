@@ -1,0 +1,60 @@
+<!doctype html>
+<!-- Source for the Open Graph card. Rendered to public/og.jpg (1200×630) by `node tests/e2e/landing/capture.mjs og`.
+     Not a build entry; only the rendered JPEG ships. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Unfog OG card</title>
+  <style>
+    @font-face { font-family: 'Fraunces'; font-weight: 100 900; font-display: block; src: url('fonts/fraunces-latin-opsz.woff2') format('woff2'); }
+    @font-face { font-family: 'Instrument Sans'; font-weight: 400 700; font-display: block; src: url('fonts/instrument-sans-latin-wght.woff2') format('woff2'); }
+    html, body { margin: 0; }
+    body { width: 1200px; height: 630px; overflow: hidden; background: #10141e; color: #eef0f4; font-family: 'Instrument Sans', -apple-system, sans-serif; position: relative; }
+    .grid { position: absolute; inset: 0; opacity: 0.55;
+      background-image: linear-gradient(#232a3a 1px, transparent 1px), linear-gradient(90deg, #232a3a 1px, transparent 1px);
+      background-size: 72px 72px; transform: rotate(-32deg) scale(1.6); transform-origin: 50% 50%; }
+    .fogbank { position: absolute; left: -120px; top: -160px; width: 900px; height: 520px; border-radius: 50%;
+      background: radial-gradient(closest-side, rgba(238,240,244,0.55), rgba(238,240,244,0.18) 55%, rgba(238,240,244,0) 100%); filter: blur(18px); }
+    .copy { position: absolute; left: 72px; top: 96px; width: 640px; }
+    .mark { display: flex; align-items: center; gap: 14px; font: 600 28px/1 'Fraunces', Georgia, serif; letter-spacing: -0.01em; }
+    .mark svg { width: 40px; height: 40px; border-radius: 10px; }
+    h1 { margin: 44px 0 0; font: 500 74px/1.02 'Fraunces', Georgia, serif; font-variation-settings: 'opsz' 144; letter-spacing: -0.02em; }
+    h1 span { color: #98a0b3; }
+    p { margin: 28px 0 0; font-size: 26px; line-height: 1.4; color: #c3c8d4; max-width: 600px; }
+    .url { position: absolute; left: 72px; bottom: 56px; font-size: 22px; color: #98a0b3; letter-spacing: 0.01em; }
+    .url b { color: #ff8a3d; font-weight: 600; }
+    .phone { position: absolute; right: 88px; top: 70px; width: 300px; padding: 10px; border-radius: 46px; background: #2a3142; box-shadow: 0 40px 80px -30px rgba(0,0,0,0.9); }
+    .phone img { display: block; width: 100%; aspect-ratio: 393 / 852; object-fit: cover; border-radius: 36px; }
+  </style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="fogbank"></div>
+  <div class="copy">
+    <div class="mark">
+      <svg viewBox="0 0 512 512" aria-hidden="true">
+        <rect width="512" height="512" fill="#10141e"/>
+        <g transform="rotate(-32 256 256)" stroke="#2f374b" stroke-width="7" stroke-linecap="round">
+          <path d="M-64 -160V672M0 -160V672M64 -160V672M128 -160V672M192 -160V672M256 -160V672M320 -160V672M384 -160V672M448 -160V672M512 -160V672M576 -160V672"/>
+          <path d="M-160 -64H672M-160 0H672M-160 64H672M-160 128H672M-160 192H672M-160 256H672M-160 320H672M-160 384H672M-160 448H672M-160 512H672M-160 576H672"/>
+        </g>
+        <g transform="rotate(-32 256 256)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M64 384H256V320H384V256H480" stroke="#ffffff" stroke-width="22"/>
+          <path d="M64 384H256V320H384V256H480" stroke="#ff8a3d" stroke-width="13"/>
+          <circle cx="480" cy="256" r="16" fill="#ff8a3d" stroke="#ffffff" stroke-width="6"/>
+        </g>
+        <g fill="#eef0f4" opacity="0.92">
+          <ellipse cx="90" cy="70" rx="230" ry="140"/>
+          <ellipse cx="300" cy="-40" rx="230" ry="120"/>
+          <ellipse cx="40" cy="250" rx="140" ry="90"/>
+        </g>
+      </svg>
+      Unfog
+    </div>
+    <h1>Lift the fog.<br><span>Then go somewhere new.</span></h1>
+    <p>Your Fog of World map, plus routes through streets you have never walked. On your iPhone, on-device.</p>
+  </div>
+  <div class="url">data-t3labs.github.io/<b>unfog</b></div>
+  <div class="phone"><img src="img/route.jpg" alt=""></div>
+</body>
+</html>

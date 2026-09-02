@@ -7,7 +7,14 @@ Fog of World history, shows where you've been as soft fog or a heat glow, and â€
 you to a destination through as much never-visited street as possible within a detour budget you
 choose. Everything stays on your device.
 
-Live: https://data-t3labs.github.io/unfog/
+Live: https://data-t3labs.github.io/unfog/ Â· About page: https://data-t3labs.github.io/unfog/welcome/
+
+| Fog | Heat | Route |
+|---|---|---|
+| ![Fog view](welcome/img/fog.jpg) | ![Heat view](welcome/img/heat.jpg) | ![Route sheet](welcome/img/route.jpg) |
+
+Screenshots are the real app over sample walks in Williamsburg, Brooklyn (captured by
+`tests/e2e/landing/capture.mjs`).
 
 ## Features
 
