@@ -12,7 +12,7 @@ import { initPwa } from './app/pwa';
 import { createRecordUI } from './app/record-ui';
 import { createRouteSheet } from './app/route-sheet';
 import { createSearch } from './app/search';
-import { RENDER_KEYS, getSettings, onSettingsChange, renderSettings, updateSettings } from './app/settings';
+import { RENDER_KEYS, getSettings, onSettingsChange, renderSettings, updateSettings, type Basemap } from './app/settings';
 import { createShell } from './app/shell';
 import { createStatsScreen } from './app/stats';
 import { el, toast } from './app/ui';
@@ -37,6 +37,9 @@ declare global {
   }
 }
 
+/** Chrome theme per basemap: light on the bright map, dark over the night map and over imagery. */
+const chromeTheme = (b: Basemap): 'light' | 'dark' => (b === 'bright' ? 'light' : 'dark');
+
 async function boot(): Promise<void> {
   const mount = document.getElementById('app');
   if (!mount) throw new Error('#app missing');
@@ -49,7 +52,7 @@ async function boot(): Promise<void> {
 
   const engines = await loadEngines({ forceMock, center: savedCenter() ?? DEFAULT_CENTER, baseUrl: import.meta.env.BASE_URL });
   const shell = createShell(mount);
-  shell.setTheme(settings0.basemap === 'dark' ? 'dark' : 'light');
+  shell.setTheme(chromeTheme(settings0.basemap));
   shell.setLayer(settings0.layer);
 
   const map = new UnfogMap({
@@ -60,7 +63,17 @@ async function boot(): Promise<void> {
     layer: settings0.layer,
   });
   const locationMgr = new LocationManager();
-  const recordHooks: RecorderEvents = { onUpdate() {}, onWakeLock() {} };
+  const recordHooks: RecorderEvents = {
+    onUpdate() {},
+    onWakeLock() {},
+    // A checkpoint wrote cells: re-render the touched overlay tiles in view, drop the route
+    // worker's novelty scores, and keep the stat chip honest — live, not on Stop.
+    onData(r) {
+      map.refreshOverlay(r.touched);
+      engines.route.invalidateCells(r.stats.version).catch((e: unknown) => console.warn('[unfog] invalidateCells failed', e));
+      void refreshStatChip();
+    },
+  };
   const recorder = new Recorder(engines.grid, locationMgr, recordHooks);
   pwa.isRecording = () => recorder.status === 'recording'; // an app update is never applied mid-walk
 
@@ -164,7 +177,7 @@ async function boot(): Promise<void> {
   });
   onSettingsChange((s, changed) => {
     if (changed.includes('basemap')) {
-      shell.setTheme(s.basemap === 'dark' ? 'dark' : 'light');
+      shell.setTheme(chromeTheme(s.basemap));
       map.setBasemap(s.basemap);
     } else if (changed.some((k) => RENDER_KEYS.includes(k))) {
       map.bumpOverlay();

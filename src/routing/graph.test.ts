@@ -182,32 +182,46 @@ describe('Graph (single tile)', () => {
       const res = findCandidates(graph, new MapCellLookup(), { from, to: p, mode, detour: 0.25 });
       const direct = res.candidates[res.candidates.length - 1];
       expect(direct.name).toBe('Direct');
-      const end = direct.coords[direct.coords.length - 1];
-      expect(end[1]).toBeCloseTo(A[1], 7); // on A—B
-      expect(res.shortestM).toBe(100); // 50 m up D—A, 50 m along A—B
+      // The street part ends on A—B; the last 15 m to the pin are an off-road part (feedback-1).
+      const parts = direct.parts!;
+      expect(parts.map((q) => q.kind)).toEqual(['street', 'offroad']);
+      const streetEnd = parts[0].coords[parts[0].coords.length - 1];
+      expect(streetEnd[1]).toBeCloseTo(A[1], 7); // on A—B
+      expect(direct.coords[direct.coords.length - 1]).toEqual(p);
+      expect(res.shortestM).toBe(115); // 50 m up D—A, 50 m along A—B, 15 m to the pin
     }
     // Symmetric: the origin near the island moves too.
     const back = findCandidates(graph, new MapCellLookup(), { from: p, to: from, mode: 'walk', detour: 0.25 });
-    expect(back.shortestM).toBe(100);
+    expect(back.shortestM).toBe(115);
+    expect(back.candidates[0].parts!.map((q) => q.kind)).toEqual(['offroad', 'street']);
     // Both ends on the island: same component, nothing moves, the trip runs along it.
     const along = findCandidates(graph, new MapCellLookup(), { from: [E[0] + DLON * 0.02, E[1]], to: [G[0] - DLON * 0.02, G[1]], mode: 'walk', detour: 0.25 });
     expect(along.shortestM).toBe(36);
   });
 
-  it('no route at all rejects with NoRouteError naming the mode, never an empty candidate list', () => {
+  it('no path for the mode → one Direct candidate with a straight gap, never an error or an empty list (feedback-1 item 3)', () => {
     const { graph, lookup } = build();
     // A→B is oneway and C↔D is a stair: a car near B's end of A—B cannot reach A's end.
     const from: [number, number] = [A[0] + DLON * 0.9, A[1]], to: [number, number] = [A[0] + DLON * 0.1, A[1]];
-    const drive = () => findCandidates(graph, lookup, { from, to, mode: 'drive', detour: 0.25 });
-    expect(drive).toThrow(/^No driving route found between these points\. Try walk or bike, or move the pin\.$/);
-    let err: Error | undefined;
-    try { drive(); } catch (e) { err = e as Error; }
-    expect(err?.name).toBe('NoRouteError');
-    // Walking is fine (B→A allows it); the other modes' messages read the same way.
-    expect(findCandidates(graph, lookup, { from, to, mode: 'walk', detour: 0.25 }).shortestM).toBe(80);
+    const drive = findCandidates(graph, lookup, { from, to, mode: 'drive', detour: 0.25 });
+    expect(drive.candidates.map((c) => c.name)).toEqual(['Direct']);
+    const d = drive.candidates[0];
+    expect(d.parts?.some((p) => p.kind === 'straight')).toBe(true);
+    // The gap is the 80 m between the pins, as the crow flies; the line runs pin to pin.
+    expect(d.lengthM).toBeGreaterThanOrEqual(79);
+    expect(d.lengthM).toBeLessThanOrEqual(81);
+    expect(d.coords[0]).toEqual(from);
+    expect(d.coords[d.coords.length - 1]).toEqual(to);
+    expect(drive.shortestM).toBe(d.lengthM);
+    expect(d.etaMin).toBe(Math.round((d.lengthM / 1000 / 30) * 60));
+    // Walking is fine (B→A allows it): all street, no gap.
+    const walk = findCandidates(graph, lookup, { from, to, mode: 'walk', detour: 0.25 });
+    expect(walk.shortestM).toBe(80);
+    expect(walk.candidates[walk.candidates.length - 1].parts?.every((p) => p.kind === 'street')).toBe(true);
     const bikeOnly = { ...square, arcFlags: square.arcFlags.map((f, i) => (i === CD || i === DC ? ArcFlag.DRIVE : f)) };
     const g2 = new Graph([decodeGraphTile(encodeGraphTile(bikeOnly))]);
-    expect(() => findCandidates(g2, lookup, { from, to, mode: 'bike', detour: 0.25 })).toThrow(/^No cycling route found between these points\. Try walk or drive, or move the pin\.$/);
+    const bike = findCandidates(g2, lookup, { from, to, mode: 'bike', detour: 0.25 });
+    expect(bike.candidates[0].parts?.some((p) => p.kind === 'straight')).toBe(true);
   });
 
   it('walk ignores the oneway, drive and bike respect it, dismount costs ×3 but not in length, and the ETA walks it', () => {

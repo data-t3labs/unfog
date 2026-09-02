@@ -80,6 +80,23 @@ export class NoveltyScorer {
   }
 }
 
+/**
+ * Never-visited fraction of a straight lon/lat line, sampled every SAMPLE_M like an arc — for the
+ * off-road and straight-gap parts of a route (src/routing/api.ts RoutePart).
+ */
+export function lineNovelty(a: readonly [number, number], b: readonly [number, number], lookup: CellLookup): number {
+  const d = distanceM(a[0], a[1], b[0], b[1]);
+  const [x0, y0] = lonLatToWorld(a[0], a[1]);
+  const [x1, y1] = lonLatToWorld(b[0], b[1]);
+  const n = Math.max(1, Math.ceil(d / SAMPLE_M));
+  let unseen = 0;
+  for (let t = 0; t <= n; t++) {
+    const x = x0 + ((x1 - x0) * t) / n, y = y0 + ((y1 - y0) * t) / n;
+    if (!seen(lookup, x, y)) unseen++;
+  }
+  return unseen / (n + 1);
+}
+
 /** Cell at fractional world coords (or any 8-neighbour) has a visit. */
 function seen(lookup: CellLookup, x: number, y: number): boolean {
   const cx = Math.floor(x), cy = Math.floor(y);

@@ -35,7 +35,7 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
   function renderSettings(): void {
     const s = getSettings();
     settingsBody.replaceChildren(
-      segRow('Basemap', [['bright', 'Bright'], ['dark', 'Dark']], s.basemap, (v) => updateSettings({ basemap: v as AppSettings['basemap'] })),
+      segRow('Basemap', [['bright', 'Map'], ['dark', 'Dark'], ['satellite', 'Satellite']], s.basemap, (v) => updateSettings({ basemap: v as AppSettings['basemap'] })),
       segRow('Units', [['metric', 'km'], ['imperial', 'miles']], s.units, (v) => updateSettings({ units: v as AppSettings['units'] })),
       segRow('Cleared core', [['1', 'Normal (≈20 m)'], ['0', 'Tight (≈7 m)']], String(s.coreRadius), (v) => updateSettings({ coreRadius: v === '0' ? 0 : 1 })),
       // Softness is a blur radius in cells (2–6); shown as a percentage of that range like the other sliders.
@@ -147,7 +147,7 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
         { class: 'muted small about' },
         `Unfog ${APP_VERSION} · build `,
         el('span', { class: 'build', text: typeof __UNFOG_BUILD__ === 'string' ? __UNFOG_BUILD__ : 'dev' }),
-        ' · Map © OpenFreeMap / OpenStreetMap contributors · Search by Photon (komoot) · Everything stays on this device.',
+        ' · Map © OpenFreeMap / OpenStreetMap contributors · Satellite tiles © Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community · Search by Photon (komoot) · Everything stays on this device.',
       ),
     ),
   );

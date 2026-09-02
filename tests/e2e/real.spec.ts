@@ -1090,23 +1090,21 @@ test.describe('Unfog real engines', () => {
     expect(b.errors).toEqual([]);
   });
 
-  test('12b. the empty route sheet offers a loop instead', async ({ page }) => {
+  test('12b. a pin off the network is not an error: the route ends with an off-road leg (feedback-1 item 2)', async ({ page }) => {
     const b = await boot(page);
-    // A pin mid-East River (≈450 m from Kent Av and from the FDR greenway): nothing to snap to within
-    // 300 m → an error with a next step and the loop button.
+    // A pin mid-East River (≈450 m from Kent Av and from the FDR greenway): used to be "no street
+    // within 300 m" and an empty sheet; now the nearest street is snapped at any distance and the
+    // last leg is the straight walk from the street to the pin (tests/e2e/fb1.spec.ts covers the
+    // note, the dashed part and the no-coverage "Route anyway").
     await openRoute(page, { name: 'East River', lonlat: [-73.97, 40.7205] });
     const sheet = page.locator('.sheet.route');
     const status = sheet.locator('.route-status');
-    await expect(status.locator('.spinner')).toBeHidden({ timeout: 60_000 });
-    await expect(status.locator('.error')).toContainText(/street|route/i);
-    await expect(sheet.locator('.cand')).toHaveCount(0);
-    await expect(sheet.getByRole('button', { name: 'Go' })).toBeDisabled();
+    const cands = await waitRouted(page);
+    expect(cands[cands.length - 1].name).toBe('Direct');
+    await expect(status.locator('.error')).toHaveCount(0);
+    await expect(status).toContainText(/off-road/);
+    await expect(sheet.getByRole('button', { name: 'Go' })).toBeEnabled();
     await shot(page, 'route-error');
-    await status.getByRole('button', { name: /Explore a loop from here/ }).click();
-    await expect(sheet).toHaveAttribute('data-kind', 'loop');
-    await expect(sheet.locator('h2')).toContainText('Explore from here');
-    const loops = await waitRouted(page);
-    expect(loops.length).toBeGreaterThanOrEqual(1);
     await sheet.getByRole('button', { name: 'Close' }).click();
     await expect(sheet).toBeHidden();
     expect(b.errors).toEqual([]);

@@ -1,16 +1,22 @@
 /**
  * Foreground recording session: geolocation watch + Screen Wake Lock, fix filtering, continuous
- * persistence to localStorage (process death is normal on iOS), 60-s checkpoints and a final
- * grid.markTrack under ONE track id so the store counts the session as a single visit.
+ * persistence to localStorage (process death is normal on iOS), checkpoints every few seconds
+ * and a final grid.markTrack under ONE track id so the store counts the session as a single visit.
+ *
+ * A checkpoint re-marks the whole session under its id; the store subtracts what the previous
+ * version already counted (src/grid/store.ts), so it costs milliseconds however long the walk is.
+ * Each checkpoint that changed cells is reported through `onData` so the map can re-render the
+ * touched tiles live (feedback-1 item 1: the fog only redrew on Stop or a layer toggle).
  */
-import type { GridApi } from '../grid/api';
+import type { ApplyResult, GridApi } from '../grid/api';
 import { cellsAlong, cellToTile, cellIndex, distanceM } from '../grid/cell';
 import type { Track } from '../grid/types';
 import type { Fix, LocationManager } from '../map/location';
 import { readJSON, removeKey, writeJSON } from '../app/settings';
 
 export const SESSION_KEY = 'unfog.session';
-const CHECKPOINT_MS = 60_000;
+/** Checkpoint cadence: the fog follows the walk within ~5 s (plus one tile render). */
+export const CHECKPOINT_MS = 5_000;
 const MAX_ACCURACY_M = 50;
 const MAX_SPEED_MPS = 60;
 
@@ -33,6 +39,8 @@ export interface RecorderEvents {
   onUpdate(state: SessionState, status: RecorderStatus): void;
   onWakeLock(ok: boolean, reason?: string): void;
   onFix?(fix: Fix, accepted: boolean): void;
+  /** A checkpoint wrote new cells to the grid (the final markTrack on Stop is reported by the caller). */
+  onData?(result: ApplyResult): void;
 }
 
 export function loadUnfinishedSession(): SessionState | null {
@@ -59,6 +67,9 @@ export class Recorder {
   private tickTimer = 0;
   private sessionCells = new Set<number>();
   private tileSnapshots = new Map<string, Promise<Uint8Array | null>>();
+  /** points.length the last checkpoint wrote; a checkpoint with nothing new is skipped. */
+  private pointsAtCheckpoint = 0;
+  private checkpointing = false;
 
   constructor(
     private readonly grid: GridApi,
@@ -85,6 +96,7 @@ export class Recorder {
     this.status = 'recording';
     this.sessionCells.clear();
     this.tileSnapshots.clear();
+    this.pointsAtCheckpoint = 0; // a resumed session is re-marked once (incremental in the store)
     if (resume) for (const [cx, cy] of cellsAlong(resume.points.map((p) => [p[0], p[1]] as [number, number]))) this.sessionCells.add(cy * 4194304 + cx);
     this.persist();
     this.unsubFix = this.location.onFix((f) => this.onFix(f));
@@ -212,13 +224,21 @@ export class Recorder {
 
   private async checkpoint(): Promise<void> {
     const s = this.state;
-    if (!s || this.status !== 'recording' || s.points.length < 2) return;
+    if (!s || this.status !== 'recording' || s.points.length < 2 || this.checkpointing) return;
+    const n = s.points.length;
+    if (n === this.pointsAtCheckpoint) return; // standing still: nothing new to write
+    this.checkpointing = true;
     try {
-      await this.grid.markTrack(sessionTrack(s));
+      const result = await this.grid.markTrack(sessionTrack(s));
+      this.pointsAtCheckpoint = n;
       s.lastCheckpointMs = Date.now();
       this.persist();
+      // Stop may have run meanwhile (its own markTrack + the caller's dataChanged cover it).
+      if (this.state === s && this.status === 'recording' && result.touched.length) this.events.onData?.(result);
     } catch (e) {
       console.warn('[record] checkpoint failed', e);
+    } finally {
+      this.checkpointing = false;
     }
   }
 

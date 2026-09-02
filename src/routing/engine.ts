@@ -7,7 +7,7 @@ import { distanceM } from '../grid/cell';
 import type {
   BBox, CoverageReport, DownloadProgress, LonLat, LoopRequest, RouteApi, RouteRequest, RouteResult,
 } from './api';
-import { findCandidates, now } from './candidates';
+import { findCandidates, now, straightLineResult } from './candidates';
 import type { CellLookup } from './cells';
 import { IdbCellLookup } from './cells-idb';
 import { Graph } from './graph';
@@ -280,6 +280,15 @@ export class RouteEngine implements RouteApi {
     const res = findCandidates(c.graph, this.cells, req, { spatial: c.spatial, scorer: c.scorer, searcher: c.searcher, graphTiles: c.graph.tileKeys.length });
     res.ms = Math.round(now() - t0);
     this.recordPerf(c, t2 - t1, prepared, now() - t2, res.ms);
+    return res;
+  }
+
+  /** "Route anyway" without graph coverage: the straight line, scored against the cells along it. */
+  async directLine(req: RouteRequest): Promise<RouteResult> {
+    const t0 = now();
+    await this.cells.prepare?.(routeBBox(req.from, req.to));
+    const res = straightLineResult(req, this.cells);
+    res.ms = Math.round(now() - t0);
     return res;
   }
 

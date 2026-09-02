@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { cellsAlong } from '../grid/cell';
+import { cellsAlong, distanceM } from '../grid/cell';
 import { ALL_MODES, makeLattice, type Lattice } from '../../tests/fixtures/routing/lattice';
 import { buildTestTiles, type TestWay } from '../../tests/fixtures/routing/tile-builder';
 import { ArcFlag, encodeGraphTile, decodeGraphTile, type GraphTile } from './graph-format';
@@ -7,7 +7,7 @@ import { Graph } from './graph';
 import { MapCellLookup } from './cells';
 import { NoveltyScorer } from './novelty';
 import { Searcher, TURN_MIN_DEG, hasImmediateUTurn } from './search';
-import { LAMBDA_SWEEP, MIN_GAIN_M, TURN_PENALTY_M, findCandidates, selectAlternatives, snapPoint, sweep, type ScoredPath } from './candidates';
+import { LAMBDA_SWEEP, MIN_GAIN_M, TURN_PENALTY_M, etaMinutes, findCandidates, selectAlternatives, snapPoint, straightLineResult, sweep, type ScoredPath } from './candidates';
 import { SpatialIndex } from './spatial';
 import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, findLoops, loopCoords, loopPct, offsetPoint, rankLoops, routeLoop } from './loop';
 
@@ -402,5 +402,118 @@ describe('loop mode', () => {
     const loop = routeLoop(se, o, [via], 'walk', 0)!;
     expect(loop).not.toBeNull();
     expect(loop.lengthM).toBeCloseTo(1850, 0);
+  });
+});
+
+// Feedback-1 (data, 2026-09-02): "no walking street within 300 m" must not be an error — you walk
+// to the street — and places the network cannot join get a straight line. No test covered a pin
+// off the network or two components.
+describe('off-road legs and straight gaps', () => {
+  const kx = () => 111_320 * Math.cos((lattice.at(0, ROW)[1] * Math.PI) / 180);
+
+  it('a pin on the street has no off-road part; ETA arithmetic per part kind', () => {
+    const res = findCandidates(graph, lookup, { from: lattice.at(0, ROW), to: lattice.at(10, ROW), mode: 'walk', detour: 0.25 }, { spatial, scorer, searcher });
+    for (const c of res.candidates) expect(c.parts!.every((p) => p.kind === 'street')).toBe(true);
+    expect(etaMinutes(1000, 'walk', 0, 400)).toBe(18); // 12.5 + 5 min
+    expect(etaMinutes(1000, 'bike', 0, 400)).toBe(9); // 4 + 5
+    expect(etaMinutes(1000, 'drive', 0, 400)).toBe(7); // 2 + 5
+    expect(etaMinutes(1000, 'drive', 0, 0, 3000)).toBe(8); // a straight gap goes at the mode's speed
+  });
+
+  it('a pin 400 m off the network: no error, the route starts with a 400 m off-road part counted in length, novelty and ETA', () => {
+    const from: [number, number] = [lattice.at(0, ROW)[0] - 400 / kx(), lattice.at(0, ROW)[1]];
+    const to = lattice.at(10, ROW);
+    const res = findCandidates(graph, lookup, { from, to, mode: 'walk', detour: 0.25 }, { spatial, scorer, searcher });
+    const direct = res.candidates[res.candidates.length - 1];
+    expect(direct.name).toBe('Direct');
+    expect(direct.parts!.map((p) => p.kind)).toEqual(['offroad', 'street']);
+    expect(direct.parts![0].lengthM).toBeCloseTo(400, 0);
+    expect(direct.lengthM).toBeCloseTo(1400, 0);
+    expect(res.shortestM).toBe(direct.lengthM);
+    expect(res.budgetM).toBe(Math.round(1000 * 1.25 + 400)); // the budget bounds the street part
+    expect(direct.coords[0]).toEqual(from);
+    expect(direct.coords[direct.coords.length - 1][0]).toBeCloseTo(to[0], 7);
+    // The lawn is unvisited, the row is visited: the new metres are the off-road leg (minus the
+    // last few metres, which the row's dilated cells already cover).
+    expect(direct.newM).toBeGreaterThanOrEqual(370);
+    expect(direct.newM).toBeLessThanOrEqual(410);
+    expect(direct.pctNew).toBe(Math.round((100 * direct.newM) / direct.lengthM));
+    expect(direct.etaMin).toBe(18);
+    // Every candidate carries the same leg, and the alternatives stay within the budget.
+    for (const c of res.candidates) {
+      expect(c.parts![0].kind).toBe('offroad');
+      expect(c.coords[0]).toEqual(from);
+      expect(c.lengthM).toBeLessThanOrEqual(res.budgetM + 1);
+    }
+    // Both ends off the network, in every mode.
+    const to2: [number, number] = [lattice.at(29, ROW)[0] + 250 / kx(), lattice.at(29, ROW)[1]];
+    for (const mode of ['walk', 'bike', 'drive'] as const) {
+      const r = findCandidates(graph, lookup, { from, to: to2, mode, detour: 0.25 }, { spatial, scorer, searcher });
+      const d = r.candidates[r.candidates.length - 1];
+      expect(d.parts!.map((p) => p.kind)).toEqual(['offroad', 'street', 'offroad']);
+      expect(d.lengthM).toBeCloseTo(400 + 2900 + 250, 0);
+      expect(d.coords[d.coords.length - 1]).toEqual(to2);
+    }
+  });
+
+  it('two components → one Direct: streets to the nearest exit, a straight gap, streets from the entry (lattice + island 3 km east)', () => {
+    // A 4×4 island lattice (100 m blocks) 3 km east of column 29, rows aligned with rows 14–17.
+    const nw = lattice.at(29, ROW - 1);
+    const east: [number, number] = [nw[0] + 3000 / kx(), nw[1]];
+    const island = makeLattice({ size: 4, spacingM: 100, origin: east });
+    const ways: TestWay[] = [];
+    let id = 900;
+    for (let r = 0; r < 4; r++) ways.push({ id: id++, refs: [0, 1, 2, 3].map((c) => 100_000 + r * 4 + c), coords: [0, 1, 2, 3].map((c) => island.at(c, r)), fwd: ALL_MODES, rev: ALL_MODES });
+    for (let c = 0; c < 4; c++) ways.push({ id: id++, refs: [0, 1, 2, 3].map((r) => 100_000 + r * 4 + c), coords: [0, 1, 2, 3].map((r) => island.at(c, r)), fwd: ALL_MODES, rev: ALL_MODES });
+    const both = makeLattice({ size: 30, spacingM: 100, extraWays: ways });
+    const g = new Graph([...both.tiles.values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+    const sp = new SpatialIndex(g), sc = new NoveltyScorer(g, lookup), se = new Searcher(g, sc);
+    expect(g.nodeCount).toBe(900 + 16);
+    const from = both.at(15, ROW), to = island.at(2, 1); // row 1 of the island = row 15 of the lattice
+    const straight = distanceM(from[0], from[1], to[0], to[1]);
+    for (const mode of ['walk', 'bike', 'drive'] as const) {
+      const res = findCandidates(g, lookup, { from, to, mode, detour: 0.25 }, { spatial: sp, scorer: sc, searcher: se });
+      expect(res.candidates.map((c) => c.name)).toEqual(['Direct']);
+      const d = res.candidates[0];
+      expect(d.parts!.map((p) => p.kind)).toEqual(['street', 'straight', 'street']);
+      expect(d.parts![0].lengthM).toBeCloseTo(1400, 0); // (15,15) → (29,15)
+      expect(d.parts![1].lengthM).toBeCloseTo(3000, 0); // (29,15) → island (0,1)
+      expect(d.parts![2].lengthM).toBeCloseTo(200, 0); // island (0,1) → (2,1)
+      expect(d.lengthM).toBeGreaterThanOrEqual(Math.round(straight) - 1); // never shorter than the crow flies
+      expect(d.lengthM).toBeCloseTo(4600, 0);
+      expect(d.coords[0][0]).toBeCloseTo(from[0], 7);
+      expect(d.coords[d.coords.length - 1][0]).toBeCloseTo(to[0], 7);
+      expect(res.shortestM).toBe(d.lengthM);
+      // Row 15 of the lattice is visited; the gap and the island are new.
+      expect(d.newM).toBeGreaterThan(3100);
+      expect(d.newM).toBeLessThan(3300);
+    }
+    // The island reversed: origin on the island, destination on the lattice.
+    const back = findCandidates(g, lookup, { from: to, to: from, mode: 'walk', detour: 0.25 }, { spatial: sp, scorer: sc, searcher: se });
+    expect(back.candidates[0].parts!.map((p) => p.kind)).toEqual(['street', 'straight', 'street']);
+    expect(back.candidates[0].lengthM).toBeCloseTo(4600, 0);
+  });
+
+  it('an end with no street within 5 km is joined to the network by a straight part; no coverage at all is the pure straight line', () => {
+    const far: [number, number] = [lattice.at(0, ROW)[0] - 6000 / kx(), lattice.at(0, ROW)[1]];
+    const res = findCandidates(graph, lookup, { from: far, to: lattice.at(10, ROW), mode: 'walk', detour: 0.25 }, { spatial, scorer, searcher });
+    const d = res.candidates[0];
+    expect(res.candidates).toHaveLength(1);
+    expect(d.parts!.map((p) => p.kind)).toEqual(['straight', 'street']);
+    expect(d.parts![0].lengthM).toBeCloseTo(6000, 0);
+    expect(d.lengthM).toBeCloseTo(7000, 0);
+    expect(d.coords[0]).toEqual(far);
+    // Pure straight line (the "Route anyway" of a NoCoverageError): along the visited row it is
+    // not new; across the lattice's empty blocks it is.
+    const along = straightLineResult({ from: lattice.at(0, ROW), to: lattice.at(29, ROW), mode: 'walk', detour: 0.25 }, lookup);
+    expect(along.candidates.map((c) => c.name)).toEqual(['Direct']);
+    expect(along.candidates[0].parts!.map((p) => p.kind)).toEqual(['straight']);
+    expect(Math.abs(along.candidates[0].lengthM - 2900)).toBeLessThanOrEqual(2);
+    expect(along.candidates[0].pctNew).toBe(0);
+    expect(along.shortestM).toBe(along.candidates[0].lengthM);
+    expect(along.budgetM).toBe(Math.round(along.candidates[0].lengthM * 1.25));
+    const across = straightLineResult({ from: lattice.at(2, 2), to: lattice.at(27, 26), mode: 'bike', detour: 0.1 }, lookup);
+    expect(across.candidates[0].pctNew).toBeGreaterThan(90);
+    expect(across.candidates[0].etaMin).toBe(Math.round((across.candidates[0].lengthM / 1000 / 15) * 60));
   });
 });

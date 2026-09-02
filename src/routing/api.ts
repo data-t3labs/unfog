@@ -33,17 +33,41 @@ export interface RouteRequest {
  */
 export type CandidateName = 'Most new' | 'Balanced' | 'Direct';
 
-export interface RouteCandidate {
-  name: CandidateName;
+/**
+ * A route is a sequence of parts: `street` = on the graph; `offroad` = the straight walk between
+ * a pin and the nearest usable street (the ends of every route whose pin is off the network — a
+ * park lawn, a pier, a house set back from the road); `straight` = an as-the-crow-flies gap where
+ * the street network does not join the two sides (different components, no coverage at one end,
+ * or no coverage at all — "Route anyway"). Off-road and straight parts are drawn dashed; each
+ * part is scored for novelty like an arc (cells along the line, 6 m samples).
+ */
+export type RoutePartKind = 'street' | 'offroad' | 'straight';
+
+export interface RoutePart {
+  kind: RoutePartKind;
   coords: LonLat[];
   lengthM: number;
-  /** Metres of never-visited road along the route (Σ nov·len). */
+  newM: number;
+}
+
+export interface RouteCandidate {
+  name: CandidateName;
+  /** Full geometry: every part concatenated, pin to pin. */
+  coords: LonLat[];
+  /** Metres, every part included. */
+  lengthM: number;
+  /** Metres of never-visited ground along the route (Σ nov·len over every part). */
   newM: number;
   /** 0..100 */
   pctNew: number;
   lambda: number;
-  /** Walking 4.8 km/h, cycling 15 km/h, driving 30 km/h city average. */
+  /**
+   * Walking 4.8 km/h, cycling 15 km/h, driving 30 km/h city average; off-road legs are walked in
+   * every mode, a straight gap goes at the mode's speed.
+   */
   etaMin: number;
+  /** The parts in order (absent from the mock engine and from loops: all street). */
+  parts?: RoutePart[];
 }
 
 export interface RouteResult {
@@ -100,11 +124,15 @@ export interface RouteApi {
   listDownloads(): Promise<Array<{ id: string; center: LonLat; radiusKm: number; tiles: number; bytes: number; builtAt: string }>>;
   deleteDownload(id: string): Promise<void>;
   /**
-   * Always resolves with ≥ 1 candidate (Direct last). Rejects, with `name` intact, on
-   * NoCoverageError (no tiles), SnapError (no road for the mode within 300 m of an end) or
-   * NoRouteError (ends snapped but no path between them for the mode).
+   * Always resolves with ≥ 1 candidate (Direct last) when any graph tile covers the request:
+   * pins snap to the nearest usable street up to 5 km away (the walk there is an `offroad` part),
+   * and ends the network cannot join get a `straight` part between the two sides' nearest nodes
+   * instead of an error. Rejects, with `name` intact, only on NoCoverageError (no tiles at all) —
+   * `directLine` is the "route anyway" for that case.
    */
   route(req: RouteRequest): Promise<RouteResult>;
+  /** The straight line between the pins as one Direct candidate, scored for novelty; needs no graph. */
+  directLine(req: RouteRequest): Promise<RouteResult>;
   /**
    * Round trips from `from` of about `targetKm` (each within ±25 %), ranked by pctNew — new metres
    * per metre — with ties (same integer pctNew) broken towards the length closest to the target.

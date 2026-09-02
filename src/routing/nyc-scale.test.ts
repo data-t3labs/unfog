@@ -164,8 +164,17 @@ describe.skipIf(!HAVE)('NYC prebuilt region at scale', () => {
 
   it('Times Square → Prospect Park (~12 km) by bike and by car, each under the budget', () => {
     expect(check(TIMES_SQ, PROSPECT, 'bike', 'ts-pp-bike')).toBeLessThan(4000);
-    // Inside the park there is no road a car may use within 300 m: that is a SnapError, not a route.
-    expect(() => findCandidates(graph, lookup, { from: TIMES_SQ, to: PROSPECT, mode: 'drive', detour: 0.25 }, { spatial, scorer, searcher })).toThrow(/No road for this mode within 300 m of the destination/);
+    // Inside the park there is no road a car may use within 300 m: the drive ends on the nearest
+    // road and the last part is the walk into the park (feedback-1 item 2), no error.
+    expect(check(TIMES_SQ, PROSPECT, 'drive', 'ts-pp-drive')).toBeLessThan(4000);
+    const drive = findCandidates(graph, lookup, { from: TIMES_SQ, to: PROSPECT, mode: 'drive', detour: 0.25 }, { spatial, scorer, searcher });
+    const driveDirect = drive.candidates[drive.candidates.length - 1];
+    const lastPart = driveDirect.parts![driveDirect.parts!.length - 1];
+    expect(lastPart.kind).toBe('offroad');
+    expect(lastPart.lengthM).toBeGreaterThan(300);
+    expect(lastPart.lengthM).toBeLessThan(1500);
+    expect(driveDirect.coords[driveDirect.coords.length - 1]).toEqual(PROSPECT);
+    bench['ts-pp-drive-offroad'] = Math.round(lastPart.lengthM);
     expect(check(TIMES_SQ, GRAND_ARMY, 'drive', 'ts-gap-drive')).toBeLessThan(4000);
     // Warm repeat (novelty cached): well under the budget.
     const t0 = now();

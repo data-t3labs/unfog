@@ -4,7 +4,8 @@
  */
 import { DEFAULT_RENDER_SETTINGS, type RenderSettings } from '../grid/api';
 
-export type Basemap = 'bright' | 'dark';
+/** Map (OpenFreeMap bright), Dark (OpenFreeMap fiord, night look), Satellite (Esri World Imagery + OpenFreeMap labels). */
+export type Basemap = 'bright' | 'dark' | 'satellite';
 export type Units = 'metric' | 'imperial';
 export type OverlayLayer = 'fog' | 'heat' | 'off';
 
@@ -56,7 +57,7 @@ function clamp(v: unknown, lo: number, hi: number, dflt: number): number {
 
 function sanitize(s: AppSettings): AppSettings {
   return {
-    basemap: s.basemap === 'dark' ? 'dark' : 'bright',
+    basemap: s.basemap === 'dark' || s.basemap === 'satellite' ? s.basemap : 'bright',
     units: s.units === 'imperial' ? 'imperial' : 'metric',
     layer: s.layer === 'heat' || s.layer === 'off' ? s.layer : 'fog',
     feather: clamp(s.feather, 2, 6, DEFAULT_SETTINGS.feather),
@@ -107,6 +108,21 @@ export const NIGHT_RENDER: Pick<RenderSettings, 'fogColor' | 'clearColor' | 'cle
   heatDimColor: [6, 9, 22],
 };
 
+/**
+ * Satellite look (feedback-1 item 4): the photo is the reward, so cleared ground shows the imagery
+ * untinted (no night light) under a near-black fog — the Fog of World reading. Imagery is far
+ * darker than the bright basemap (rooftops, asphalt, trees), so the fog goes on at 0.9× the
+ * user's strength (default 0.80 → 0.72): unexplored blocks keep a trace of street structure
+ * instead of turning into a black hole, while the edge against a revealed block stays obvious.
+ * The heat dim layer is the same ink at 0.72 (a lighter dim reads as haze over a photo).
+ */
+export const SATELLITE_RENDER: Pick<RenderSettings, 'fogColor' | 'heatDim' | 'heatDimColor'> = {
+  fogColor: [6, 8, 12],
+  heatDim: 0.72,
+  heatDimColor: [6, 8, 12],
+};
+export const SATELLITE_FOG_SCALE = 0.9;
+
 /** The RenderSettings handed to grid.renderTile for the current settings. */
 export function renderSettings(s: AppSettings = current): RenderSettings {
   if (s.basemap === 'dark') {
@@ -114,6 +130,16 @@ export function renderSettings(s: AppSettings = current): RenderSettings {
       ...DEFAULT_RENDER_SETTINGS,
       ...NIGHT_RENDER,
       fogAlpha: s.fogAlpha,
+      feather: s.feather,
+      halo: s.halo,
+      coreRadius: s.coreRadius,
+    };
+  }
+  if (s.basemap === 'satellite') {
+    return {
+      ...DEFAULT_RENDER_SETTINGS,
+      ...SATELLITE_RENDER,
+      fogAlpha: Math.round(s.fogAlpha * SATELLITE_FOG_SCALE * 100) / 100,
       feather: s.feather,
       halo: s.halo,
       coreRadius: s.coreRadius,

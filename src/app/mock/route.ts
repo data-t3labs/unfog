@@ -241,6 +241,22 @@ export function createMockRoute(synth: SynthCells): RouteApi {
       if (far > 40_000) throw new Error('This destination is more than 40 km away. Pick something closer.');
       return candidates(req);
     },
+    async directLine(req: RouteRequest): Promise<RouteResult> {
+      await sleep(60);
+      const path: LonLat[] = [req.from, req.to];
+      const len = legLength(path), newM = newMetres(path);
+      const direct: RouteCandidate = {
+        name: 'Direct',
+        coords: path,
+        lengthM: Math.round(len),
+        newM: Math.round(newM),
+        pctNew: Math.round((100 * newM) / Math.max(1, len)),
+        lambda: 0,
+        etaMin: Math.round((len / 1000 / SPEED_KMH[req.mode]) * 60),
+        parts: [{ kind: 'straight', coords: path, lengthM: len, newM }],
+      };
+      return { candidates: [direct], shortestM: direct.lengthM, budgetM: Math.round(len * (1 + req.detour)), graphTiles: 0, ms: 1 };
+    },
     async loop(req: LoopRequest): Promise<RouteResult> {
       await sleep(150);
       if (!covered(req.from)) throw noCoverage();

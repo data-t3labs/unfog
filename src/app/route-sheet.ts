@@ -289,15 +289,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
             : 'No route found between these points. Try a closer destination or another mode.',
         );
       }
-      result = res;
-      selected = 0;
-      // Only worth a line when we could not start from the user's position.
-      setStatus(fromMapCentre() ? el('div', { class: 'muted small', text: originLine() }) : null);
-      renderTitle();
-      renderSlider();
-      renderCands();
-      map.showRoutes(res.candidates, selected);
-      fit();
+      showResult(res);
     } catch (e) {
       if (my !== seq) return;
       const err = e as Error;
@@ -319,33 +311,78 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     }
   }
 
+  /** A result (routes, loops or the straight line) is in: list it, draw it, fit it. */
+  function showResult(res: RouteResult): void {
+    result = res;
+    selected = 0;
+    // Only worth a line when we could not start from the user's position, or the route leaves the streets.
+    const lines: string[] = [];
+    if (fromMapCentre()) lines.push(originLine());
+    const legs = kind === 'route' ? describeLegs(res) : '';
+    if (legs) lines.push(legs);
+    setStatus(lines.length ? el('div', { class: 'muted small', text: lines.join(' ') }) : null);
+    renderTitle();
+    renderSlider();
+    renderCands();
+    map.showRoutes(res.candidates, selected);
+    fit();
+  }
+
+  /**
+   * The off-road / straight parts every candidate shares (the snaps are the same for all): "Starts
+   * with 240 m off-road to the nearest street", "ends with …", "1.4 km straight across a gap the
+   * street map cannot join", or the whole trip as the crow flies. Short off-road legs (< 50 m: a
+   * sidewalk offset, a driveway) are not worth a line.
+   */
+  function describeLegs(res: RouteResult): string {
+    const parts = res.candidates[0]?.parts;
+    if (!parts?.length) return '';
+    const streetM = parts.filter((p) => p.kind === 'street').reduce((s, p) => s + p.lengthM, 0);
+    const straight = parts.filter((p) => p.kind === 'straight');
+    const straightM = straight.reduce((s, p) => s + p.lengthM, 0);
+    if (straightM > 0 && streetM === 0) return `No street data between these points — ${km(straightM)} as the crow flies. Fog clears wherever you actually walk.`;
+    const bits: string[] = [];
+    const first = parts[0], last = parts[parts.length - 1];
+    if (first.kind === 'offroad' && first.lengthM >= 50) bits.push(`starts with ${km(first.lengthM)} off-road to the nearest street`);
+    if (last.kind === 'offroad' && last.lengthM >= 50) bits.push(`ends with ${km(last.lengthM)} off-road`);
+    if (straightM > 0) bits.push(`${km(straightM)} straight across a gap the ${MODE_NOUN[prefs.mode]} map cannot join (dashed)`);
+    if (!bits.length) return '';
+    const s = bits.join(', ');
+    return `${s.charAt(0).toUpperCase()}${s.slice(1)}.`;
+  }
+
   /**
    * Route worker errors keep their `name` across Comlink: NoCoverageError (no tiles) → offer a
-   * download; SnapError (no road for the mode within 300 m of an end) and NoRouteError (no path)
-   * → a message with a next step. Anything else: the message as is.
+   * download (and the straight line); SnapError (loops: no road for the mode near the start) →
+   * a message with a next step. Anything else: the message as is.
    */
   function isNoCoverage(err: Error): boolean {
     const msg = String(err?.message ?? err);
     if (err?.name === 'NoCoverageError') return true;
-    if (err?.name === 'SnapError' || err?.name === 'NoRouteError') return false;
+    if (err?.name === 'SnapError') return false;
     return /coverage|no graph|graph data|not covered|routing data/i.test(msg);
   }
 
   function describeError(err: Error): string {
     const msg = String(err?.message ?? err);
     const noun = MODE_NOUN[prefs.mode];
-    if (err?.name === 'SnapError') {
-      return kind === 'loop'
-        ? `No ${noun} street within 300 m of your start. Move the map closer to a street and try again.`
-        : `No ${noun} street within 300 m of the start or the destination. Drop the pin closer to a street.`;
-    }
-    if (err?.name === 'NoRouteError') {
-      return kind === 'loop'
-        ? `No ${noun} loop of about ${target()} found from here. Try another length or mode.`
-        : `No ${noun} route between these points. Try another mode or a closer destination.`;
-    }
+    if (err?.name === 'SnapError') return `No ${noun} street within 5 km of your start. Move the map to a town and try again.`;
     if (/timed out/i.test(msg)) return 'Routing took too long. Try a shorter distance or a smaller detour.';
     return msg;
+  }
+
+  /** "Route anyway" on no coverage: the straight line, drawn dashed, honest about what it is. */
+  async function routeAnyway(from: LonLat, to: LonLat): Promise<void> {
+    const my = ++seq;
+    setStatus(el('div', { class: 'spinner-row' }, el('span', { class: 'spinner' }), 'Drawing the straight line…'));
+    try {
+      const res = await ctx.engines.route.directLine({ from, to, mode: prefs.mode, detour: prefs.detour });
+      if (my !== seq) return;
+      showResult(res);
+    } catch (e) {
+      if (my !== seq) return;
+      setStatus(el('div', { class: 'route-error' }, el('div', { class: 'error', text: describeError(e as Error) })));
+    }
   }
 
   async function offerDownload(from: LonLat, to: LonLat, radius?: number): Promise<void> {
@@ -408,6 +445,8 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     box.appendChild(
       el('button', { class: `btn ${regions.length ? 'ghost' : 'primary'}`, type: 'button', onclick: () => void runDownload('Downloading area', (cb) => ctx.engines.route.downloadArea(centre, radiusKm, ctx.engines.proxy(cb))) }, `Download this area (${radiusKm} km around here)`),
     );
+    // A→B without any street data can still be a straight line to follow (a loop cannot).
+    if (kind === 'route') box.appendChild(el('button', { class: 'btn ghost', type: 'button', onclick: () => void routeAnyway(from, to) }, 'Route anyway (straight line)'));
     box.append(progress, progressText);
     setStatus(box);
   }

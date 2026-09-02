@@ -3,19 +3,40 @@
  * produces penalised paths; those within budget are deduplicated (shared-segment fraction relative
  * to the smaller set > 0.6 = duplicate) and ranked by never-visited metres. Output ≤ maxCandidates
  * with "Direct" (the shortest) always last.
+ *
+ * Pins off the network (feedback-1, items 2–3): a pin snaps to the nearest usable street up to
+ * SNAP_MAX_M away and the route starts/ends with a straight `offroad` part between the pin and
+ * the snap point — you walk to the street. When the two snaps sit in different components of the
+ * mode's network (and a re-snap within RESNAP_MAX_M cannot join them), when one pin has no usable
+ * street within SNAP_MAX_M, or when the search finds no path (a one-way trap), the result is one
+ * Direct candidate: streets from the origin to its component's node nearest the destination, a
+ * `straight` gap to the destination component's node nearest that exit, streets from there.
+ * Nothing here throws NoRouteError any more; SnapError remains for loops (no street within
+ * SNAP_MAX_M of the start).
  */
-import type { LonLat, RouteCandidate, RouteRequest, RouteResult } from './api';
+import { distanceM } from '../grid/cell';
+import type { LonLat, RouteCandidate, RoutePart, RouteRequest, RouteResult } from './api';
 import { ArcFlag, MODE_BIT, type Mode } from './graph-format';
 import type { Graph } from './graph';
-import { NoveltyScorer } from './novelty';
+import { NoveltyScorer, lineNovelty } from './novelty';
 import type { CellLookup } from './cells';
 import { Searcher, type PathResult, type SearchOptions } from './search';
-import { SpatialIndex, canEnterArc, canLeaveArc, type Snap } from './spatial';
+import { SpatialIndex, canEnterArc, canLeaveArc, usableFlags, type Snap } from './spatial';
 
 export const LAMBDA_SWEEP = [0.35, 0.7, 1, 1.5, 2, 3, 4, 6, 9] as const;
 export const DEDUPE_SHARED = 0.6;
 export const SPEED_KMH: Record<Mode, number> = { walk: 4.8, bike: 15, drive: 30 };
-export const SNAP_MAX_M = 300;
+/** How far a pin may be from the nearest usable street: beyond this the end is off the graph. */
+export const SNAP_MAX_M = 5000;
+/**
+ * How far an end may be MOVED to join the other end's component (the Green-Wood case: the nearest
+ * road is a cemetery's own network, a connected street lies a block away). Further than this the
+ * two sides are joined by a straight gap instead — moving a pin a kilometre to avoid a gap would
+ * route the "walk to the street" across the water the gap stands for.
+ */
+export const RESNAP_MAX_M = 300;
+/** A snap closer than this is "on the street": no off-road part. */
+export const OFFROAD_MIN_M = 12;
 /**
  * Default turn penalty per mode (metres-equivalent per 90° turn, see SearchOptions.turnPenaltyM)
  * for the λ > 0 searches — Direct (λ = 0) is never penalised, it stays the distance-shortest
@@ -45,10 +66,6 @@ export function searchOptions(mode: Mode, lambda: number, budgetM?: number, turn
   if (lambda > 0 && turnPenaltyM > 0) opts.turnPenaltyM = turnPenaltyM;
   return opts;
 }
-/** How each mode reads in a user-facing message, and the two modes to suggest instead. */
-const MODE_WORD: Record<Mode, string> = { walk: 'walking', bike: 'cycling', drive: 'driving' };
-const OTHER_MODES: Record<Mode, string> = { walk: 'bike or drive', bike: 'walk or drive', drive: 'walk or bike' };
-
 export interface CandidateContext {
   spatial?: SpatialIndex;
   scorer?: NoveltyScorer;
@@ -57,21 +74,11 @@ export interface CandidateContext {
   graphTiles?: number;
 }
 
+/** No usable street within SNAP_MAX_M of a point. A→B routing never throws it (the end goes off-graph); loops do. */
 export class SnapError extends Error {
   constructor(public which: 'origin' | 'destination', public point: LonLat) {
-    super(`No road for this mode within ${SNAP_MAX_M} m of the ${which} (${point[0].toFixed(5)}, ${point[1].toFixed(5)})`);
+    super(`No road for this mode within ${SNAP_MAX_M / 1000} km of the ${which} (${point[0].toFixed(5)}, ${point[1].toFixed(5)})`);
     this.name = 'SnapError';
-  }
-}
-
-/**
- * Both ends snapped, but the network has no path between them for the mode. Crosses Comlink with
- * name + message intact (the UI shows the message as is).
- */
-export class NoRouteError extends Error {
-  constructor(public mode: Mode) {
-    super(`No ${MODE_WORD[mode]} route found between these points. Try ${OTHER_MODES[mode]}, or move the pin.`);
-    this.name = 'NoRouteError';
   }
 }
 
@@ -83,16 +90,16 @@ export interface ScoredPath extends PathResult {
 /**
  * Nearest arc for the mode that the search can actually leave (origin) or arrive on (destination);
  * the nearest usable arc may be an island (an unconnected staircase) that strands the search. When
- * no connected arc lies within SNAP_MAX_M the plain nearest usable arc is taken — a trip along that
- * one arc still routes, anything else ends in NoRouteError. With `component` (a label from
- * `Graph.components`) only arcs of that component qualify, and nothing else is tried.
+ * no connected arc lies within SNAP_MAX_M the plain nearest usable arc is taken. With `component`
+ * (a label from `Graph.components`) only arcs of that component within RESNAP_MAX_M qualify, and
+ * nothing else is tried.
  */
 export function snapPoint(spatial: SpatialIndex, p: LonLat, mode: Mode, which: 'origin' | 'destination', component?: number): Snap {
   const mask = MODE_BIT[mode], graph = spatial.graph;
   const connected = which === 'origin' ? (a: number) => canLeaveArc(graph, a, mask) : (a: number) => canEnterArc(graph, a, mask);
   if (component !== undefined) {
     const comp = graph.components(mask);
-    const s = spatial.nearestArc(p[0], p[1], mask, SNAP_MAX_M, (a) => comp[graph.arcFrom[a]] === component && connected(a));
+    const s = spatial.nearestArc(p[0], p[1], mask, RESNAP_MAX_M, (a) => comp[graph.arcFrom[a]] === component && connected(a));
     if (!s) throw new SnapError(which, p);
     return s;
   }
@@ -101,25 +108,73 @@ export function snapPoint(spatial: SpatialIndex, p: LonLat, mode: Mode, which: '
   return s;
 }
 
+/** snapPoint, but null when nothing usable lies within SNAP_MAX_M (the end is off the graph). */
+export function trySnap(spatial: SpatialIndex, p: LonLat, mode: Mode, which: 'origin' | 'destination', component?: number): Snap | null {
+  try {
+    return snapPoint(spatial, p, mode, which, component);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Snap both ends of a trip. When they land in different components of the mode's network — one
  * pin inside a cemetery, a park or on a pier whose roads do not join the street grid — the end
- * whose re-snap into the other's component moves it the least is moved (within SNAP_MAX_M). If
- * neither can move the snaps stand and the search reports NoRouteError.
+ * whose re-snap into the other's component moves it the least is moved (within RESNAP_MAX_M).
+ * If neither can move the snaps stand: findCandidates then joins the two sides with a straight
+ * gap. Either end may be null (off the graph); such an end is returned as is.
  */
-export function snapPair(spatial: SpatialIndex, from: LonLat, to: LonLat, mode: Mode): [origin: Snap, dest: Snap] {
-  let origin = snapPoint(spatial, from, mode, 'origin');
-  let dest = snapPoint(spatial, to, mode, 'destination');
+export function snapPair(spatial: SpatialIndex, from: LonLat, to: LonLat, mode: Mode): [origin: Snap | null, dest: Snap | null] {
+  let origin = trySnap(spatial, from, mode, 'origin');
+  let dest = trySnap(spatial, to, mode, 'destination');
+  if (!origin || !dest) return [origin, dest];
   const graph = spatial.graph, comp = graph.components(MODE_BIT[mode]);
   const co = comp[graph.arcFrom[origin.arc]], cd = comp[graph.arcFrom[dest.arc]];
   if (co === cd) return [origin, dest];
-  const tryIn = (p: LonLat, which: 'origin' | 'destination', c: number): Snap | null => {
-    try { return snapPoint(spatial, p, mode, which, c); } catch { return null; }
-  };
-  const dest2 = tryIn(to, 'destination', co), origin2 = tryIn(from, 'origin', cd);
+  const dest2 = trySnap(spatial, to, mode, 'destination', co), origin2 = trySnap(spatial, from, mode, 'origin', cd);
   if (dest2 && (!origin2 || dest2.distM <= origin2.distM)) dest = dest2;
   else if (origin2) origin = origin2;
   return [origin, dest];
+}
+
+/** Whether two snaps lie in the same component of the mode's network. */
+export function sameComponent(graph: Graph, a: Snap, b: Snap, mode: Mode): boolean {
+  const comp = graph.components(MODE_BIT[mode]);
+  return comp[graph.arcFrom[a.arc]] === comp[graph.arcFrom[b.arc]];
+}
+
+/** A straight part between two points, scored like an arc; null when shorter than OFFROAD_MIN_M. */
+export function straightPart(a: LonLat, b: LonLat, kind: 'offroad' | 'straight', lookup: CellLookup): RoutePart | null {
+  const lengthM = distanceM(a[0], a[1], b[0], b[1]);
+  if (lengthM < OFFROAD_MIN_M) return null;
+  return { kind, coords: [a, b], lengthM, newM: lengthM * lineNovelty(a, b, lookup) };
+}
+
+/**
+ * Nearest node of a component to a point, as a Snap the search can start from / arrive at (t = 0
+ * on an outgoing usable arc, else t = 1 on an incoming one). Null only for a component with no
+ * usable arc at all.
+ */
+export function nearestNodeInComponent(graph: Graph, component: number, target: LonLat, mode: Mode): Snap | null {
+  const comp = graph.components(MODE_BIT[mode]), mask = MODE_BIT[mode];
+  const kx = 111_320 * Math.cos(target[1] * (Math.PI / 180)), ky = 110_574;
+  let best = -1, bestD = Infinity;
+  for (let n = 0; n < graph.nodeCount; n++) {
+    if (comp[n] !== component) continue;
+    const dx = (graph.nodeLon[n] - target[0]) * kx, dy = (graph.nodeLat[n] - target[1]) * ky;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  if (best < 0) return null;
+  const point: LonLat = [graph.nodeLon[best], graph.nodeLat[best]];
+  for (let a = graph.arcStart[best]; a < graph.arcStart[best + 1]; a++) {
+    if (usableFlags(graph.arcFlags[a], mask)) return { arc: a, t: 0, point, distM: Math.sqrt(bestD) };
+  }
+  // Only incoming usable arcs (a one-way end): arrive at t = 1 of one of them.
+  for (let a = 0; a < graph.arcCount; a++) {
+    if (graph.arcTo[a] === best && usableFlags(graph.arcFlags[a], mask)) return { arc: a, t: 1, point, distM: Math.sqrt(bestD) };
+  }
+  return null;
 }
 
 /** Set of undirected segment ids along a path. */
@@ -183,10 +238,14 @@ export function trimGeometry(geom: LonLat[], from: number, to: number): LonLat[]
   return from <= to ? out : out.reverse();
 }
 
-/** Minutes at the mode's speed; `dismountM` (bike on DISMOUNT arcs) is walked at walking speed. */
-export function etaMinutes(lengthM: number, mode: Mode, dismountM = 0): number {
+/**
+ * Minutes at the mode's speed over `lengthM` of street; `dismountM` (bike on DISMOUNT arcs) and
+ * `offRoadM` (the walk between a pin and the street) go at walking speed in every mode, and a
+ * `straightM` gap at the mode's speed.
+ */
+export function etaMinutes(lengthM: number, mode: Mode, dismountM = 0, offRoadM = 0, straightM = 0): number {
   const walked = mode === 'bike' ? Math.min(dismountM, lengthM) : 0;
-  return Math.round(((lengthM - walked) / 1000 / SPEED_KMH[mode] + walked / 1000 / SPEED_KMH.walk) * 60);
+  return Math.round(((lengthM - walked + straightM) / 1000 / SPEED_KMH[mode] + (walked + offRoadM) / 1000 / SPEED_KMH.walk) * 60);
 }
 
 /** Metres of DISMOUNT arcs along a path, honouring the partial first/last arcs. */
@@ -202,16 +261,53 @@ export function dismountMetres(graph: Graph, path: PathResult): number {
   return m;
 }
 
-export function toCandidate(graph: Graph, path: ScoredPath, name: RouteCandidate['name'], mode: Mode): RouteCandidate {
+/** The off-road parts at the two ends of a trip (null = the pin is on the street). */
+export interface EndLegs {
+  start: RoutePart | null;
+  end: RoutePart | null;
+}
+
+const NO_LEGS: EndLegs = { start: null, end: null };
+
+/** Street part of a path (its geometry trimmed to the snaps). */
+function streetPart(graph: Graph, path: PathResult): RoutePart {
+  return { kind: 'street', coords: pathCoords(graph, path), lengthM: path.lengthM, newM: path.newM };
+}
+
+/** Candidate from parts in order: geometry concatenated, totals summed, ETA per part kind. */
+export function assembleCandidate(parts: RoutePart[], name: RouteCandidate['name'], mode: Mode, lambda: number, dismountM = 0): RouteCandidate {
+  const coords: LonLat[] = [];
+  let lengthM = 0, newM = 0, streetM = 0, offRoadM = 0, straightM = 0;
+  for (const p of parts) {
+    for (const c of p.coords) {
+      const last = coords[coords.length - 1];
+      if (last && last[0] === c[0] && last[1] === c[1]) continue;
+      coords.push(c);
+    }
+    lengthM += p.lengthM;
+    newM += p.newM;
+    if (p.kind === 'street') streetM += p.lengthM;
+    else if (p.kind === 'offroad') offRoadM += p.lengthM;
+    else straightM += p.lengthM;
+  }
   return {
     name,
-    coords: pathCoords(graph, path),
-    lengthM: Math.round(path.lengthM),
-    newM: Math.round(path.newM),
-    pctNew: path.lengthM > 0 ? Math.round((100 * path.newM) / path.lengthM) : 0,
-    lambda: path.lambda,
-    etaMin: etaMinutes(path.lengthM, mode, mode === 'bike' ? dismountMetres(graph, path) : 0),
+    coords,
+    lengthM: Math.round(lengthM),
+    newM: Math.round(newM),
+    pctNew: lengthM > 0 ? Math.round((100 * newM) / lengthM) : 0,
+    lambda,
+    etaMin: etaMinutes(streetM, mode, dismountM, offRoadM, straightM),
+    parts,
   };
+}
+
+export function toCandidate(graph: Graph, path: ScoredPath, name: RouteCandidate['name'], mode: Mode, legs: EndLegs = NO_LEGS): RouteCandidate {
+  const parts: RoutePart[] = [];
+  if (legs.start) parts.push(legs.start);
+  parts.push(streetPart(graph, path));
+  if (legs.end) parts.push(legs.end);
+  return assembleCandidate(parts, name, mode, path.lambda, mode === 'bike' ? dismountMetres(graph, path) : 0);
 }
 
 /**
@@ -287,23 +383,93 @@ export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteReque
   const spatial = ctx.spatial ?? new SpatialIndex(graph);
   const scorer = ctx.scorer ?? new NoveltyScorer(graph, lookup);
   const searcher = ctx.searcher ?? new Searcher(graph, scorer);
-  const [origin, dest] = snapPair(spatial, req.from, req.to, req.mode);
-  const max = Math.max(1, req.maxCandidates ?? 3);
-  const sw = sweep(searcher, origin, dest, req.mode, req.detour, LAMBDA_SWEEP, req.turnPenaltyM ?? TURN_PENALTY_M[req.mode]);
-  if (!sw) throw new NoRouteError(req.mode);
-  const { shortest, budgetM, feasible } = sw;
-  const alts = selectAlternatives(shortest, feasible, max - 1);
-  const candidates: RouteCandidate[] = [];
-  if (alts.length >= 1) candidates.push(toCandidate(graph, alts[0], 'Most new', req.mode));
-  for (let i = 1; i < alts.length; i++) candidates.push(toCandidate(graph, alts[i], 'Balanced', req.mode));
-  candidates.push(toCandidate(graph, shortest, 'Direct', req.mode));
-  return {
+  const mode = req.mode;
+  const [origin, dest] = snapPair(spatial, req.from, req.to, mode);
+  const legs: EndLegs = {
+    start: origin ? straightPart(req.from, origin.point, 'offroad', lookup) : null,
+    end: dest ? straightPart(dest.point, req.to, 'offroad', lookup) : null,
+  };
+  const legsM = (legs.start?.lengthM ?? 0) + (legs.end?.lengthM ?? 0);
+  const done = (candidates: RouteCandidate[], shortestM: number, budgetM: number): RouteResult => ({
     candidates,
-    shortestM: Math.round(shortest.lengthM),
+    shortestM: Math.round(shortestM),
     budgetM: Math.round(budgetM),
     graphTiles: ctx.graphTiles ?? graph.tileKeys.length,
     ms: Math.round(now() - t0),
-  };
+  });
+  if (origin && dest && sameComponent(graph, origin, dest, mode)) {
+    const max = Math.max(1, req.maxCandidates ?? 3);
+    const sw = sweep(searcher, origin, dest, mode, req.detour, LAMBDA_SWEEP, req.turnPenaltyM ?? TURN_PENALTY_M[mode]);
+    if (sw) {
+      const { shortest, budgetM, feasible } = sw;
+      const alts = selectAlternatives(shortest, feasible, max - 1);
+      const candidates: RouteCandidate[] = [];
+      if (alts.length >= 1) candidates.push(toCandidate(graph, alts[0], 'Most new', mode, legs));
+      for (let i = 1; i < alts.length; i++) candidates.push(toCandidate(graph, alts[i], 'Balanced', mode, legs));
+      candidates.push(toCandidate(graph, shortest, 'Direct', mode, legs));
+      // The budget bounds the street part; the legs are the same on every candidate.
+      return done(candidates, shortest.lengthM + legsM, budgetM + legsM);
+    }
+  }
+  // The network cannot join the two ends: streets to the edge, a straight gap, streets from the edge.
+  const direct = gapCandidate(graph, lookup, searcher, req, origin, dest, legs);
+  return done([direct], direct.lengthM, direct.lengthM * (1 + req.detour));
+}
+
+/**
+ * One Direct candidate for ends the network does not join. Each snapped end contributes the
+ * shortest street path between its snap and the node of its component nearest the other side
+ * (nearest the far pin for the origin; nearest the origin's exit for the destination), and the
+ * two exits are joined by a straight gap. A street path that fails (a one-way trap) drops that
+ * side's street part: the gap then starts at that end's snap point. An end with no snap at all
+ * (nothing within SNAP_MAX_M) is joined to the gap directly.
+ */
+export function gapCandidate(graph: Graph, lookup: CellLookup, searcher: Searcher, req: RouteRequest, origin: Snap | null, dest: Snap | null, legs: EndLegs): RouteCandidate {
+  const mode = req.mode, comp = graph.components(MODE_BIT[mode]);
+  const parts: RoutePart[] = [];
+  const noPenalty = searchOptions(mode, 0);
+  let dismountM = 0;
+  // Origin side.
+  let gapFrom: LonLat = req.from;
+  if (origin) {
+    if (legs.start) parts.push(legs.start);
+    gapFrom = origin.point;
+    const target = dest ? dest.point : req.to;
+    const exit = nearestNodeInComponent(graph, comp[graph.arcFrom[origin.arc]], target, mode);
+    const path = exit && !(exit.arc === origin.arc && exit.t === origin.t) ? searcher.run(origin, exit, noPenalty) : null;
+    if (path && path.lengthM > 0) {
+      parts.push(streetPart(graph, path));
+      dismountM += mode === 'bike' ? dismountMetres(graph, path) : 0;
+      gapFrom = exit!.point;
+    }
+  }
+  // Destination side.
+  let gapTo: LonLat = req.to;
+  let entryPath: PathResult | null = null;
+  if (dest) {
+    gapTo = dest.point;
+    const entry = nearestNodeInComponent(graph, comp[graph.arcFrom[dest.arc]], gapFrom, mode);
+    entryPath = entry && !(entry.arc === dest.arc && entry.t === dest.t) ? searcher.run(entry, dest, noPenalty) : null;
+    if (entryPath && entryPath.lengthM > 0) gapTo = entry!.point;
+    else entryPath = null;
+  }
+  const gap = straightPart(gapFrom, gapTo, 'straight', lookup);
+  if (gap) parts.push(gap);
+  if (entryPath) {
+    parts.push(streetPart(graph, entryPath));
+    dismountM += mode === 'bike' ? dismountMetres(graph, entryPath) : 0;
+  }
+  if (dest && legs.end) parts.push(legs.end);
+  if (parts.length === 0) parts.push({ kind: 'straight', coords: [req.from, req.to], lengthM: 0, newM: 0 });
+  return assembleCandidate(parts, 'Direct', mode, 0, dismountM);
+}
+
+/** The straight line between the pins as one Direct candidate — "Route anyway" when no graph tile exists. */
+export function straightLineResult(req: RouteRequest, lookup: CellLookup): RouteResult {
+  const t0 = now();
+  const part = straightPart(req.from, req.to, 'straight', lookup) ?? { kind: 'straight' as const, coords: [req.from, req.to], lengthM: distanceM(req.from[0], req.from[1], req.to[0], req.to[1]), newM: 0 };
+  const direct = assembleCandidate([part], 'Direct', req.mode, 0);
+  return { candidates: [direct], shortestM: direct.lengthM, budgetM: Math.round(direct.lengthM * (1 + req.detour)), graphTiles: 0, ms: Math.round(now() - t0) };
 }
 
 export function now(): number {

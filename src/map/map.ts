@@ -18,18 +18,39 @@ import { readJSON, writeJSON } from '../app/settings';
 import { icons } from '../app/icons';
 import { overlayTileUrl, registerOverlayProtocols } from './overlay';
 import { RouteLayers } from './routes';
+import { SATELLITE_GROUND, composeSatelliteStyle, hasSatelliteLabels, satelliteBaseStyle } from './satellite';
+import { overlayTileIdsFor } from './tile-ids';
 import type { Fix } from './location';
 
 /**
  * "Dark map" uses OpenFreeMap `fiord`, not `dark`: `dark` paints ground, buildings and roads
  * within ~10 L* of black, so nothing survives under a fog and visited streets are invisible;
  * `fiord` is a navy ground with roads lighter than the ground, which a dark fog can carve out
- * (docs/BUILD-PLAN.md §2.2, night mode). The setting value stays `dark`.
+ * (docs/BUILD-PLAN.md §2.2, night mode). The setting value stays `dark`. Satellite is composed
+ * at runtime (src/map/satellite.ts) from Esri imagery and the bright style's labels.
  */
-export const STYLE_URLS: Record<Basemap, string> = {
+export const STYLE_URLS: Record<Exclude<Basemap, 'satellite'>, string> = {
   bright: 'https://tiles.openfreemap.org/styles/bright',
   dark: 'https://tiles.openfreemap.org/styles/fiord',
 };
+
+/** The bright style JSON, fetched once per page for the satellite labels (the service worker caches the request). */
+let brightStyleJson: StyleSpecification | null = null;
+let brightStyleFetch: Promise<StyleSpecification | null> | null = null;
+function fetchBrightStyle(): Promise<StyleSpecification | null> {
+  if (brightStyleJson) return Promise.resolve(brightStyleJson);
+  brightStyleFetch ??= fetch(STYLE_URLS.bright)
+    .then((r) => (r.ok ? (r.json() as Promise<StyleSpecification>) : null))
+    .then((json) => {
+      brightStyleJson = json;
+      return json;
+    })
+    .catch(() => null)
+    .finally(() => {
+      brightStyleFetch = null;
+    });
+  return brightStyleFetch;
+}
 /** Night mode: fiord's building footprints (fill-opacity .25) are pushed back so lit blocks read as light, not texture. */
 const NIGHT_BUILDING_OPACITY = 0.15;
 
@@ -40,6 +61,10 @@ export const DEFAULT_ZOOM = 15;
 const CAMERA_KEY = 'unfog.camera';
 const OVERLAY_SOURCE = 'unfog-overlay';
 const OVERLAY_LAYER = 'unfog-overlay';
+const OVERLAY_MIN_ZOOM = 2;
+const OVERLAY_MAX_ZOOM = 18;
+/** More touched tiles than this since the last full reload → reload everything instead. */
+const MAX_PARTIAL_REFRESH = 48;
 const HIDE_SYMBOLS = /^poi|transit|housenumber|airport|station/;
 
 /**
@@ -49,7 +74,7 @@ const HIDE_SYMBOLS = /^poi|transit|housenumber|airport|station/;
  * keeps the fog/heat overlay and routing usable; the real style is retried on `online`.
  */
 export const FALLBACK_STYLE_NAME = 'unfog-fallback';
-const FALLBACK_GROUND: Record<Basemap, string> = { bright: '#e9e6df', dark: '#45516e' };
+const FALLBACK_GROUND: Record<Basemap, string> = { bright: '#e9e6df', dark: '#45516e', satellite: SATELLITE_GROUND };
 function fallbackStyle(basemap: Basemap): StyleSpecification {
   return {
     version: 8,
@@ -63,6 +88,12 @@ interface SavedCamera {
   c: LonLat;
   z: number;
   b?: number;
+}
+
+/** Style for a basemap: a URL for the vector maps; for satellite the composed style, or imagery alone until the label JSON is in memory. */
+function styleFor(b: Basemap): string | StyleSpecification {
+  if (b !== 'satellite') return STYLE_URLS[b];
+  return brightStyleJson ? composeSatelliteStyle(brightStyleJson) : satelliteBaseStyle();
 }
 
 /** The last saved map centre (used to seed the mock engines before the map exists). */
@@ -114,7 +145,7 @@ export class UnfogMap {
     const saved = readJSON<SavedCamera | null>(CAMERA_KEY, null);
     const map = new maplibregl.Map({
       container: opts.container,
-      style: STYLE_URLS[opts.basemap],
+      style: styleFor(opts.basemap),
       center: saved?.c ?? DEFAULT_CENTER,
       zoom: saved?.z ?? DEFAULT_ZOOM,
       bearing: saved?.b ?? 0,
@@ -173,6 +204,7 @@ export class UnfogMap {
     });
     window.addEventListener('online', () => this.retryBasemap());
     this.installLongPress();
+    if (opts.basemap === 'satellite') void this.ensureSatelliteLabels();
   }
 
   private useFallbackStyle(): void {
@@ -180,10 +212,22 @@ export class UnfogMap {
     this.map.setStyle(fallbackStyle(this.basemap), { diff: false });
   }
 
-  /** Connectivity is back: swap the fallback ground for the real basemap. */
+  /** Connectivity is back: swap the fallback ground for the real basemap; fetch the satellite labels. */
   private retryBasemap(): void {
-    if (!this.onFallback) return;
-    this.map.setStyle(STYLE_URLS[this.basemap]);
+    if (this.onFallback) this.map.setStyle(styleFor(this.basemap), { diff: false });
+    else if (this.basemap === 'satellite') void this.ensureSatelliteLabels();
+  }
+
+  /**
+   * Satellite starts as imagery alone when the bright style JSON is not in memory yet; once it
+   * arrives (network or the service worker's cache) the composed style — imagery + labels — replaces
+   * it. A full style load (no diff): the overlay and route layers come back through onStyleLoad.
+   */
+  private async ensureSatelliteLabels(): Promise<void> {
+    if (this.basemap !== 'satellite' || hasSatelliteLabels(this.map.getStyle())) return;
+    const bright = await fetchBrightStyle();
+    if (!bright || this.basemap !== 'satellite' || hasSatelliteLabels(this.map.getStyle())) return;
+    this.map.setStyle(composeSatelliteStyle(bright), { diff: false });
   }
 
   /** True while the plain fallback ground is showing instead of the basemap. */
@@ -211,12 +255,13 @@ export class UnfogMap {
     const firstSymbol = style.layers.find((l, i) => l.type === 'symbol' && i > lastFill)?.id;
     if (!map.getSource(OVERLAY_SOURCE)) {
       this.tileMode = this.overlayMode();
+      this.pendingTouched.clear(); // fresh source: every tile renders from the current store
       map.addSource(OVERLAY_SOURCE, {
         type: 'raster',
         tiles: [overlayTileUrl(this.tileMode, this.version)],
         tileSize: 512,
-        minzoom: 2,
-        maxzoom: 18,
+        minzoom: OVERLAY_MIN_ZOOM,
+        maxzoom: OVERLAY_MAX_ZOOM,
         attribution: '',
       });
     }
@@ -244,7 +289,8 @@ export class UnfogMap {
     this.layer = layer;
     if (!this.map.getLayer(OVERLAY_LAYER)) return;
     this.map.setLayoutProperty(OVERLAY_LAYER, 'visibility', layer === 'off' ? 'none' : 'visible');
-    if (layer !== 'off' && this.overlayMode() !== this.tileMode) this.reloadOverlay();
+    // A hidden source is not updated by MapLibre: tiles touched while it was off are stale.
+    if (layer !== 'off' && (this.overlayMode() !== this.tileMode || this.pendingTouched.size)) this.reloadOverlay();
   }
 
   /** Grid data or render settings changed: re-render every overlay tile. */
@@ -253,24 +299,52 @@ export class UnfogMap {
     this.reloadOverlay();
   }
 
+  /**
+   * Base (z14) cell tiles changed (a recording checkpoint): re-render only the overlay tiles in
+   * view that cover them — `map.refreshTiles` reloads matching tiles in place, the old bitmap
+   * staying up until the new one lands, so the fog follows the walk without a full reload every
+   * few seconds. Touched tiles accumulate until the next full reload (bumpOverlay / layer or
+   * style change): a tile that scrolls back into view after it changed is refreshed on the next
+   * checkpoint, and MapLibre's retained-tile cache is dropped by the full reload.
+   */
+  refreshOverlay(touched: ReadonlyArray<{ tx: number; ty: number }>): void {
+    for (const t of touched) this.pendingTouched.set(`${t.tx}/${t.ty}`, t);
+    if (this.layer === 'off' || !this.map.getSource(OVERLAY_SOURCE)) return;
+    if (this.pendingTouched.size > MAX_PARTIAL_REFRESH) {
+      this.bumpOverlay();
+      return;
+    }
+    this.map.refreshTiles(OVERLAY_SOURCE, overlayTileIdsFor(this.pendingTouched.values(), OVERLAY_MIN_ZOOM, OVERLAY_MAX_ZOOM));
+  }
+
   /** The mode the raster source's tile URLs currently point at. */
   private tileMode: OverlayMode = 'fog';
+  /** z14 tiles changed since the last full overlay reload (see refreshOverlay). */
+  private readonly pendingTouched = new Map<string, { tx: number; ty: number }>();
 
   private reloadOverlay(): void {
     const src = this.map.getSource(OVERLAY_SOURCE) as RasterTileSource | undefined;
     if (!src) return;
     this.tileMode = this.overlayMode();
+    this.pendingTouched.clear();
     src.setTiles([overlayTileUrl(this.tileMode, this.version)]);
   }
 
   setBasemap(b: Basemap): void {
     if (b === this.basemap) return;
     this.basemap = b;
-    // The render settings change with the basemap (night look): new tile URLs, so no tile rendered
-    // for the other look is reused. Overlay/route layers are re-added by onStyleLoad; markers
-    // survive a style swap.
+    this.onFallback = false;
+    // The render settings change with the basemap (night / satellite look): new tile URLs, so no
+    // tile rendered for the other look is reused. Overlay/route layers are re-added by
+    // onStyleLoad; markers survive a style swap.
     this.version++;
-    this.map.setStyle(STYLE_URLS[b]);
+    this.map.setStyle(styleFor(b), { diff: false });
+    if (b === 'satellite') void this.ensureSatelliteLabels();
+  }
+
+  /** Whether the satellite basemap currently shows its street/place labels (false while they load or offline). */
+  get satelliteLabelsOn(): boolean {
+    return hasSatelliteLabels(this.map.getStyle());
   }
 
   /** Dim the overlay slightly while routes are shown (as in the route mockup). */

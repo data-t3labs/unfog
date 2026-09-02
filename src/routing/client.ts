@@ -41,6 +41,7 @@ export function wrapRouteApi(remote: Remote<RouteApi>, worker: Worker): RouteCli
     listDownloads: () => remote.listDownloads(),
     deleteDownload: (id) => remote.deleteDownload(id),
     route: (req) => remote.route(req),
+    directLine: (req) => remote.directLine(req),
     loop: (req) => remote.loop(req),
     invalidateCells: (version) => remote.invalidateCells(version),
   };

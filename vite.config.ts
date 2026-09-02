@@ -79,6 +79,17 @@ export default defineConfig({
             },
           },
           {
+            // Satellite basemap: Esri World Imagery tiles (src/map/map.ts), cached as you pan like the
+            // vector basemap. 256-px JPEGs, ~20 KB each; 3000 entries ≈ 60 MB for a well-walked city.
+            urlPattern: /^https:\/\/server\.arcgisonline\.com\/ArcGIS\/rest\/services\/World_Imagery\//,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'satellite',
+              expiration: { maxEntries: 3000, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
             // Prebuilt routing graph tiles (also bulk-fetched into this cache by "Download region").
             urlPattern: ({ url }) => url.pathname.startsWith('/unfog/graph/'),
             handler: 'CacheFirst',

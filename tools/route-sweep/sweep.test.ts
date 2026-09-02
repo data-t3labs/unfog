@@ -20,7 +20,7 @@ import { describe, it } from 'vitest';
 import { distanceM } from '../../src/grid/cell';
 import type { LonLat, RouteCandidate, RouteResult } from '../../src/routing/api';
 import {
-  NoRouteError, SnapError, TURN_PENALTY_M, findCandidates, now, pathSegments, searchOptions, sharedFraction, snapPair,
+  SnapError, TURN_PENALTY_M, findCandidates, now, pathSegments, searchOptions, sharedFraction, snapPair,
 } from '../../src/routing/candidates';
 import { ArcFlag, type Mode } from '../../src/routing/graph-format';
 import { Graph } from '../../src/routing/graph';
@@ -322,7 +322,7 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
       try {
         res = findCandidates(graph, lookup, { from: pair.from, to: pair.to, mode, detour, turnPenaltyM: turnFor(mode) }, ctx);
       } catch (e) {
-        error = e instanceof SnapError || e instanceof NoRouteError ? `${e.name}: ${e.message}` : String(e);
+        error = e instanceof SnapError ? `${e.name}: ${e.message}` : String(e);
       }
       const wallMs = now() - tw;
       const call: CallRow = { kind: 'route', id: pair.id, mode, detour, from: pair.from, to: pair.to, straightM: pair.straightM, nearHome: pair.nearHome, ms: res?.ms ?? wallMs, wallMs, shortestM: res?.shortestM ?? 0, budgetM: res?.budgetM ?? 0, candidates: res?.candidates.length ?? 0, error, pairShare: [], violations: [] };
@@ -330,15 +330,17 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
       if (!res) { call.violations.push(error ?? 'no result'); return; }
       const direct = res.candidates[res.candidates.length - 1];
       if (direct.name !== 'Direct') call.violations.push('Direct not last');
-      // reproduce the arcs of every candidate (deterministic search, same options as sweep())
+      // reproduce the arcs of every candidate (deterministic search, same options as sweep()).
+      // Candidates carry their off-road legs; the street part is what the search reproduces.
       const [o, d] = snapPair(spatial, pair.from, pair.to, mode);
-      const s0 = searcher.run(o, d, searchOptions(mode, 0));
+      const s0 = o && d ? searcher.run(o, d, searchOptions(mode, 0)) : null;
       const budget = s0 ? (1 + detour) * s0.lengthM : 0;
       const rows: CandRow[] = [];
       for (const c of res.candidates) {
-        const p = c.lambda === 0 ? s0 : searcher.run(o, d, searchOptions(mode, c.lambda, budget, turnFor(mode)));
+        const streetM = c.parts ? c.parts.filter((p) => p.kind === 'street').reduce((s, p) => s + p.lengthM, 0) : c.lengthM;
+        const p = !o || !d ? null : c.lambda === 0 ? s0 : searcher.run(o, d, searchOptions(mode, c.lambda, budget, turnFor(mode)));
         let arcs: number[] | null = null, fracs: number[] | null = null;
-        if (p && Math.abs(p.lengthM - c.lengthM) <= 1) { arcs = Array.from(p.arcs); fracs = fracsOf(p); }
+        if (p && Math.abs(p.lengthM - streetM) <= 1) { arcs = Array.from(p.arcs); fracs = fracsOf(p); }
         const row = analyse({ kind: 'route', id: pair.id, mode, detour, nearHome: pair.nearHome, shortestM: res.shortestM, budgetM: res.budgetM, straightM: pair.straightM, ms: res.ms }, c, direct, arcs, fracs);
         if (!arcs) row.violations.push('repro mismatch (arcs unavailable)');
         rows.push(row);
