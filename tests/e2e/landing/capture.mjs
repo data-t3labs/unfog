@@ -123,9 +123,9 @@ async function seed(page) {
   return res;
 }
 
-/** Toasts (SW "ready to work offline", import summary…) must not photobomb a frame. */
+/** Toasts (SW "ready to work offline", import summary…) must not photobomb a frame. They queue one at a time now, so allow for two in a row. */
 async function noToasts(page) {
-  await page.waitForFunction(() => !document.querySelector('.toasts')?.children.length, null, { timeout: 15_000 }).catch(() => {});
+  await page.waitForFunction(() => !document.querySelector('.toasts')?.children.length, null, { timeout: 25_000 }).catch(() => {});
 }
 
 async function shot(page, name, opts = {}) {
@@ -177,6 +177,24 @@ async function captureApp(browser) {
   const cands = await page.$$eval('.sheet.route .cand', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
   console.log('  candidates:', cands);
   await shot(page, 'route');
+  await page.getByRole('button', { name: 'Clear destination' }).click();
+  await idle(page, 300);
+
+  // 3b. Loop mode ("Explore from here"): no `from` argument = the same path as the search-panel row,
+  // so the loops start at the user's position (no start pin, no "from the map centre" line).
+  // The 3 km chip is the app default; clicking it is a no-op when already selected.
+  await page.evaluate(() => window.__unfog.openLoop());
+  const loopSheet = page.locator('.sheet.route.loop');
+  await loopSheet.waitFor({ state: 'visible' });
+  await page.locator('.sheet.route.loop .chips button', { hasText: /^3 km$/ }).click();
+  await page.waitForFunction(() => document.querySelectorAll('.sheet.route.loop .cand').length >= 2, null, { timeout: 90_000 });
+  await idle(page, 1200);
+  const loops = await page.$$eval('.sheet.route.loop .cand', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
+  const loopTitle = await page.$eval('.sheet.route.loop h2', (e) => e.textContent.replace(/\s+/g, ' ').trim());
+  const loopStatus = await page.$eval('.sheet.route.loop .route-status', (e) => e.textContent.trim());
+  console.log('  loop title:', loopTitle, '| status:', JSON.stringify(loopStatus));
+  console.log('  loops:', loops);
+  await shot(page, 'loop');
   await page.getByRole('button', { name: 'Clear destination' }).click();
   await idle(page, 300);
 
@@ -254,7 +272,7 @@ async function captureSite(browser) {
       if (scheme === 'light') {
         // Viewport close-ups at each section for review (full-page shots are too tall to read).
         await shot(page, `${name}-hero`);
-        for (const id of ['views', 'how', 'export', 'install', 'privacy', 'faq']) {
+        for (const id of ['views', 'loops', 'how', 'export', 'install', 'privacy', 'faq']) {
           await page.evaluate((id) => document.getElementById(id).scrollIntoView({ block: 'start' }), id);
           await page.waitForTimeout(250);
           await shot(page, `${name}-${id}`);
@@ -275,6 +293,16 @@ async function captureSite(browser) {
         console.log(`  page weight @${vp.width}: ${(total / 1024).toFixed(0)} KB over ${weight.length} requests`);
         for (const w of weight) console.log(`    ${String(Math.round(w.bytes / 1024)).padStart(5)} KB  ${w.name}`);
       }
+      // Invariants: nothing bleeds into a horizontal scroll (the hero fog is clipped by body overflow-x), and no third-party request.
+      const inv = await page.evaluate(() => ({
+        scrollWidth: document.documentElement.scrollWidth,
+        clientWidth: document.documentElement.clientWidth,
+        height: document.documentElement.scrollHeight,
+        thirdParty: performance.getEntriesByType('resource').filter((e) => !e.name.startsWith(location.origin)).map((e) => e.name),
+      }));
+      console.log(`  @${vp.width} ${scheme}: scrollWidth ${inv.scrollWidth} / clientWidth ${inv.clientWidth}, page height ${inv.height} px, third-party requests ${inv.thirdParty.length}`);
+      if (inv.scrollWidth > inv.clientWidth) throw new Error(`horizontal overflow at ${vp.width}px ${scheme}: scrollWidth ${inv.scrollWidth} > clientWidth ${inv.clientWidth}`);
+      if (inv.thirdParty.length) throw new Error(`third-party requests: ${inv.thirdParty.join(', ')}`);
       if (errors.length) console.warn('  page errors:', errors);
       await ctx.close();
     }

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Unfog — your Fog of World map, plus routes that take you somewhere new</title>
-  <meta name="description" content="Unfog imports your Fog of World history, shows it as soft fog or a heat glow, and routes you to any destination through streets you have never walked. A Home Screen app for iPhone. Everything stays on your phone.">
+  <meta name="description" content="Unfog imports your Fog of World history, shows it as soft fog or a heat glow, and routes you through streets you have never walked: to any destination, or around a loop from where you stand. A Home Screen app for iPhone. Everything stays on your phone.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f2ee">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#10141e">
@@ -58,7 +58,7 @@
       <div class="hero-copy">
         <p class="eyebrow">For iPhone · works with Fog of World</p>
         <h1>Lift the fog. <em>Then go somewhere new.</em></h1>
-        <p class="lede">Unfog imports your Fog of World history and routes you to any destination through as many never-visited streets as your detour budget allows. A Home Screen app, on your phone, with nothing to sign up for.</p>
+        <p class="lede">Unfog imports your Fog of World history and routes you to any destination through as many never-visited streets as your detour budget allows. No destination in mind? Pick a length and get a loop from right where you stand. A Home Screen app, on your phone, with nothing to sign up for.</p>
         <div class="cta">
           <a class="btn primary" href="/unfog/">Open Unfog</a>
           <a class="btn ghost" href="#install">Install on iPhone</a>
@@ -69,7 +69,7 @@
         <div class="phone">
           <picture>
             <source srcset="img/route.webp" type="image/webp">
-            <img src="img/route.jpg" width="786" height="1704" alt="Unfog's route sheet for Domino Park over a fogged map of Williamsburg: an orange Most new route that is 84 percent unexplored and a blue Direct route, with a detour budget of plus 25 percent." fetchpriority="high">
+            <img src="img/route.jpg" width="786" height="1704" alt="Unfog's route sheet for Domino Park over a fogged map of Williamsburg: an orange Most new route that is 68 percent unexplored, an amber Balanced route and a blue Direct route, with a detour budget of plus 25 percent." fetchpriority="high">
           </picture>
         </div>
         <figcaption class="fine">The real app, routing to Domino Park over sample walks in Williamsburg, Brooklyn.</figcaption>
@@ -91,24 +91,45 @@
             <source srcset="img/fog.webp" type="image/webp">
             <img src="img/fog.jpg" width="786" height="1704" loading="lazy" alt="Fog view: dark fog over a light map, lifted with a soft edge along walked streets.">
           </picture>
-          <figcaption><span class="num">01</span><strong>Fog</strong>Soft dark fog over a light map, lifted with a feathered edge wherever you have been.</figcaption>
+          <figcaption><strong>Fog</strong>Soft dark fog over a light map, lifted with a feathered edge wherever you have been.</figcaption>
         </figure>
         <figure class="view">
           <picture>
             <source srcset="img/heat.webp" type="image/webp">
             <img src="img/heat.jpg" width="786" height="1704" loading="lazy" alt="Heat view: streets glow amber to red by visit count over a dimmed map, with a legend for 1, 2 to 3, 4 to 6 and 7 or more visits.">
           </picture>
-          <figcaption><span class="num">02</span><strong>Heat</strong>The same history as an amber-to-red glow by visit count, so your habits show at a glance.</figcaption>
+          <figcaption><strong>Heat</strong>The same history as an amber-to-red glow by visit count, so your habits show at a glance.</figcaption>
         </figure>
         <figure class="view">
           <picture>
             <source srcset="img/route.webp" type="image/webp">
-            <img src="img/route.jpg" width="786" height="1704" loading="lazy" alt="Route sheet for Domino Park: an orange route that is 84 percent new and a blue direct route that is 63 percent new, with walk, bike and drive modes and a detour budget slider at plus 25 percent.">
+            <img src="img/route.jpg" width="786" height="1704" loading="lazy" alt="Route sheet for Domino Park: an orange Most new route that is 68 percent new, an amber Balanced route at 61 percent and a blue Direct route at 63 percent, with walk, bike and drive modes and a detour budget slider at plus 25 percent.">
           </picture>
-          <figcaption><span class="num">03</span><strong>Route</strong>Pick a destination and a detour budget; get up to three candidates, from Most new to Direct, each with its share of unexplored street.</figcaption>
+          <figcaption><strong>Route</strong>Pick a destination and a detour budget; get up to three candidates, from Most new to Direct, each with its share of unexplored street.</figcaption>
         </figure>
       </div>
       <p class="fine views-note">Screenshots are the real app over sample walks in Williamsburg, Brooklyn, not a mockup.</p>
+    </section>
+
+    <section class="wrap section" id="loops">
+      <div class="split loops">
+        <div class="loops-copy">
+          <p class="eyebrow">No destination?</p>
+          <h2>Explore from here.</h2>
+          <p class="lede">Pick a length and get up to three loops from where you stand, each one favouring streets you have never walked.</p>
+          <ul class="loop-chips" aria-label="Loop length presets"><li>2 km</li><li class="on">3 km</li><li>5 km</li><li>8 km</li></ul>
+          <p>Tap <b>Where to?</b>, then <b>Explore a loop from here</b>. The presets run 2 to 8 km and the slider 1 to 15 km; walk, bike and drive apply just as they do for a destination. The loops come back as Loop A, B and C, sorted by unexplored distance, and Go follows the one you pick.</p>
+        </div>
+        <figure class="loops-figure">
+          <div class="phone">
+            <picture>
+              <source srcset="img/loop.webp" type="image/webp">
+              <img src="img/loop.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Explore from here sheet: three loops of about 3 km drawn from the user's position over the fogged map, length presets of 2, 3, 5 and 8 kilometres with 3 km selected, and Loop A at 67 percent new, Loop B at 65 percent and Loop C at 58 percent.">
+            </picture>
+          </div>
+          <figcaption class="fine">Three 3 km walking loops from Bedford Avenue and North 7th Street.</figcaption>
+        </figure>
+      </div>
     </section>
 
     <section class="wrap section" id="how">
@@ -127,7 +148,7 @@
         </li>
         <li>
           <h3>Routes maximise unexplored streets</h3>
-          <p>Choose walk, bike or drive and a detour budget from +10 % to +100 % (default +25 %). Unfog searches the street graph for routes that spend the most distance on streets you have never been on. Tap Go and follow along on the map.</p>
+          <p>Choose walk, bike or drive and a detour budget from +10 % to +100 % (default +25 %). Unfog searches the street graph for routes that spend the most distance on streets you have never been on. Tap Go and follow along on the map. No destination in mind? Ask for a loop of 2 to 8 km from where you stand instead.</p>
         </li>
       </ol>
     </section>
@@ -225,6 +246,12 @@
           <summary>Where does routing work?</summary>
           <div>
             <p>Prebuilt routing graphs cover New York City and Metro Vancouver. Download one from Data → Routing data to route offline. Anywhere else, Unfog offers "Download this area" when you plan a route: it fetches the streets around you from Overpass once (a few kilometres around the route), then keeps them on the phone.</p>
+          </div>
+        </details>
+        <details>
+          <summary>Do I need a destination?</summary>
+          <div>
+            <p>No. Tap "Where to?", then "Explore a loop from here". Choose 2, 3, 5 or 8 km, or anything from 1 to 15 km on the slider, and Unfog finds up to three round trips from where you stand, listed as Loop A, B and C with their share of unexplored street. Loops use the same walk, bike and drive modes and the same routing data as a destination.</p>
           </div>
         </details>
         <details>

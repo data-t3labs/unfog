@@ -38,6 +38,10 @@
   --amber: #ffc857;
   --sky: #7fb2ff;
   --bezel: #10141e;
+  /* Hero fog: two haze tints that bloom around the phone, and the ground colour that lifts them where the phone sits. */
+  --haze: rgba(196, 203, 218, 0.66);
+  --haze-2: rgba(223, 227, 236, 0.95);
+  --lift: #f4f2ee;
   --shadow: 0 32px 64px -32px rgba(16, 20, 30, 0.5), 0 2px 6px rgba(16, 20, 30, 0.08);
   --serif: 'Fraunces', 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', Georgia, serif;
   --sans: 'Instrument Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
@@ -60,6 +64,9 @@
     --line-strong: rgba(238, 240, 244, 0.3);
     --accent-text: #ffa061;
     --bezel: #2a3142;
+    --haze: rgba(107, 117, 144, 0.34);
+    --haze-2: rgba(58, 67, 88, 0.6);
+    --lift: #10141e;
     --shadow: 0 32px 64px -32px rgba(0, 0, 0, 0.8), 0 2px 6px rgba(0, 0, 0, 0.3);
     color-scheme: dark;
   }
@@ -72,6 +79,9 @@ body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
+  /* The hero fog bleeds past the wrap; never let it add horizontal scroll. */
+  overflow-x: hidden;
+  overflow-x: clip;
   font: 400 17px/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -181,6 +191,25 @@ h3 { font-size: 1.125rem; font-weight: 600; line-height: 1.3; letter-spacing: -0
 }
 .phone img { width: 100%; aspect-ratio: 393 / 852; border-radius: 36px; object-fit: cover; }
 .hero figcaption { margin-top: 20px; text-align: center; }
+/* Fog lifting behind the hero phone: haze blooms around it (echoing the three clouds of the icon) and clears where the phone sits.
+   Pure CSS, no asset; the ellipses fade out inside their box so the bleed past the wrap is invisible. */
+.hero { position: relative; isolation: isolate; }
+.hero-phone { position: relative; }
+.hero-phone::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  /* Box = exactly the viewport width on phones (the gutter each side); wider bleed only on the copy side at desktop. */
+  inset: -10% calc(-1 * var(--gutter));
+  pointer-events: none;
+  /* Every ellipse reaches full transparency (70 % of its radius) before the box edge, so the box never shows as a seam. */
+  background:
+    radial-gradient(ellipse 30% 36% at 50% 46%, var(--lift) 0 34%, transparent 74%),
+    radial-gradient(ellipse 30% 24% at 30% 26%, var(--haze) 0, transparent 70%),
+    radial-gradient(ellipse 26% 22% at 72% 34%, var(--haze-2) 0, transparent 70%),
+    radial-gradient(ellipse 30% 22% at 66% 76%, var(--haze) 0, transparent 70%),
+    radial-gradient(ellipse 26% 20% at 26% 72%, var(--haze-2) 0, transparent 70%);
+}
 
 /* ---------------------------------------------------------------- wide band (desktop only) */
 .band { display: none; }
@@ -200,16 +229,35 @@ h3 { font-size: 1.125rem; font-weight: 600; line-height: 1.3; letter-spacing: -0
 .view { flex: 0 0 min(74vw, 300px); scroll-snap-align: start; }
 .view img { width: 100%; aspect-ratio: 393 / 852; border-radius: 28px; border: 1px solid var(--line); }
 .view figcaption { margin-top: 16px; font-size: 0.9375rem; line-height: 1.5; color: var(--ink-2); }
-.view .num {
-  display: block;
-  font: 500 0.875rem/1 var(--serif);
-  font-variation-settings: 'opsz' 14;
-  letter-spacing: 0.08em;
-  color: var(--ink-3);
-  margin-bottom: 8px;
-}
 .view strong { color: var(--ink); display: block; margin-bottom: 4px; font-size: 1.0625rem; }
 .views-note { margin-top: 16px; }
+
+/* ---------------------------------------------------------------- loops (Explore from here) */
+.loops-copy > p:not(.eyebrow):not(.lede) { margin-top: 20px; color: var(--ink-2); max-width: 58ch; }
+.loops-copy .lede { margin-top: 16px; }
+.loop-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  padding: 0;
+  margin-top: 24px;
+}
+.loop-chips li {
+  display: grid;
+  place-items: center;
+  min-width: 68px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  background: var(--paper-3);
+  border: 1px solid var(--line);
+  font-weight: 600;
+  font-size: 0.9375rem;
+  color: var(--ink-2);
+}
+.loop-chips li.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.loops-figure figcaption { margin-top: 20px; text-align: center; }
 
 /* ---------------------------------------------------------------- how it works */
 .how { display: grid; gap: 40px; counter-reset: how; list-style: none; padding: 0; }
@@ -318,6 +366,11 @@ h3 { font-size: 1.125rem; font-weight: 600; line-height: 1.3; letter-spacing: -0
   .view { flex: none; }
   .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: start; gap: 56px; }
   .split .phone { margin-top: 0; width: min(300px, 100%); }
+  /* Loops: phone on the left, flush with the page's text edge, copy on the right — the mirror of the export/install splits below it. */
+  .split.loops { grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr); align-items: center; }
+  .split.loops .loops-figure { order: -1; }
+  .split.loops .phone { margin-inline: 0 auto; }
+  .split.loops figcaption { text-align: left; }
   .band {
     display: block;
     position: relative;
@@ -354,6 +407,7 @@ h3 { font-size: 1.125rem; font-weight: 600; line-height: 1.3; letter-spacing: -0
   .phone { width: min(320px, 100%); }
   .hero .phone { margin-inline: auto 0; }
   .hero figcaption { text-align: right; }
+  .hero-phone::before { inset: -10% calc(-1 * var(--gutter)) -10% -30%; }
 }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
