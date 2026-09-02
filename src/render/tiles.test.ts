@@ -100,6 +100,32 @@ describe('fog tile', () => {
     expect(rgba(img, 512, 511, 511)).toEqual([16, 20, 30, 204]);
   });
 
+  it('night look: a light over cleared ground, the ink far away, a blend in the halo; absent/0 ⇒ the daytime bytes', async () => {
+    const night: RenderSettings = { ...S, fogColor: [6, 9, 22], clearColor: [255, 232, 200], clearAlpha: 0.32, heatDim: 0.5, heatDimColor: [6, 9, 22] };
+    const img = await renderOverlayTile({ z, x, y, mode: 'fog' }, night, p);
+    const { px, py } = pixelOf(z, x, y, SX, SY);
+    // street centre (clear ≥ 0.985 per the daytime test): the light alone, at ≈ clearAlpha
+    const lit = rgba(img, 512, px, py);
+    expect(lit[0]).toBeGreaterThanOrEqual(245);
+    expect(lit[2]).toBeGreaterThanOrEqual(190);
+    expect(lit[3]).toBeGreaterThanOrEqual(78);
+    expect(lit[3]).toBeLessThanOrEqual(82);
+    // 30 cells away: the untouched ink at fogAlpha
+    expect(rgba(img, 512, px, py + 120)).toEqual([6, 9, 22, 204]);
+    // halo: light over fog — a colour strictly between the two
+    const h = rgba(img, 512, px, py + 8);
+    expect(h[0]).toBeGreaterThan(6);
+    expect(h[0]).toBeLessThan(245);
+    expect(h[3]).toBeGreaterThan(0);
+    // the flat fast path carries the ink (fog) and the dim colour (heat)
+    expect(rgba(await renderOverlayTile({ z, x: x + 50, y: y + 50, mode: 'fog' }, night, p), 512, 0, 0)).toEqual([6, 9, 22, 204]);
+    expect(rgba(await renderOverlayTile({ z, x: x + 50, y: y + 50, mode: 'heat' }, night, p), 512, 0, 0)).toEqual([6, 9, 22, 128]);
+    // the new fields are optional: clearAlpha 0 with a clearColor set is the daytime path, byte for byte
+    const day = await renderOverlayTile({ z, x, y, mode: 'fog' }, S, p);
+    const off = await renderOverlayTile({ z, x, y, mode: 'fog' }, { ...S, clearColor: [255, 232, 200], clearAlpha: 0 }, p);
+    expect(Buffer.from(off.buffer, off.byteOffset, off.byteLength).equals(Buffer.from(day.buffer, day.byteOffset, day.byteLength))).toBe(true);
+  });
+
   it('adjacent tiles agree along their shared edge (seamless margin)', async () => {
     // A street crossing the vertical seam at an angle so the edge columns carry gradient.
     const q = new MemoryProvider();

@@ -61,7 +61,7 @@ html { font-size: 17px; }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; }
 body {
-  background: #0d0f14;
+  background: #131728; /* the night ground (fiord under the navy fog), seen before the map paints */
   color: var(--fg);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Inter, Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -155,6 +155,10 @@ html.light .seg button.on { background: #fff; }
   box-shadow: var(--shadow); display: flex; align-items: center; justify-content: center;
 }
 .fab.active { color: var(--blue); }
+/* Night map: the floating pills sit on a ground as dark as they are (navy fog ≈ the chrome value), so a
+   hairline carries the edge the shadow cannot. Light theme keeps the plain shadow. */
+html.dark .search, html.dark .search-clear, html.dark .seg:not(.inline), html.dark .legend, html.dark .fab,
+html.dark .chip, html.dark .hint, html.dark .record, html.dark .rec-banner { box-shadow: var(--shadow), 0 0 0 1px var(--line); }
 
 /* recording banner */
 .banner-host { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }

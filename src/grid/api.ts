@@ -21,6 +21,17 @@ export interface RenderSettings {
   coreRadius: 0 | 1;
   /** Heat mode: dim layer alpha over the basemap. Default 0.68. */
   heatDim: number;
+  /**
+   * Night look (docs/BUILD-PLAN.md §2.2): a translucent light laid over CLEARED ground, so on a
+   * dark basemap the streets you have walked read as lit rather than as holes in a pale veil.
+   * `clearAlpha` is its strength where the ground is fully cleared (0 = off, the daytime look);
+   * it fades with the clear field and composites over the remaining fog. Both optional: absent
+   * ⇒ the existing fog path runs unchanged.
+   */
+  clearColor?: [number, number, number];
+  clearAlpha?: number;
+  /** Heat mode: colour of the dim layer. Default [12, 15, 24]. */
+  heatDimColor?: [number, number, number];
 }
 
 export const DEFAULT_RENDER_SETTINGS: RenderSettings = {

@@ -53,6 +53,12 @@ interface RouteCandidate {
   pctNew: number;
   etaMin: number;
 }
+interface Track {
+  id: string;
+  source: string;
+  name?: string;
+  points: Array<[number, number]>;
+}
 // Not `Window & …`: src/main.ts augments Window with the app's own __unfog type, and the
 // intersection would drag maplibre's overloads into these structural stubs.
 type UnfogWindow = {
@@ -65,6 +71,7 @@ type UnfogWindow = {
       engines: {
         grid: {
           getStats(): Promise<GridStats>;
+          applyPayload(p: { tracks: Track[]; meta: { source: string; fileName: string; items: number } }): Promise<{ stats: GridStats }>;
           listBaseTiles(): Promise<Array<[number, number]>>;
           getTileCounts(level: number, tx: number, ty: number): Promise<Uint8Array | null>;
           markTrack(t: { id: string; source: string; name?: string; points: Array<[number, number, number?]> }): Promise<unknown>;
@@ -73,6 +80,7 @@ type UnfogWindow = {
         route: {
           route(req: { from: [number, number]; to: [number, number]; mode: string; detour: number }): Promise<{ candidates: RouteCandidate[]; shortestM: number }>;
           loop(req: { from: [number, number]; mode: string; targetKm: number }): Promise<{ candidates: RouteCandidate[]; shortestM: number }>;
+          invalidateCells(version: number): Promise<void>;
         };
       };
       dataChanged(): Promise<void>;
@@ -337,6 +345,57 @@ async function pixelLuma(page: Page, x: number, y: number): Promise<number> {
 function tmpFile(name: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'unfog-e2e-'));
   return path.join(dir, name);
+}
+
+/**
+ * Walks along real Williamsburg streets around Bedford & N 7th, chosen with the distance-decay
+ * probabilities of tests/e2e/landing/capture.mjs (same seed ⇒ the same lived-in fog as the landing
+ * site): a realistic ground for the night-mode checks.
+ */
+function williamsburgWalks(seed = 7): Track[] {
+  const gz = fs.readFileSync(path.join(FIXTURES, 'osm', 'williamsburg.json.gz'));
+  const data = JSON.parse(zlib.gunzipSync(gz).toString('utf8')) as { elements: Array<{ type: string; id: number; geometry?: Array<{ lon: number; lat: number }>; tags?: { name?: string } }> };
+  const ways = data.elements.filter((e) => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length > 1);
+  const KX = 111320 * Math.cos((40.716 * Math.PI) / 180);
+  const KY = 110574;
+  const dist = (a: [number, number], b: [number, number]) => Math.hypot((a[0] - b[0]) * KX, (a[1] - b[1]) * KY);
+  let s = seed >>> 0;
+  const rnd = () => {
+    s += 0x6d2b79f5;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const tracks: Track[] = [];
+  ways.forEach((w, i) => {
+    const g = w.geometry!;
+    const mid = g[Math.floor(g.length / 2)];
+    const d = dist([mid.lon, mid.lat], BEDFORD_N7);
+    const p = 0.92 * Math.exp(-d / 420) + 0.07;
+    if (rnd() < p) {
+      const count = 1 + Math.floor(Math.pow(rnd(), 1.4) * 9 * Math.exp(-d / 380));
+      const points = g.map((pt): [number, number] => [pt.lon, pt.lat]);
+      for (let k = 0; k < count; k++) tracks.push({ id: `walk-${i}-${k}`, source: 'gpx', name: w.tags?.name ?? `way ${w.id}`, points });
+    }
+  });
+  return tracks;
+}
+
+/** Wait until every basemap and overlay tile in view is loaded and drawn. */
+async function tilesSettled(page: Page): Promise<void> {
+  await idle(page);
+  await page.waitForFunction(() => {
+    const map = (window as unknown as UnfogWindow).__unfog!.ctx!.map.map;
+    return map.loaded() && map.areTilesLoaded();
+  }, null, { timeout: 60_000 });
+  await idle(page);
+}
+
+/** Luminance of a grid of points over the map strip (below the top chrome, above the stat chip). */
+async function lumaGrid(page: Page): Promise<number[]> {
+  const out: number[] = [];
+  for (let y = 230; y <= 690; y += 46) for (let x = 40; x <= 350; x += 62) out.push(await pixelLuma(page, x, y));
+  return out;
 }
 
 const PHOTON_FC = {
@@ -814,12 +873,15 @@ test.describe('Unfog real engines', () => {
     await expect.poll(tilesUrl).not.toBe(v2);
     expect(await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.settings') ?? '{}'))).toMatchObject({ feather: 3, halo: 0.3, coreRadius: 0 });
 
-    // Dark basemap: the dark style is requested and the chrome flips to dark.
-    const darkReq = page.waitForRequest((r) => r.url().startsWith('https://tiles.openfreemap.org/styles/dark'), { timeout: 15_000 });
+    // Dark basemap: the night style (OpenFreeMap fiord) is requested, the chrome flips to dark and
+    // the overlay tiles get a new URL (night render settings; no cached daytime tile survives).
+    const v3 = await tilesUrl();
+    const darkReq = page.waitForRequest((r) => r.url().startsWith('https://tiles.openfreemap.org/styles/fiord'), { timeout: 15_000 });
     await settings.getByRole('group', { name: 'Basemap' }).getByRole('button', { name: 'Dark' }).click();
     await darkReq;
     await expect(page.locator('html')).toHaveClass(/dark/);
     expect(await page.locator('meta[name="theme-color"]').getAttribute('content')).toBe('#17181d');
+    await expect.poll(async () => { const u = await tilesUrl(); return Boolean(u) && u !== v3; }, { timeout: 30_000 }).toBe(true);
     // Overlay + route layers are re-added after the style swap.
     await page.waitForFunction(() => {
       const map = (window as unknown as UnfogWindow).__unfog!.ctx!.map.map;
@@ -1048,6 +1110,86 @@ test.describe('Unfog real engines', () => {
     await sheet.getByRole('button', { name: 'Close' }).click();
     await expect(sheet).toBeHidden();
     expect(b.errors).toEqual([]);
+  });
+
+  test('13. night mode: fiord basemap, navy fog with lit visited streets; heat legend and routes still read', async ({ page }) => {
+    const b = await boot(page);
+    const tracks = williamsburgWalks();
+    await page.evaluate(async (tracks) => {
+      const ctx = (window as unknown as UnfogWindow).__unfog!.ctx!;
+      const r = await ctx.engines.grid.applyPayload({ tracks, meta: { source: 'gpx', fileName: 'walks', items: tracks.length } });
+      await ctx.engines.route.invalidateCells(r.stats.version);
+      await ctx.dataChanged();
+    }, tracks);
+    expect((await stats(page)).visitedCells).toBeGreaterThan(3000);
+    const tilesUrl = () => page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.map.map.getSource('unfog-overlay')?.tiles?.[0]);
+    const jumpHome = () => page.evaluate((c) => (window as unknown as UnfogWindow).__unfog!.ctx!.map.map.jumpTo({ center: c, zoom: 15.3 }), BEDFORD_N7);
+
+    // Daylight reference: the same strip of map, sampled on a grid.
+    await jumpHome();
+    await tilesSettled(page);
+    const dayUrl = await tilesUrl();
+    expect(dayUrl).toMatch(/^fog:\/\/.*\?v=\d+$/);
+    const day = await lumaGrid(page);
+    const dayMin = Math.min(...day), dayMax = Math.max(...day);
+
+    // Settings → Dark map: the night style is requested and the overlay tiles get a new URL.
+    await page.getByRole('tab', { name: 'Help' }).click();
+    const settings = page.locator('.help-section', { has: page.locator('summary', { hasText: /^Settings$/ }) });
+    await settings.locator('summary').click();
+    const styleReq = page.waitForRequest((r) => r.url().startsWith('https://tiles.openfreemap.org/styles/fiord'), { timeout: 15_000 });
+    await settings.getByRole('group', { name: 'Basemap' }).getByRole('button', { name: 'Dark' }).click();
+    await styleReq;
+    await expect(page.locator('html')).toHaveClass(/dark/);
+    await page.getByRole('tab', { name: 'Map' }).click();
+    await page.waitForFunction(() => {
+      const map = (window as unknown as UnfogWindow).__unfog!.ctx!.map.map;
+      return Boolean(map.getLayer('unfog-overlay')) && Boolean(map.getSource('unfog-routes'));
+    }, null, { timeout: 30_000 });
+    await expect.poll(async () => { const u = await tilesUrl(); return Boolean(u) && u !== dayUrl; }, { timeout: 30_000 }).toBe(true);
+    const nightUrl = await tilesUrl();
+    expect(nightUrl).toMatch(/^fog:\/\/.*\?v=\d+$/);
+    // The fog is above the buildings and roads, below the labels.
+    const order = await page.evaluate(() => {
+      const ids = (window as unknown as UnfogWindow).__unfog!.ctx!.map.map.getStyle().layers.map((l) => l.id);
+      return { overlay: ids.indexOf('unfog-overlay'), building: ids.indexOf('building'), roads: ids.indexOf('highway_minor'), labels: ids.indexOf('highway_name_other') };
+    });
+    expect(order.overlay, JSON.stringify(order)).toBeGreaterThan(order.building);
+    expect(order.overlay, JSON.stringify(order)).toBeGreaterThan(order.roads);
+    expect(order.overlay, JSON.stringify(order)).toBeLessThan(order.labels);
+
+    // Night: the unknown is darker than by day, the walked streets are lit, and it is still a dark map.
+    await jumpHome();
+    await tilesSettled(page);
+    const night = await lumaGrid(page);
+    const nightMin = Math.min(...night), nightMax = Math.max(...night);
+    const desc = `day ${dayMin.toFixed(0)}–${dayMax.toFixed(0)}, night ${nightMin.toFixed(0)}–${nightMax.toFixed(0)}`;
+    test.info().annotations.push({ type: 'luma', description: desc });
+    expect(nightMin, `the unknown is darker at night (${desc})`).toBeLessThan(dayMin - 15);
+    expect(nightMax - nightMin, `lit streets stand out from the fog (${desc})`).toBeGreaterThanOrEqual(60);
+    expect(nightMax, `lit streets are light, not a hole (${desc})`).toBeGreaterThanOrEqual(90);
+    expect(nightMax, `still a dark map: dimmer than daylight (${desc})`).toBeLessThan(dayMax - 40);
+    await shot(page, 'night-fog');
+
+    // Heat: the ramp sits on the navy dim layer; the legend shows.
+    await page.locator('.seg button[data-layer="heat"]').click();
+    await expect(page.locator('.legend')).toBeVisible();
+    await expect(page.locator('.legend i')).toHaveCount(4);
+    await tilesSettled(page);
+    await shot(page, 'night-heat');
+    await page.locator('.seg button[data-layer="fog"]').click();
+
+    // Routes keep their daytime paint on the navy ground.
+    await openRoute(page, { ...DOMINO_PARK, origin: BEDFORD_N7 });
+    const cands = await waitRouted(page);
+    expect(cands.length).toBeGreaterThanOrEqual(1);
+    await tilesSettled(page);
+    await shot(page, 'night-route');
+    await page.getByRole('button', { name: 'Clear destination' }).click();
+    await expect(page.locator('.sheet.route')).toBeHidden();
+
+    expect(b.errors).toEqual([]);
+    expect(b.consoleErrors.filter((e) => /overlay|renderTile|grid|worker/i.test(e))).toEqual([]);
   });
 });
 

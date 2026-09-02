@@ -92,18 +92,31 @@ export function onSettingsChange(l: Listener): () => void {
 /** Keys whose change requires re-rendering the overlay tiles. */
 export const RENDER_KEYS: ReadonlyArray<keyof AppSettings> = ['basemap', 'feather', 'halo', 'coreRadius', 'fogAlpha'];
 
+/**
+ * Night look ("Dark map", docs/BUILD-PLAN.md §2.2): the unknown stays dark — a navy ink at the
+ * user's fog strength over the OpenFreeMap `fiord` basemap — and the streets you have walked are
+ * LIT: a warm cream light laid over the cleared ground (the inverse of the daytime hole in dark
+ * fog, same reading: unknown = dark, known = light). The heat dim layer is the same ink, a
+ * little lighter than by day so the ramp sits on navy rather than on black.
+ */
+export const NIGHT_RENDER: Pick<RenderSettings, 'fogColor' | 'clearColor' | 'clearAlpha' | 'heatDim' | 'heatDimColor'> = {
+  fogColor: [6, 9, 22],
+  clearColor: [255, 232, 200],
+  clearAlpha: 0.32,
+  heatDim: 0.5,
+  heatDimColor: [6, 9, 22],
+};
+
 /** The RenderSettings handed to grid.renderTile for the current settings. */
 export function renderSettings(s: AppSettings = current): RenderSettings {
   if (s.basemap === 'dark') {
-    // Over a dark basemap the fog is a light veil (as in the mockup's dark variant).
     return {
       ...DEFAULT_RENDER_SETTINGS,
-      fogColor: [205, 208, 218],
-      fogAlpha: Math.round(s.fogAlpha * 0.7 * 100) / 100,
+      ...NIGHT_RENDER,
+      fogAlpha: s.fogAlpha,
       feather: s.feather,
       halo: s.halo,
       coreRadius: s.coreRadius,
-      heatDim: 0.55,
     };
   }
   return {

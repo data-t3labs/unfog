@@ -1,5 +1,5 @@
 /**
- * MapLibre setup: basemap (OpenFreeMap bright/dark), fog/heat raster overlay via the custom
+ * MapLibre setup: basemap (OpenFreeMap bright / fiord for "Dark map"), fog/heat raster overlay via the custom
  * protocols, route layers, user dot + destination pin, follow mode, long-press, camera memory.
  */
 import * as maplibregl from 'maplibre-gl';
@@ -20,10 +20,18 @@ import { overlayTileUrl, registerOverlayProtocols } from './overlay';
 import { RouteLayers } from './routes';
 import type { Fix } from './location';
 
+/**
+ * "Dark map" uses OpenFreeMap `fiord`, not `dark`: `dark` paints ground, buildings and roads
+ * within ~10 L* of black, so nothing survives under a fog and visited streets are invisible;
+ * `fiord` is a navy ground with roads lighter than the ground, which a dark fog can carve out
+ * (docs/BUILD-PLAN.md §2.2, night mode). The setting value stays `dark`.
+ */
 export const STYLE_URLS: Record<Basemap, string> = {
   bright: 'https://tiles.openfreemap.org/styles/bright',
-  dark: 'https://tiles.openfreemap.org/styles/dark',
+  dark: 'https://tiles.openfreemap.org/styles/fiord',
 };
+/** Night mode: fiord's building footprints (fill-opacity .25) are pushed back so lit blocks read as light, not texture. */
+const NIGHT_BUILDING_OPACITY = 0.15;
 
 /** Bedford Av & N 7th St, Williamsburg — the default view before we know where the user is. */
 export const DEFAULT_CENTER: LonLat = [-73.9568, 40.7176];
@@ -41,7 +49,7 @@ const HIDE_SYMBOLS = /^poi|transit|housenumber|airport|station/;
  * keeps the fog/heat overlay and routing usable; the real style is retried on `online`.
  */
 export const FALLBACK_STYLE_NAME = 'unfog-fallback';
-const FALLBACK_GROUND: Record<Basemap, string> = { bright: '#e9e6df', dark: '#23252c' };
+const FALLBACK_GROUND: Record<Basemap, string> = { bright: '#e9e6df', dark: '#45516e' };
 function fallbackStyle(basemap: Basemap): StyleSpecification {
   return {
     version: 8,
@@ -194,7 +202,13 @@ export class UnfogMap {
     for (const l of style.layers) {
       if (l.type === 'symbol' && HIDE_SYMBOLS.test(l.id)) map.setLayoutProperty(l.id, 'visibility', 'none');
     }
-    const firstSymbol = style.layers.find((l) => l.type === 'symbol')?.id;
+    if (this.basemap === 'dark' && map.getLayer('building')) map.setPaintProperty('building', 'fill-opacity', NIGHT_BUILDING_OPACITY);
+    // The overlay goes above every area fill (ground, water, buildings) and below the labels: the
+    // first symbol layer AFTER the last fill. Plain "first symbol" is the same layer in `bright`
+    // and `fiord`, but OpenFreeMap `dark` lists `water_name` before `building`, which put the fog
+    // under the buildings and roads.
+    const lastFill = style.layers.map((l) => l.type).lastIndexOf('fill');
+    const firstSymbol = style.layers.find((l, i) => l.type === 'symbol' && i > lastFill)?.id;
     if (!map.getSource(OVERLAY_SOURCE)) {
       this.tileMode = this.overlayMode();
       map.addSource(OVERLAY_SOURCE, {
@@ -252,7 +266,10 @@ export class UnfogMap {
   setBasemap(b: Basemap): void {
     if (b === this.basemap) return;
     this.basemap = b;
-    // Overlay/route layers are re-added by onStyleLoad; markers survive a style swap.
+    // The render settings change with the basemap (night look): new tile URLs, so no tile rendered
+    // for the other look is reused. Overlay/route layers are re-added by onStyleLoad; markers
+    // survive a style swap.
+    this.version++;
     this.map.setStyle(STYLE_URLS[b]);
   }
 

@@ -146,13 +146,14 @@ export function createMockGrid(center: LonLat, seed = 7): GridApi & { synth: Syn
     const out = new ImageData(size, size);
     const o = out.data;
     const dim = s.heatDim;
+    const [dr, dg, db] = s.heatDimColor ?? [12, 15, 24];
     if (!any) {
       if (req.mode === 'fog') {
         const a = Math.round(s.fogAlpha * 255);
         for (let i = 0; i < o.length; i += 4) { o[i] = s.fogColor[0]; o[i + 1] = s.fogColor[1]; o[i + 2] = s.fogColor[2]; o[i + 3] = a; }
       } else {
         const a = Math.round(dim * 255);
-        for (let i = 0; i < o.length; i += 4) { o[i] = 12; o[i + 1] = 15; o[i + 2] = 24; o[i + 3] = a; }
+        for (let i = 0; i < o.length; i += 4) { o[i] = dr; o[i + 1] = dg; o[i + 2] = db; o[i + 3] = a; }
       }
       return createImageBitmap(out);
     }
@@ -172,16 +173,26 @@ export function createMockGrid(center: LonLat, seed = 7): GridApi & { synth: Syn
           const wc = wide[bi + 3] / 255;
           const core = narrowPass ? smooth(0.3, 0.85, cover) : smooth(0.15, 0.6, wc);
           const clear = Math.max(core, s.halo * smooth(0.03, 0.5, wc));
-          o[oi] = s.fogColor[0]; o[oi + 1] = s.fogColor[1]; o[oi + 2] = s.fogColor[2];
-          o[oi + 3] = Math.round(s.fogAlpha * (1 - clear) * 255);
+          const ga = (s.clearAlpha ?? 0) * clear; // night: a light over cleared ground (src/render/tiles.ts)
+          const wf = s.fogAlpha * (1 - clear) * (1 - ga);
+          const outA = ga + wf;
+          if (ga > 0 && s.clearColor && outA > 0) {
+            o[oi] = Math.round((s.clearColor[0] * ga + s.fogColor[0] * wf) / outA);
+            o[oi + 1] = Math.round((s.clearColor[1] * ga + s.fogColor[1] * wf) / outA);
+            o[oi + 2] = Math.round((s.clearColor[2] * ga + s.fogColor[2] * wf) / outA);
+            o[oi + 3] = Math.round(outA * 255);
+          } else {
+            o[oi] = s.fogColor[0]; o[oi + 1] = s.fogColor[1]; o[oi + 2] = s.fogColor[2];
+            o[oi + 3] = Math.round(s.fogAlpha * (1 - clear) * 255);
+          }
         } else {
           const mm = (narrow[bi + 3] / 255) * (narrow[bi] / 255);
           const [r, g, b, ha] = heatRamp(mm);
           const a = ha * smooth(0.02, 0.2, narrow[bi + 3] / 255);
           const outA = a + dim * (1 - a);
-          o[oi] = Math.round((r * a + 12 * dim * (1 - a)) / outA);
-          o[oi + 1] = Math.round((g * a + 15 * dim * (1 - a)) / outA);
-          o[oi + 2] = Math.round((b * a + 24 * dim * (1 - a)) / outA);
+          o[oi] = Math.round((r * a + dr * dim * (1 - a)) / outA);
+          o[oi + 1] = Math.round((g * a + dg * dim * (1 - a)) / outA);
+          o[oi + 2] = Math.round((b * a + db * dim * (1 - a)) / outA);
           o[oi + 3] = Math.round(outA * 255);
         }
       }

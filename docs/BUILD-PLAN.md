@@ -64,6 +64,15 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   layer (insert the raster layer before the first symbol layer). `raster-resampling: linear`, fade 0.
 - Routes: selected = 5.5 px accent `#ff8a3d` with white casing 9 px and a glow (18 px, blur 10, 0.55); alternatives = 4 px
   amber `#ffc857` / blue `#7fb2ff` with white casing.
+- **Night mode** ("Dark map", 2026-09-02): the basemap is OpenFreeMap `fiord` (navy ground `#45516E`, roads lighter than the
+  ground, labels hsl(223,31%,61%) on a dark halo) — `dark` paints ground, buildings and roads within ~10 L* of black, so a
+  fog over it reads as mud and visited streets vanish. The reading stays the daytime one — unknown = dark, known = light —
+  but inverted in medium: the fog is a navy ink (6,9,22) at the user's fog strength, and the cleared ground is LIT by a
+  cream light (255,232,200) at 0.32·clear composited over the remaining fog (`RenderSettings.clearColor/clearAlpha`; absent
+  = the daytime path, byte-identical). Buildings are pushed back (`fill-opacity` 0.15) so lit blocks read as light, not
+  texture. Heat keeps its ramp and legend; the dim layer is the same ink at 0.50 (0.68 by day). Tokens live in
+  `src/app/settings.ts` `NIGHT_RENDER`. The overlay is inserted before the first symbol layer AFTER the last fill (plain
+  "first symbol" put it under the buildings in `dark`). Routes keep their daytime paint (white casing on navy).
 
 ### 2.3 Routing
 - Graph tiles (`graph-format.ts`) z12, directed arcs with per-direction mode bits; merged in-memory per request set

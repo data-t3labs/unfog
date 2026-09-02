@@ -262,19 +262,43 @@ export async function renderOverlayRegion(req: RegionRequest, settings: RenderSe
   if (mode === 'fog') {
     const [fr, fg, fb] = settings.fogColor;
     const fa = settings.fogAlpha, hk = settings.halo;
-    for (let y = 0, o = 0; y < height; y++) {
-      for (let x = 0, i = off + y * stride; x < width; x++, i++, o += 4) {
-        const core = smoothstep(0.3, 0.85, p1[i]);
-        const halo = hk * smoothstep(0.03, 0.5, p2[i]);
-        const clear = core > halo ? core : halo;
-        out[o] = fr; out[o + 1] = fg; out[o + 2] = fb;
-        out[o + 3] = fa * (1 - clear) * 255; // Uint8ClampedArray rounds to nearest
+    const ga = settings.clearAlpha ?? 0;
+    if (ga > 0 && settings.clearColor) {
+      // Night: light (clearColor, ga·clear) over fog (fogColor, fa·(1−clear)), straight alpha.
+      const [gr, gg, gb] = settings.clearColor;
+      for (let y = 0, o = 0; y < height; y++) {
+        for (let x = 0, i = off + y * stride; x < width; x++, i++, o += 4) {
+          const core = smoothstep(0.3, 0.85, p1[i]);
+          const halo = hk * smoothstep(0.03, 0.5, p2[i]);
+          const clear = core > halo ? core : halo;
+          const glowA = ga * clear;
+          const wf = fa * (1 - clear) * (1 - glowA); // the fog's share once the light is over it
+          const outA = glowA + wf;
+          if (outA > 0) {
+            out[o] = (gr * glowA + fr * wf) / outA;
+            out[o + 1] = (gg * glowA + fg * wf) / outA;
+            out[o + 2] = (gb * glowA + fb * wf) / outA;
+          } else {
+            out[o] = fr; out[o + 1] = fg; out[o + 2] = fb;
+          }
+          out[o + 3] = outA * 255;
+        }
+      }
+    } else {
+      for (let y = 0, o = 0; y < height; y++) {
+        for (let x = 0, i = off + y * stride; x < width; x++, i++, o += 4) {
+          const core = smoothstep(0.3, 0.85, p1[i]);
+          const halo = hk * smoothstep(0.03, 0.5, p2[i]);
+          const clear = core > halo ? core : halo;
+          out[o] = fr; out[o + 1] = fg; out[o + 2] = fb;
+          out[o + 3] = fa * (1 - clear) * 255; // Uint8ClampedArray rounds to nearest
+        }
       }
     }
   } else {
     const lut = heatRampLut();
     const da = settings.heatDim;
-    const [dr, dg, db] = HEAT_DIM;
+    const [dr, dg, db] = settings.heatDimColor ?? HEAT_DIM;
     for (let y = 0, o = 0; y < height; y++) {
       for (let x = 0, i = off + y * stride; x < width; x++, i++, o += 4) {
         const v = p1[i];
@@ -299,7 +323,7 @@ export async function renderOverlayRegion(req: RegionRequest, settings: RenderSe
 
 /** Constant tile for regions with no data anywhere near: full fog, or the heat dim layer. */
 function fillEmpty(out: Uint8ClampedArray, mode: OverlayMode, settings: RenderSettings): void {
-  const [r, g, b] = mode === 'fog' ? settings.fogColor : HEAT_DIM;
+  const [r, g, b] = mode === 'fog' ? settings.fogColor : settings.heatDimColor ?? HEAT_DIM;
   // same rounding as the full path (clamped-array store), so flat and rendered tiles match
   out[3] = (mode === 'fog' ? settings.fogAlpha : settings.heatDim) * 255;
   const a = out[3];
