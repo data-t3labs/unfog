@@ -6,6 +6,7 @@
  */
 import { WORLD, distanceM, lonLatToWorld } from '../grid/cell';
 import type { CellLookup } from './cells';
+import { ArcFlag } from './graph-format';
 import type { Graph } from './graph';
 
 export const SAMPLE_M = 6;
@@ -32,11 +33,11 @@ export class NoveltyScorer {
     this.scored = 0;
   }
 
-  /** Novelty of an arc, scoring it (and its reverse) on first use. */
+  /** Novelty of an arc, scoring it (and its reverse) on first use. GLUE connectors are never new. */
   get(arc: number): number {
     const v = this.nov[arc];
     if (v === v) return v; // not NaN
-    const n = this.score(arc);
+    const n = (this.graph.arcFlags[arc] & ArcFlag.GLUE) ? 0 : this.score(arc);
     this.nov[arc] = n;
     const r = this.graph.arcReverse[arc];
     if (r >= 0) this.nov[r] = n;

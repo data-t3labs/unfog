@@ -10,6 +10,10 @@ import { Searcher, hasImmediateUTurn } from './search';
 import { findCandidates, now } from './candidates';
 import { SpatialIndex } from './spatial';
 import { RouteEngine, routeBBox } from './engine';
+import { cellToLonLat } from '../grid/cell';
+import type { BBox } from './api';
+import { graphTileBounds } from './graph-format';
+import { makeLattice } from '../../tests/fixtures/routing/lattice';
 
 const FIXTURE = new URL('../../tests/fixtures/osm/williamsburg.json.gz', import.meta.url).pathname;
 const HOME: [number, number] = [-73.9568, 40.7176];
@@ -133,5 +137,39 @@ describe('Williamsburg fixture', () => {
     await engine.tiles.close();
     // eslint-disable-next-line no-console
     console.log('[williamsburg bench]', JSON.stringify(bench));
+  });
+
+  it('prepares cells for the whole merged graph, so a score cached while brushing past an arc is never stale (review F2)', async () => {
+    // A 5×5 lattice, 1.1 km spacing, centred in one z12 tile; the lookup only reveals cells inside
+    // the bboxes it was asked to prepare (IdbCellLookup minus its one-tile margin).
+    const b = graphTileBounds(1205, 1539);
+    const centre: [number, number] = [(b.west + b.east) / 2, (b.south + b.north) / 2];
+    const dLon = 1100 / (111_320 * Math.cos((centre[1] * Math.PI) / 180)), dLat = 1100 / 110_574;
+    const lattice = makeLattice({ size: 5, spacingM: 1100, origin: [centre[0] - 2 * dLon, centre[1] + 2 * dLat] });
+    class BoxedLookup extends MapCellLookup {
+      prepared: BBox[] = [];
+      async prepare(bbox: BBox): Promise<number> { this.prepared.push(bbox); return 0; }
+      override get(cx: number, cy: number): number {
+        const [lon, lat] = cellToLonLat(cx, cy);
+        return this.prepared.some((p) => lon >= p[0] && lon <= p[2] && lat >= p[1] && lat <= p[3]) ? super.get(cx, cy) : 0;
+      }
+    }
+    const cells = new BoxedLookup();
+    // The street between (2,1) and (2,2) has been walked.
+    for (const [cx, cy] of cellsAlong([lattice.at(2, 1), lattice.at(2, 2)], { stepM: 3, gapM: 2000 })) cells.mark(cx, cy, 1, 1);
+    const engine = new RouteEngine({ cells });
+    await engine.init('/unfog/');
+    await engine.tiles.storeArea({ id: 'lat', center: centre, radiusKm: 3 }, lattice.tiles);
+    // Request 1 (one block east along row 2) brushes past that street while its cells are 1.1 km
+    // outside the 1 km-padded request bbox…
+    const first = await engine.route({ from: lattice.at(2, 2), to: lattice.at(3, 2), mode: 'walk', detour: 0.25 });
+    expect(first.candidates.length).toBeGreaterThanOrEqual(1);
+    // …request 2 walks exactly that street: it is fully visited, so Direct must report 0 new metres.
+    const second = await engine.route({ from: lattice.at(2, 1), to: lattice.at(2, 2), mode: 'walk', detour: 0.25 });
+    const direct = second.candidates[second.candidates.length - 1];
+    expect(direct.lengthM).toBe(1100);
+    expect(direct.newM).toBe(0);
+    await engine.deleteDownload('lat');
+    await engine.tiles.close();
   });
 });

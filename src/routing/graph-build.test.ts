@@ -16,7 +16,7 @@ function way(id: number, tags: Record<string, string>, ids: number[], lon0: numb
   return { id, tags, refs: ids, coords: ids.map((_, i) => [lon0 + i * stepDeg, lat] as [number, number]) };
 }
 
-const bits = (f: number) => ({ walk: !!(f & ArcFlag.WALK), bike: !!(f & ArcFlag.BIKE), drive: !!(f & ArcFlag.DRIVE), rev: !!(f & ArcFlag.REVERSED), steps: !!(f & ArcFlag.STEPS), dismount: !!(f & ArcFlag.DISMOUNT) });
+const bits = (f: number) => ({ walk: !!(f & ArcFlag.WALK), bike: !!(f & ArcFlag.BIKE), drive: !!(f & ArcFlag.DRIVE), rev: !!(f & ArcFlag.REVERSED), steps: !!(f & ArcFlag.STEPS), dismount: !!(f & ArcFlag.DISMOUNT), glue: !!(f & ArcFlag.GLUE) });
 
 /** Flatten a result into global arcs keyed by OSM ids. */
 function arcsOf(tiles: Map<string, GraphTileInput>) {
@@ -54,6 +54,101 @@ describe('wayFlags', () => {
     const [f, r] = wayFlags({ ...base, drive: false, steps: true, dismount: true });
     expect(bits(f)).toMatchObject({ steps: true, dismount: true, drive: false });
     expect(bits(r)).toMatchObject({ steps: true, dismount: true, drive: false });
+  });
+  it('GLUE copied to both directions', () => {
+    const [f, r] = wayFlags({ ...base, drive: false, dismount: true, glue: true });
+    expect(bits(f).glue).toBe(true); expect(bits(r).glue).toBe(true);
+    expect(bits(wayFlags(base)[0]).glue).toBe(false);
+  });
+});
+
+describe('buildGraphTiles — glue (crossings / traffic islands) trimming', () => {
+  // A street 1—2—3 running east; node 2 is where a crossing meets it.
+  const street = (): OsmWay => way(1, { highway: 'residential' }, [1, 2, 3], -73.95, 40.72);
+  const crossing = (id: number, ids: number[], coords: [number, number][]): OsmWay => ({ id, tags: { highway: 'footway', footway: 'crossing' }, refs: ids, coords });
+  const path = (id: number, ids: number[], coords: [number, number][]): OsmWay => ({ id, tags: { highway: 'path' }, refs: ids, coords });
+
+  it('a crossing whose ends touch nothing is removed and the street is NOT split by it', () => {
+    const r = buildGraphTiles([street(), crossing(2, [10, 2, 11], [[-73.949, 40.7201], [-73.949, 40.72], [-73.949, 40.7199]])]);
+    expect(r.stats).toMatchObject({ ways: 1, nodes: 2, arcs: 2 });
+    expect(r.glue).toMatchObject({ ways: 0, arcs: 0, km: 0 });
+    const t = [...r.tiles.values()][0];
+    expect(Array.from(t.nodeId)).toEqual([1, 3]);
+    expect(t.shapeLon.length).toBe(1); // node 2 stays a shape point
+  });
+
+  it('a crossing joining a path to the street is kept as GLUE arcs (trimmed to its junction span)', () => {
+    const r = buildGraphTiles([
+      street(),
+      path(3, [20, 21], [[-73.949, 40.7205], [-73.949, 40.7201]]),
+      crossing(2, [21, 2, 11], [[-73.949, 40.7201], [-73.949, 40.72], [-73.949, 40.7199]]), // 11 dangles
+    ]);
+    expect(r.stats).toMatchObject({ ways: 3, nodes: 5, arcs: 8 }); // 1-2, 2-3, 2-21 (glue), 20-21
+    expect(r.glue).toMatchObject({ ways: 1, arcs: 2 });
+    expect(r.glue.km).toBeGreaterThan(0.005);
+    const arcs = arcsOf(r.tiles);
+    const glue = arcs.filter((a) => a.flags & ArcFlag.GLUE);
+    expect(glue.length).toBe(2);
+    expect(glue.map((a) => [a.from, a.to].sort())).toEqual([[2, 21], [2, 21]]);
+    for (const a of glue) expect(bits(a.flags)).toMatchObject({ walk: true, bike: true, dismount: true, drive: false, glue: true });
+    expect(arcs.some((a) => a.from === 11 || a.to === 11)).toBe(false);
+    // stats.km counts the street + path only
+    const streetPath = 2 * distanceM(-73.95, 40.72, -73.949, 40.72) + distanceM(-73.949, 40.7205, -73.949, 40.7201);
+    expect(r.stats.km).toBeCloseTo(streetPath / 1000, 6);
+  });
+
+  it('a glue chain that reaches the street survives; a dangling chain is removed iteratively', () => {
+    const connected = buildGraphTiles([
+      street(),
+      path(3, [20, 21], [[-73.949, 40.7205], [-73.949, 40.7203]]),
+      crossing(4, [21, 30], [[-73.949, 40.7203], [-73.949, 40.7201]]),
+      crossing(5, [30, 2, 31], [[-73.949, 40.7201], [-73.949, 40.72], [-73.949, 40.7199]]),
+    ]);
+    expect(connected.glue.ways).toBe(2);
+    expect(connected.stats.nodes).toBe(6); // 1,2,3,20,21,30
+    const dangling = buildGraphTiles([
+      street(),
+      path(3, [20, 21], [[-73.949, 40.7205], [-73.949, 40.7203]]),
+      crossing(4, [21, 30], [[-73.949, 40.7203], [-73.949, 40.7201]]),
+      crossing(5, [30, 31], [[-73.949, 40.7201], [-73.949, 40.7199]]),
+    ]);
+    expect(dangling.glue.ways).toBe(0);
+    expect(dangling.glue.candidates).toBe(2);
+    expect(dangling.stats).toMatchObject({ ways: 2, nodes: 4, arcs: 4 });
+  });
+
+  it('a redundant sidewalk (both ends already connected) is dropped; one that reaches a path is kept', () => {
+    const redundant: OsmWay = { id: 6, tags: { highway: 'footway', footway: 'sidewalk' }, refs: [2, 50, 3], coords: [[-73.949, 40.72], [-73.9485, 40.7201], [-73.948, 40.72]] };
+    const r0 = buildGraphTiles([street(), redundant]);
+    expect(r0.glue).toMatchObject({ candidates: 1, ways: 0, arcs: 0 });
+    expect(r0.stats).toMatchObject({ nodes: 2, arcs: 2 }); // the street is not split at node 2
+    const reaching: OsmWay = { id: 7, tags: { highway: 'footway', footway: 'sidewalk' }, refs: [2, 50, 60], coords: [[-73.949, 40.72], [-73.949, 40.7201], [-73.949, 40.7203]] };
+    const r1 = buildGraphTiles([street(), reaching, path(3, [60, 70], [[-73.949, 40.7203], [-73.949, 40.7206]])]);
+    expect(r1.glue).toMatchObject({ candidates: 1, ways: 1, arcs: 2 });
+    expect(r1.stats).toMatchObject({ ways: 3, nodes: 5, arcs: 8 });
+    expect(buildGraphTiles([street(), reaching, path(3, [60, 70], [[-73.949, 40.7203], [-73.949, 40.7206]])], { glueSidewalks: false }).glue.candidates).toBe(0);
+  });
+
+  it('parallel glue candidates: only the shortest connector per component survives', () => {
+    // path 20-21 reachable from the street via a short crossing (21-2) and a long sidewalk detour (21-50-3)
+    const r = buildGraphTiles([
+      street(),
+      path(3, [20, 21], [[-73.949, 40.7205], [-73.949, 40.7201]]),
+      crossing(4, [21, 2], [[-73.949, 40.7201], [-73.949, 40.72]]),
+      { id: 8, tags: { highway: 'footway', footway: 'sidewalk' }, refs: [21, 50, 3], coords: [[-73.949, 40.7201], [-73.9485, 40.7204], [-73.948, 40.72]] },
+    ]);
+    expect(r.glue).toMatchObject({ candidates: 2, ways: 1, arcs: 2 });
+    const glue = arcsOf(r.tiles).filter((a) => a.flags & ArcFlag.GLUE);
+    expect(glue.every((a) => a.way === 4)).toBe(true);
+    expect(r.stats.nodes).toBe(5); // 1, 2, 3, 20, 21 — node 3 is not split by the dropped sidewalk
+  });
+
+  it('a driveway that links a path to the street is glue; an isolated one disappears', () => {
+    const driveway = (id: number, ids: number[], coords: [number, number][]): OsmWay => ({ id, tags: { highway: 'service', service: 'driveway' }, refs: ids, coords });
+    expect(buildGraphTiles([street(), driveway(9, [2, 80], [[-73.949, 40.72], [-73.949, 40.7195]])]).glue.ways).toBe(0);
+    const r = buildGraphTiles([street(), driveway(9, [2, 80], [[-73.949, 40.72], [-73.949, 40.7195]]), path(3, [80, 81], [[-73.949, 40.7195], [-73.949, 40.719]])]);
+    expect(r.glue.ways).toBe(1);
+    for (const a of arcsOf(r.tiles).filter((a) => a.flags & ArcFlag.GLUE)) expect(bits(a.flags)).toMatchObject({ walk: true, bike: true, drive: false, glue: true });
   });
 });
 
@@ -189,14 +284,20 @@ describe('buildGraphTiles — synthetic topology', () => {
 
 describe('buildGraphTiles — Williamsburg fixture', () => {
   const ways = williamsburg();
-  const kept = ways.filter((w) => classifyWay(w.tags).keep);
+  // The fixture's Overpass query excluded sidewalks + crossings but not traffic islands: those are
+  // glue and, with nothing to connect to, all get trimmed away — so "kept" here means non-glue.
+  const glueWays = ways.filter((w) => classifyWay(w.tags).glue);
+  const kept = ways.filter((w) => { const c = classifyWay(w.tags); return c.keep && !c.glue; });
   const r = buildGraphTiles(ways);
   const arcs = arcsOf(r.tiles);
 
   it('keeps a plausible subset and reports stats', () => {
     expect(ways.length).toBe(1760);
     expect(kept.length).toBeGreaterThan(800);
-    expect(r.stats.ways).toBe(kept.length);
+    expect(glueWays.length).toBeGreaterThan(0);
+    expect(r.stats.ways).toBeGreaterThanOrEqual(kept.length);
+    expect(r.stats.ways).toBeLessThanOrEqual(kept.length + glueWays.length);
+    expect(r.stats.ways - kept.length).toBe(r.glue.ways);
     expect(r.stats.arcs).toBe(arcs.length);
     expect(r.stats.nodes).toBeGreaterThan(1000);
     expect(r.stats.km).toBeGreaterThan(50);
@@ -266,7 +367,7 @@ describe('buildGraphTiles — Williamsburg fixture', () => {
 
   it('total km within ±5 % of Σ kept-way lengths', () => {
     let m = 0;
-    for (const w of kept) for (let i = 1; i < w.coords.length; i++) m += distanceM(w.coords[i - 1][0], w.coords[i - 1][1], w.coords[i][0], w.coords[i][1]);
+    for (const w of kept.filter((w) => !classifyWay(w.tags).glue)) for (let i = 1; i < w.coords.length; i++) m += distanceM(w.coords[i - 1][0], w.coords[i - 1][1], w.coords[i][0], w.coords[i][1]);
     expect(Math.abs(r.stats.km - m / 1000) / (m / 1000)).toBeLessThan(0.05);
   });
 

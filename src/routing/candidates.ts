@@ -168,6 +168,24 @@ export function pickDistinct(ranked: ScoredPath[], against: ScoredPath[], slots:
   return picked;
 }
 
+/**
+ * Alternatives to Direct, best first: "Most new" = the newest distinct feasible path; "Balanced" =
+ * the distinct path with the best gain in new metres per extra metre over Direct (the runner-up by
+ * new metres is usually a near-clone of Most new); further slots by new metres. Every pick beats
+ * Direct on new metres and shares ≤ DEDUPE_SHARED of its segments with every other pick.
+ */
+export function selectAlternatives(shortest: ScoredPath, feasible: ScoredPath[], slots: number): ScoredPath[] {
+  if (slots <= 0) return [];
+  const minNew = shortest.newM + 1e-6;
+  const most = pickDistinct(feasible, [shortest], 1, minNew);
+  if (slots === 1 || most.length === 0) return most;
+  const efficiency = (p: ScoredPath) => (p.newM - shortest.newM) / Math.max(1, p.lengthM - shortest.lengthM);
+  const byEfficiency = feasible.filter((p) => p !== most[0]).sort((a, b) => efficiency(b) - efficiency(a) || b.newM - a.newM || a.lambda - b.lambda);
+  const balanced = pickDistinct(byEfficiency, [shortest, ...most], 1, minNew);
+  const rest = pickDistinct(feasible, [shortest, ...most, ...balanced], slots - 1 - balanced.length, minNew);
+  return [...most, ...balanced, ...rest];
+}
+
 export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteRequest, ctx: CandidateContext = {}): RouteResult {
   const t0 = now();
   const spatial = ctx.spatial ?? new SpatialIndex(graph);
@@ -181,8 +199,7 @@ export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteReque
     return { candidates: [], shortestM: 0, budgetM: 0, graphTiles: ctx.graphTiles ?? graph.tileKeys.length, ms: now() - t0 };
   }
   const { shortest, budgetM, feasible } = sw;
-  // Alternatives must beat Direct on new metres and be distinct from it and from each other.
-  const alts = pickDistinct(feasible, [shortest], max - 1, shortest.newM + 1e-6);
+  const alts = selectAlternatives(shortest, feasible, max - 1);
   const candidates: RouteCandidate[] = [];
   if (alts.length >= 1) candidates.push(toCandidate(graph, alts[0], 'Most new', req.mode));
   for (let i = 1; i < alts.length; i++) candidates.push(toCandidate(graph, alts[i], 'Balanced', req.mode));

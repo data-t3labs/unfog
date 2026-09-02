@@ -103,13 +103,14 @@ describe('pbf-reader — hand-built blocks', () => {
 describe('loadPbfWays (two-pass)', () => {
   it('resolves coordinates for kept ways only, lazily', () => {
     const r = loadPbfWays(FIXTURE, { keep: (t) => classifyWay(t).keep });
-    expect(r.countBeforeBbox).toBe(3); // N7th, N6th, Bedford — sidewalk + unnamed service dropped, building not highway
-    expect(r.count).toBe(3);
+    expect(r.countBeforeBbox).toBe(5); // N7th, N6th, sidewalk (glue), Bedford, unnamed service (glue) — building is not a highway
+    expect(r.count).toBe(5);
     expect(r.missing).toBe(0);
     expect(r.nodeCount).toBe(7);
     const ways = [...r.ways()];
-    expect(ways.map((w) => w.id)).toEqual([4_000_000_001, 4_000_000_002, 4_000_000_005]);
-    const bedford = ways[2];
+    expect(ways.map((w) => w.id)).toEqual([4_000_000_001, 4_000_000_002, 4_000_000_003, 4_000_000_005, 4_000_000_006]);
+    expect(loadPbfWays(FIXTURE, { keep: (t) => { const c = classifyWay(t); return c.keep && !c.glue; } }).count).toBe(3);
+    const bedford = ways[3];
     expect(bedford.refs).toEqual([2 ** 33 + 6, 2 ** 34 + 1, 12_000_000_002]);
     expect(bedford.coords[1][0]).toBeCloseTo(-73.9563, 6);
     expect(bedford.coords[1][1]).toBeCloseTo(40.7171, 6);
@@ -149,8 +150,8 @@ describe.skipIf(!existsSync(VANCOUVER))('BBBike Vancouver extract (skipped when 
     // Research §1a query: way["highway"]["highway"!~"^(motorway|…|corridor)$"] — walk/bike-routable, sidewalks included.
     const bbox: [number, number, number, number] = [-123.1406, 49.2465, -123.0994, 49.2735];
     const overpassLike = loadPbfWays(VANCOUVER, { keep: (t) => !OVERPASS_EXCLUDED.test(t.highway), bbox });
-    const kept = loadPbfWays(VANCOUVER, { keep: (t) => classifyWay(t).keep, bbox });
-    console.log(`Vancouver bbox check: overpass-like ${overpassLike.count} ways (ref 7,277), classify-kept ${kept.count}; ` +
+    const kept = loadPbfWays(VANCOUVER, { keep: (t) => { const c = classifyWay(t); return c.keep && !c.glue; }, bbox });
+    console.log(`Vancouver bbox check: overpass-like ${overpassLike.count} ways (ref 7,277), classify-kept non-glue ${kept.count}; ` +
       `${overpassLike.countBeforeBbox} highway ways in extract, ${overpassLike.nodeCount} nodes, ${overpassLike.missing} missing; ` +
       `pass1 ${(overpassLike.pass1Ms / 1000).toFixed(1)} s, pass2 ${(overpassLike.pass2Ms / 1000).toFixed(1)} s`);
     expect(overpassLike.count).toBeGreaterThan(7277 * 0.9);

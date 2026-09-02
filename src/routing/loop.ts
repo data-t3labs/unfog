@@ -10,6 +10,7 @@ import type { CellLookup } from './cells';
 import {
   etaMinutes, now, pathCoords, pickDistinct, snapPoint, type CandidateContext, type ScoredPath,
 } from './candidates';
+import { MODE_BIT } from './graph-format';
 import type { Graph } from './graph';
 import { NoveltyScorer } from './novelty';
 import { Searcher, type PathResult } from './search';
@@ -18,8 +19,16 @@ import { SpatialIndex, type Snap } from './spatial';
 export const LOOP_HEADINGS = 8;
 export const LOOP_LAMBDA = 1.5;
 export const LOOP_AVOID_FACTOR = 5;
-/** Accept loops within [min, max] × target. */
-export const LOOP_LENGTH_WINDOW: [number, number] = [0.6, 1.5];
+/** Accept loops within [min, max] × target (±25 %). */
+export const LOOP_LENGTH_WINDOW: [number, number] = [0.75, 1.25];
+/**
+ * Via-point circle radius as a fraction of the target length. The three legs of a T/4 circle
+ * measure 0.85·T as the crow flies and 1.1–1.3·T on a street grid; 0.22·T lands near 1.0·T, and a
+ * loop that still misses the window is retried once with the radius rescaled by target/length.
+ */
+export const LOOP_RADIUS_FACTOR = 0.22;
+/** Reject loops that retrace more than this fraction of their length (out-and-back). */
+export const LOOP_MAX_RETRACED = 0.5;
 const DEG = Math.PI / 180;
 
 /** Point at `distM` metres and `bearingDeg` (0 = north, clockwise) from `from`. */
@@ -33,6 +42,8 @@ export function offsetPoint(from: LonLat, distM: number, bearingDeg: number): Lo
 export interface LoopPath extends ScoredPath {
   legs: PathResult[];
   heading: number;
+  /** Metres travelled on segments the loop had already used (out-and-back stretches). */
+  retracedM: number;
 }
 
 function straightM(a: LonLat, b: LonLat): number {
@@ -60,9 +71,9 @@ export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: 
       if (r >= 0) avoid[r] = 1;
     }
   }
-  // Combine: length sums; new metres count each segment once.
+  // Combine: length sums; new metres count each segment once; a repeated segment is retraced.
   const segments = new Set<number>();
-  let lengthM = 0, newM = 0, cost = 0;
+  let lengthM = 0, newM = 0, cost = 0, retracedM = 0;
   const all: number[] = [];
   for (const leg of legs) {
     lengthM += leg.lengthM; cost += leg.cost;
@@ -73,12 +84,14 @@ export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: 
       if (leg.arcs.length === 1) frac = leg.endFrac - leg.startFrac;
       else if (k === 0) frac = 1 - leg.startFrac;
       else if (k === leg.arcs.length - 1) frac = leg.endFrac;
-      if (!segments.has(seg)) { segments.add(seg); newM += graph.arcLen[arc] * frac * searcher.scorer.get(arc); }
+      const l = graph.arcLen[arc] * frac;
+      if (!segments.has(seg)) { segments.add(seg); newM += l * searcher.scorer.get(arc); }
+      else retracedM += l;
       all.push(arc);
     }
   }
   return {
-    arcs: Uint32Array.from(all), lengthM, newM, cost,
+    arcs: Uint32Array.from(all), lengthM, newM, cost, retracedM,
     startFrac: legs[0].startFrac, endFrac: legs[legs.length - 1].endFrac,
     settled: legs.reduce((s, l) => s + l.settled, 0),
     lambda: LOOP_LAMBDA, segments, legs, heading,
@@ -104,20 +117,25 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
   const searcher = ctx.searcher ?? new Searcher(graph, scorer);
   const origin = snapPoint(spatial, req.from, req.mode, 'origin');
   const targetM = req.targetKm * 1000;
-  const radius = targetM / 4;
   const max = Math.max(1, req.maxCandidates ?? 3);
   const loops: LoopPath[] = [];
-  const modeMask = { walk: 1, bike: 2, drive: 4 }[req.mode];
-  for (let k = 0; k < LOOP_HEADINGS; k++) {
-    const heading = (360 / LOOP_HEADINGS) * k;
+  const modeMask = MODE_BIT[req.mode];
+  const inWindow = (l: LoopPath) => l.lengthM >= LOOP_LENGTH_WINDOW[0] * targetM && l.lengthM <= LOOP_LENGTH_WINDOW[1] * targetM;
+  const attempt = (heading: number, radius: number): LoopPath | null => {
     const p1 = offsetPoint(origin.point, radius, heading - 45);
     const p2 = offsetPoint(origin.point, radius, heading + 45);
     const s1 = spatial.nearestArc(p1[0], p1[1], modeMask, radius / 2);
     const s2 = spatial.nearestArc(p2[0], p2[1], modeMask, radius / 2);
-    if (!s1 || !s2 || s1.arc === s2.arc) continue;
-    const loop = routeLoop(searcher, origin, [s1, s2], req.mode, heading);
-    if (!loop) continue;
-    if (loop.lengthM < LOOP_LENGTH_WINDOW[0] * targetM || loop.lengthM > LOOP_LENGTH_WINDOW[1] * targetM) continue;
+    if (!s1 || !s2 || s1.arc === s2.arc) return null;
+    return routeLoop(searcher, origin, [s1, s2], req.mode, heading);
+  };
+  for (let k = 0; k < LOOP_HEADINGS; k++) {
+    const heading = (360 / LOOP_HEADINGS) * k;
+    const radius = targetM * LOOP_RADIUS_FACTOR;
+    let loop = attempt(heading, radius);
+    if (!loop) loop = attempt(heading, radius * 0.6); // via point in water / off the network: pull it in
+    if (loop && !inWindow(loop)) loop = attempt(heading, radius * Math.min(2, Math.max(0.5, targetM / loop.lengthM)));
+    if (!loop || !inWindow(loop) || loop.retracedM > LOOP_MAX_RETRACED * loop.lengthM) continue;
     loops.push(loop);
   }
   loops.sort((a, b) => b.newM - a.newM || Math.abs(a.lengthM - targetM) - Math.abs(b.lengthM - targetM) || a.heading - b.heading);

@@ -131,11 +131,16 @@ export class Searcher {
     this.closed = new Uint8Array(n);
   }
 
-  /** Penalised cost of a full arc under the options. */
+  /**
+   * Penalised cost of a full arc under the options. λ = 0 never touches the novelty scorer (the
+   * shortest-path search must not cache scores for arcs it merely brushes past); GLUE connectors
+   * are neutral — plain length, neither rewarded nor penalised.
+   */
   arcCost(arc: number, lambda: number, mode: Mode, avoid: Uint8Array | null, avoidFactor: number): number {
     const graph = this.graph;
     const flags = graph.arcFlags[arc];
-    let c = graph.arcLen[arc] * (1 + lambda * (1 - this.scorer.get(arc)));
+    let c = graph.arcLen[arc];
+    if (lambda > 0 && !(flags & ArcFlag.GLUE)) c *= 1 + lambda * (1 - this.scorer.get(arc));
     if (mode === 'bike' && (flags & ArcFlag.DISMOUNT)) c *= DISMOUNT_FACTOR;
     if (avoid && avoid[arc]) c *= avoidFactor;
     return c;

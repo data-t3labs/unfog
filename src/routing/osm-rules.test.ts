@@ -23,21 +23,34 @@ describe('classifyWay — keep / drop', () => {
     expect(c({ railway: 'rail' }).keep).toBe(false);
   });
 
-  it.each(['sidewalk', 'crossing', 'traffic_island'])('drops footway=%s (a street counts once)', (ft) => {
-    expect(c({ highway: 'footway', footway: ft }).keep).toBe(false);
+  it('footway=sidewalk is a GLUE candidate (a street counts once); dropped with glueSidewalks:false', () => {
+    expect(c({ highway: 'footway', footway: 'sidewalk' })).toMatchObject({ keep: true, glue: true, walk: true, bike: true, dismount: true, drive: false });
+    expect(classifyWay({ highway: 'footway', footway: 'sidewalk' }, { glueSidewalks: false }).keep).toBe(false);
+    expect(classifyWay({ highway: 'footway', footway: 'crossing' }, { glueSidewalks: false }).glue).toBe(true);
   });
-  it('keeps plain footways and footway=access_aisle', () => {
-    expect(c({ highway: 'footway' }).keep).toBe(true);
-    expect(c({ highway: 'footway', footway: 'access_aisle' }).keep).toBe(true);
+  it.each(['crossing', 'traffic_island'])('keeps footway=%s as GLUE (walk + bike dismount, never drive)', (ft) => {
+    expect(c({ highway: 'footway', footway: ft })).toMatchObject({ keep: true, glue: true, walk: true, bike: true, dismount: true, drive: false });
+    expect(c({ highway: 'footway', footway: ft, bicycle: 'yes' })).toMatchObject({ glue: true, bike: true, dismount: false });
+    expect(c({ highway: 'footway', footway: ft, foot: 'no' }).keep).toBe(false);
+  });
+  it('keeps plain footways and footway=access_aisle as ordinary (non-glue) ways', () => {
+    expect(c({ highway: 'footway' })).toMatchObject({ keep: true, glue: false });
+    expect(c({ highway: 'footway', footway: 'access_aisle' })).toMatchObject({ keep: true, glue: false });
+    expect(c({ highway: 'residential' }).glue).toBe(false);
   });
 
-  it.each(['driveway', 'parking_aisle', 'drive-through', 'emergency_access'])('drops service=%s even when named', (sv) => {
+  it.each(['drive-through', 'emergency_access'])('drops service=%s even when named', (sv) => {
     expect(c({ highway: 'service', service: sv, name: 'X Lane' }).keep).toBe(false);
   });
-  it('drops unnamed service roads except alleys', () => {
-    expect(c({ highway: 'service' }).keep).toBe(false);
-    expect(c({ highway: 'service', service: 'alley' }).keep).toBe(true);
-    expect(c({ highway: 'service', name: 'Mews Lane' }).keep).toBe(true);
+  it.each(['driveway', 'parking_aisle'])('service=%s is a GLUE candidate (walk + bike, never drive), dropped with glueService:false', (sv) => {
+    expect(c({ highway: 'service', service: sv, name: 'X Lane' })).toMatchObject({ keep: true, glue: true, walk: true, bike: true, drive: false });
+    expect(classifyWay({ highway: 'service', service: sv }, { glueService: false }).keep).toBe(false);
+  });
+  it('unnamed service roads are GLUE candidates; alleys and named service roads are ordinary', () => {
+    expect(c({ highway: 'service' })).toMatchObject({ keep: true, glue: true, drive: false });
+    expect(classifyWay({ highway: 'service' }, { glueService: false }).keep).toBe(false);
+    expect(c({ highway: 'service', service: 'alley' })).toMatchObject({ keep: true, glue: false, drive: true });
+    expect(c({ highway: 'service', name: 'Mews Lane' })).toMatchObject({ keep: true, glue: false, drive: true });
   });
 
   it('drops area=yes', () => {
@@ -133,9 +146,10 @@ describe('classifyWay — drive', () => {
   it.each(['motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link', 'secondary', 'secondary_link', 'tertiary', 'tertiary_link', 'residential', 'unclassified', 'living_street'])(
     'drives highway=%s', (hw) => { expect(c({ highway: hw }).drive).toBe(true); },
   );
-  it('drives named service roads and alleys', () => {
+  it('drives named service roads and alleys, never glue', () => {
     expect(c({ highway: 'service', name: 'Back Lane' }).drive).toBe(true);
     expect(c({ highway: 'service', service: 'alley' }).drive).toBe(true);
+    expect(c({ highway: 'service', service: 'driveway', name: 'X', motor_vehicle: 'yes' }).drive).toBe(false);
   });
   it.each(['footway', 'path', 'pedestrian', 'cycleway', 'steps', 'bridleway'])('never drives highway=%s', (hw) => {
     expect(c({ highway: hw, motor_vehicle: 'yes' }).drive).toBe(false);
@@ -185,7 +199,7 @@ describe('classifyWay — dropped result is inert', () => {
   it('returns all-false for dropped ways', () => {
     expect(c({ highway: 'construction', oneway: 'yes' })).toEqual({
       keep: false, walk: false, bike: false, drive: false, steps: false, dismount: false,
-      onewayFwd: false, onewayBack: false, bikeBothWays: false,
+      onewayFwd: false, onewayBack: false, bikeBothWays: false, glue: false,
     });
   });
 });

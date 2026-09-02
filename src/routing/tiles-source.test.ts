@@ -53,6 +53,34 @@ describe('TileSource', () => {
     expect((await src.coverage(far)).available).toBe(0);
   });
 
+  it('fetches the tiles of one request concurrently, not one after another (review F3)', async () => {
+    const lattice = makeLattice({ size: 30, spacingM: 400 }); // ~12 km: straddles 2×2 z12 tiles
+    const inputs = [...lattice.tiles.values()];
+    expect(inputs.length).toBeGreaterThanOrEqual(4);
+    const files = new Map<string, Uint8Array | object>();
+    const manifest: RegionManifest = {
+      id: 'test', name: 'Test', zoom: 12, bbox: [-74.1, 40.6, -73.8, 40.8],
+      tiles: inputs.map((t) => [t.tx, t.ty, 0] as [number, number, number]),
+      builtAt: '2026-09-02', source: 'lattice', stats: { nodes: 900, arcs: 3480, km: 348 },
+    };
+    files.set('/unfog/graph/index.json', { regions: ['test'] });
+    files.set('/unfog/graph/test/manifest.json', manifest);
+    for (const t of inputs) files.set(`/unfog/graph/test/12/${t.tx}/${t.ty}.ufg`, packGraphTile(t));
+    const inner = fakeFetch(files, []);
+    let inFlight = 0, maxInFlight = 0;
+    const slow: typeof fetch = async (input, init) => {
+      inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      try { return await inner(input, init); } finally { inFlight--; }
+    };
+    const src = new TileSource({ fetch: slow });
+    await src.init('/unfog/');
+    maxInFlight = 0;
+    const { tiles } = await src.tilesFor([-74.1, 40.6, -73.8, 40.8]);
+    expect(tiles.length).toBe(inputs.length);
+    expect(maxInFlight).toBeGreaterThanOrEqual(2);
+  });
+
   it('stores, lists and deletes downloaded areas in unfog-graph', async () => {
     const lattice = makeLattice({ size: 5, spacingM: 100 });
     const src = new TileSource({ fetch: fakeFetch(new Map(), []) });

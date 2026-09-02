@@ -157,15 +157,15 @@ export class TileSource {
     return { needed: wanted.length, available, regions: [...regions] };
   }
 
-  /** Decoded tiles for a bbox; tiles with no data are listed in `missing`. */
+  /** Decoded tiles for a bbox (fetched concurrently); tiles with no data are listed in `missing`. */
   async tilesFor(bbox: BBox): Promise<{ tiles: GraphTile[]; keys: string[]; missing: string[] }> {
     const wanted = graphTilesFor(bbox);
+    const got = await Promise.all(wanted.map(([x, y]) => this.getTile(x, y)));
     const tiles: GraphTile[] = [], keys: string[] = [], missing: string[] = [];
-    for (const [x, y] of wanted) {
-      const t = await this.getTile(x, y);
-      const k = tileKeyOf(x, y);
+    wanted.forEach(([x, y], i) => {
+      const t = got[i], k = tileKeyOf(x, y);
       if (t) { tiles.push(t); keys.push(k); } else missing.push(k);
-    }
+    });
     return { tiles, keys, missing };
   }
 

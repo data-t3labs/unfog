@@ -128,6 +128,29 @@ describe('Graph (single tile)', () => {
     }
   });
 
+  it('GLUE connectors route at plain length under any λ and never count as new', () => {
+    const glued = { ...square, arcFlags: square.arcFlags.map((f, i) => (i === CD || i === DC ? (f & ~(ArcFlag.STEPS | ArcFlag.DISMOUNT)) | ArcFlag.GLUE : f)) };
+    const graph = new Graph([decodeGraphTile(encodeGraphTile(glued))]);
+    // (a) A—B and C—D visited: the ordinary visited arc is penalised, the glue connector is not.
+    const visited = new MapCellLookup();
+    for (const seg of [[A, B], [C, D]] as Array<Array<[number, number]>>) for (const [cx, cy] of cellsAlong(seg, { stepM: 3 })) visited.mark(cx, cy, 1, 1);
+    const searcher = new Searcher(graph, new NoveltyScorer(graph, visited));
+    expect(searcher.arcCost(AB, 4, 'walk', null, 5)).toBe(500);
+    expect(searcher.arcCost(CD, 4, 'walk', null, 5)).toBe(100);
+    // C→A at λ=1 goes round via the connector (100) rather than the visited B→A (200); the
+    // connector adds length but no new metres.
+    const viaCD = searcher.run(snapOn(graph, CB, 0.5), snapOn(graph, DA, 0.5), { lambda: 1, mode: 'walk' })!;
+    expect(Array.from(viaCD.arcs)).toEqual([BC, CD, DA]); // back along C—B's reverse to C, connector, D→A
+    expect(viaCD.lengthM).toBeCloseTo(50.5 + 100 + 50, 6);
+    expect(viaCD.newM).toBeCloseTo(50.5 * searcher.scorer.get(BC) + 0 + 50 * searcher.scorer.get(DA), 6);
+    expect(viaCD.newM).toBeGreaterThan(50);
+    // (b) nothing visited: an unvisited connector still reports 0 new metres.
+    const fresh = new NoveltyScorer(graph, new MapCellLookup());
+    expect(fresh.get(CD)).toBe(0);
+    expect(fresh.newMetres(DC)).toBe(0);
+    expect(fresh.get(BC)).toBe(1);
+  });
+
   it('scores novelty from the cell lookup with 8-neighbour tolerance', () => {
     const { graph, lookup, scorer } = build();
     expect(scorer.get(AB)).toBe(1);

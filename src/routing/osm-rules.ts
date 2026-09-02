@@ -8,6 +8,18 @@
  */
 import type { WayClass } from './osm-types';
 
+export interface ClassifyOptions {
+  /** Offer footway=sidewalk as GLUE candidates (default true; graph-build keeps only the connecting spans). */
+  glueSidewalks?: boolean;
+  /** Offer driveways, parking aisles and unnamed service roads as GLUE candidates (default true). */
+  glueService?: boolean;
+}
+
+/** WayClass plus the builder-only GLUE marker (connector that routes but never counts as new). */
+export interface WayClassEx extends WayClass {
+  glue: boolean;
+}
+
 /** highway=* values that can enter the graph (anything else is dropped). */
 export const KEPT_HIGHWAYS: ReadonlySet<string> = new Set([
   'motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link', 'secondary', 'secondary_link',
@@ -21,34 +33,46 @@ const DRIVE_HIGHWAYS: ReadonlySet<string> = new Set([
   'tertiary', 'tertiary_link', 'residential', 'living_street', 'unclassified', 'service',
 ]);
 
-/** footway=* sub-types that duplicate a street (dropped). */
-const DROPPED_FOOTWAY: ReadonlySet<string> = new Set(['sidewalk', 'crossing', 'traffic_island']);
-/** service=* sub-types that are never worth exploring. */
-const DROPPED_SERVICE: ReadonlySet<string> = new Set(['driveway', 'parking_aisle', 'drive-through', 'emergency_access']);
+/**
+ * footway=* sub-types that duplicate a street. They are GLUE candidates: OSM's only link between
+ * bridge walkways / park paths / plazas and the street grid (without crossings walk mode cannot
+ * cross the East River). graph-build keeps just the spans that connect otherwise separate parts.
+ */
+const GLUE_FOOTWAY: ReadonlySet<string> = new Set(['crossing', 'traffic_island', 'sidewalk']);
+/** service=* sub-types that are never worth exploring — but may connect a path to the street (glue). */
+const GLUE_SERVICE: ReadonlySet<string> = new Set(['driveway', 'parking_aisle']);
+const DROPPED_SERVICE: ReadonlySet<string> = new Set(['drive-through', 'emergency_access']);
 /** Pedestrian-ish highways where a bike must dismount unless explicitly allowed. */
 const DISMOUNT_HIGHWAYS: ReadonlySet<string> = new Set(['footway', 'pedestrian', 'bridleway']);
 
 const ALLOW: ReadonlySet<string> = new Set(['yes', 'designated', 'permissive', 'destination', 'official']);
 const DENY: ReadonlySet<string> = new Set(['no', 'private']);
 
-const DROPPED: WayClass = Object.freeze({
+const DROPPED: WayClassEx = Object.freeze({
   keep: false, walk: false, bike: false, drive: false, steps: false, dismount: false,
-  onewayFwd: false, onewayBack: false, bikeBothWays: false,
+  onewayFwd: false, onewayBack: false, bikeBothWays: false, glue: false,
 });
 
 const allows = (v: string | undefined) => v !== undefined && ALLOW.has(v);
 const denies = (v: string | undefined) => v !== undefined && DENY.has(v);
 
 /** Classify one way by its tags. Returns `keep: false` (all bits off) for ways that never enter the graph. */
-export function classifyWay(tags: Readonly<Record<string, string>>): WayClass {
+export function classifyWay(tags: Readonly<Record<string, string>>, opts: ClassifyOptions = {}): WayClassEx {
   const highway = tags.highway;
   if (!highway || !KEPT_HIGHWAYS.has(highway)) return DROPPED;
   if (tags.area === 'yes') return DROPPED;
-  if (highway === 'footway' && tags.footway !== undefined && DROPPED_FOOTWAY.has(tags.footway)) return DROPPED;
+  let glue = false;
+  if (highway === 'footway' && tags.footway !== undefined && GLUE_FOOTWAY.has(tags.footway)) {
+    if (tags.footway === 'sidewalk' && opts.glueSidewalks === false) return DROPPED;
+    glue = true;
+  }
   if (highway === 'service') {
     const service = tags.service;
     if (service !== undefined && DROPPED_SERVICE.has(service)) return DROPPED;
-    if (!tags.name && service !== 'alley') return DROPPED;
+    if ((service !== undefined && GLUE_SERVICE.has(service)) || (!tags.name && service !== 'alley')) {
+      if (opts.glueService === false) return DROPPED;
+      glue = true;
+    }
   }
 
   const foot = tags.foot, bicycle = tags.bicycle, vehicle = tags.vehicle;
@@ -75,8 +99,8 @@ export function classifyWay(tags: Readonly<Record<string, string>>): WayClass {
   if (denies(bicycle)) bike = false;
   if (dismount && !walk) bike = false; // walking the bike needs foot access
 
-  // --- drive ---
-  let drive = DRIVE_HIGHWAYS.has(highway) || (highway === 'track' && allows(motor));
+  // --- drive (never on glue: connectors route pedestrians and bikes, not cars) ---
+  let drive = !glue && (DRIVE_HIGHWAYS.has(highway) || (highway === 'track' && allows(motor)));
   if (denies(vehicle) && !allows(motor)) drive = false;
   if (denies(motor)) drive = false;
 
@@ -105,6 +129,7 @@ export function classifyWay(tags: Readonly<Record<string, string>>): WayClass {
     steps: highway === 'steps',
     dismount: bike && dismount,
     onewayFwd, onewayBack, bikeBothWays,
+    glue,
   };
 }
 

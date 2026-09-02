@@ -6,8 +6,9 @@
  *
  * Options: --out <dir> (default public/graph/<region>), --bbox w,s,e,n (PBF: keep ways touching the
  * box; also the manifest bbox), --source "<text>", --index <file> (default public/graph/index.json),
- * --zoom <n> (default 12). Writes <out>/12/<x>/<y>.ufg + <out>/manifest.json and merges the region
- * into the index. See docs/BUILD-PLAN.md §2.4 "How to run".
+ * --zoom <n> (default 12), --no-sidewalk-glue / --no-service-glue (exclude those GLUE candidates).
+ * Writes <out>/12/<x>/<y>.ufg + <out>/manifest.json and merges the region into the index, then
+ * prints stats including per-mode connectivity. See docs/BUILD-PLAN.md §2.4 "How to run".
  */
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -16,6 +17,7 @@ import { buildGraphTiles } from '../../src/routing/graph-build';
 import { classifyWay } from '../../src/routing/osm-rules';
 import { fetchOverpassWays } from '../../src/routing/overpass';
 import type { OsmWay } from '../../src/routing/osm-types';
+import { connectivity } from './connectivity';
 import { loadPbfWays } from './pbf-ways';
 
 type BBox = [west: number, south: number, east: number, north: number];
@@ -30,15 +32,18 @@ interface Args {
   bbox?: BBox;
   source?: string;
   zoom: number;
+  glueSidewalks: boolean;
+  glueService: boolean;
 }
 
 const USAGE = `usage:
   build-graph --pbf <file.osm.pbf> --region <id> --name "<name>" [--out <dir>] [--bbox w,s,e,n] [--source "<text>"] [--index <file>]
   build-graph --overpass w,s,e,n --region <id> --name "<name>" [--out <dir>] [--source "<text>"] [--index <file>]
+  common: --zoom <n> (12) · --no-sidewalk-glue · --no-service-glue (exclude sidewalks / driveways+parking aisles+unnamed service as GLUE candidates)
 Large extracts: NODE_OPTIONS=--max-old-space-size=8192 npm run build-graph -- --pbf … (see docs/BUILD-PLAN.md §2.4).`;
 
 function parseArgs(argv: string[]): Args {
-  const a: Partial<Args> = { zoom: GRAPH_ZOOM };
+  const a: Partial<Args> = { zoom: GRAPH_ZOOM, glueSidewalks: true, glueService: true };
   const bbox = (s: string, flag: string): BBox => {
     const p = s.split(',').map(Number);
     if (p.length !== 4 || p.some((v) => !Number.isFinite(v))) throw new Error(`${flag}: expected w,s,e,n`);
@@ -57,6 +62,8 @@ function parseArgs(argv: string[]): Args {
       case '--bbox': a.bbox = bbox(need(), k); break;
       case '--source': a.source = need(); break;
       case '--zoom': a.zoom = Number(need()); break;
+      case '--no-sidewalk-glue': a.glueSidewalks = false; break;
+      case '--no-service-glue': a.glueService = false; break;
       case '-h': case '--help': console.log(USAGE); process.exit(0); break;
       default: throw new Error(`unknown argument ${k}\n${USAGE}`);
     }
@@ -101,8 +108,16 @@ async function main(): Promise<void> {
   }
 
   const tb = performance.now();
-  const result = buildGraphTiles(ways, { zoom });
+  const result = buildGraphTiles(ways, { zoom, glueSidewalks: args.glueSidewalks, glueService: args.glueService });
   log(`graph: ${result.stats.ways} ways → ${result.stats.nodes} nodes, ${result.stats.arcs} arcs, ${result.stats.km.toFixed(1)} km, ${result.tiles.size} tiles (${((performance.now() - tb) / 1000).toFixed(1)} s)`);
+  log(`glue: ${result.glue.candidates} candidate ways → ${result.glue.ways} kept as connectors, ${result.glue.arcs} arcs, ${result.glue.km.toFixed(1)} km (not counted in stats.km)`);
+  const tc = performance.now();
+  const conn = connectivity(result.tiles.values());
+  for (const mode of ['walk', 'bike', 'drive'] as const) {
+    const c = conn[mode];
+    log(`connectivity ${mode}: largest component ${c.largest}/${c.nodes} nodes (${(100 * c.pct).toFixed(1)} %), ${c.components} components, ${c.arcs} arcs (${c.glueArcs} glue)`);
+  }
+  log(`connectivity computed in ${((performance.now() - tc) / 1000).toFixed(1)} s`);
 
   // ---- write tiles ----
   const out = resolve(args.out);
@@ -180,6 +195,8 @@ async function main(): Promise<void> {
     region: manifest.id, name: manifest.name, source: manifest.source, bbox: manifest.bbox,
     ways: result.stats.ways, nodes: result.stats.nodes, arcs: result.stats.arcs, km: manifest.stats.km,
     tiles: tiles.length, bytes, largestTile: { path: largest[0], bytes: largest[1] },
+    glue: { candidates: result.glue.candidates, ways: result.glue.ways, arcs: result.glue.arcs, km: Math.round(result.glue.km * 10) / 10, sidewalks: args.glueSidewalks, service: args.glueService },
+    connectivity: Object.fromEntries((['walk', 'bike', 'drive'] as const).map((m) => [m, { pct: Math.round(conn[m].pct * 1000) / 1000, largest: conn[m].largest, nodes: conn[m].nodes, components: conn[m].components }])),
     wallS: Math.round(wall * 10) / 10, maxRssMB: Math.round(ru.maxRSS / 1024), out, index: indexPath,
   }, null, 2));
 }

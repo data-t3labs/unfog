@@ -139,11 +139,21 @@ export class RouteEngine implements RouteApi {
     return c;
   }
 
+  /**
+   * Cells must be ready for the WHOLE merged graph, not just the request bbox: the search brushes
+   * past arcs well outside the ellipse (every relaxed arc is scored, and the merged tiles reach
+   * ~7 km beyond the request), and the novelty cache keeps a score for as long as the graph lives —
+   * a score taken while its cells were unloaded would be stale for every later request.
+   */
+  private prepareCells(c: CachedGraph): Promise<number> | undefined {
+    return this.cells.prepare?.(c.graph.bbox);
+  }
+
   async route(req: RouteRequest): Promise<RouteResult> {
     const t0 = now();
     const bbox = routeBBox(req.from, req.to);
     const c = await this.graphFor(bbox);
-    await this.cells.prepare?.(bbox);
+    await this.prepareCells(c);
     const res = findCandidates(c.graph, this.cells, req, { spatial: c.spatial, scorer: c.scorer, searcher: c.searcher, graphTiles: c.graph.tileKeys.length });
     res.ms = Math.round(now() - t0);
     return res;
@@ -153,7 +163,7 @@ export class RouteEngine implements RouteApi {
     const t0 = now();
     const bbox = padBBox([req.from[0], req.from[1], req.from[0], req.from[1]], Math.max(1000, req.targetKm * 500));
     const c = await this.graphFor(bbox);
-    await this.cells.prepare?.(bbox);
+    await this.prepareCells(c);
     const res = findLoops(c.graph, this.cells, req, { spatial: c.spatial, scorer: c.scorer, searcher: c.searcher, graphTiles: c.graph.tileKeys.length });
     res.ms = Math.round(now() - t0);
     return res;

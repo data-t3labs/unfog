@@ -7,8 +7,27 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ArcFlag, NodeFlag, graphTileBounds, graphTilePath, lonLatToGraphTile, unpackGraphTile, type RegionManifest } from '../../src/routing/graph-format';
+import { MapCellLookup } from '../../src/routing/cells';
+import { Graph } from '../../src/routing/graph';
+import { NoveltyScorer } from '../../src/routing/novelty';
+import { Searcher } from '../../src/routing/search';
+import { SpatialIndex } from '../../src/routing/spatial';
+import { connectivity } from './connectivity';
 
 const GRAPH_DIR = fileURLToPath(new URL('../../public/graph/', import.meta.url));
+
+/** OSM id of the local node nearest to a lon/lat (planar in 1e-7 degrees — fine for a probe). */
+function nearestNode(tiles: Array<{ nodeId: Float64Array; nodeLon: Int32Array; nodeLat: Int32Array; nodeFlags: Uint8Array; arcStart: Uint32Array }>, lon: number, lat: number): number {
+  const x = lon * 1e7, y = lat * 1e7;
+  let best = -1, bestD = Infinity;
+  for (const t of tiles) for (let i = 0; i < t.nodeId.length; i++) {
+    if (t.nodeFlags[i] & NodeFlag.FOREIGN) continue;
+    const dx = (t.nodeLon[i] - x) * Math.cos((lat * Math.PI) / 180), dy = t.nodeLat[i] - y;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = t.nodeId[i]; }
+  }
+  return best;
+}
 const INDEX = join(GRAPH_DIR, 'index.json');
 
 const regions = existsSync(GRAPH_DIR)
@@ -96,15 +115,48 @@ describe.skipIf(regions.length === 0)('prebuilt graph regions (skipped when publ
         expect(totalArcs).toBeGreaterThan(totalLocal); // avg degree > 1
       });
 
-      it('per-tile local node + arc counts add up to the manifest stats', { timeout: 120_000 }, () => {
+      it('per-tile local node + arc counts add up to the manifest stats; walk ≥ 85 % connected, bike/drive ≥ 75 %', { timeout: 180_000 }, () => {
         let nodes = 0, arcs = 0;
-        for (const [tx, ty] of manifest.tiles) {
-          const t = unpackGraphTile(new Uint8Array(readFileSync(join(dir, graphTilePath(tx, ty, manifest.zoom)))));
+        const all = manifest.tiles.map(([tx, ty]) => unpackGraphTile(new Uint8Array(readFileSync(join(dir, graphTilePath(tx, ty, manifest.zoom))))));
+        for (const t of all) {
           for (let i = 0; i < t.nodeId.length; i++) if (!(t.nodeFlags[i] & NodeFlag.FOREIGN)) nodes++;
           arcs += t.arcTo.length;
         }
         expect(nodes).toBe(manifest.stats.nodes);
         expect(arcs).toBe(manifest.stats.arcs);
+        // Review F1: without crossings as GLUE the walk network split Manhattan from Brooklyn (58 % / 31 %).
+        // Measured 2026-09-02 (BBBike extracts): nyc walk 81.0 % / bike 80.7 % / drive 99.3 %; vancouver 87.6 / 87.0 / 99.4.
+        const conn = connectivity(all);
+        console.log(`${id} connectivity: ` + (['walk', 'bike', 'drive'] as const).map((m) => `${m} ${(100 * conn[m].pct).toFixed(1)} % (${conn[m].largest}/${conn[m].nodes}, ${conn[m].components} comps, ${conn[m].glueArcs} glue arcs)`).join(' · '));
+        expect(conn.walk.pct, 'walk').toBeGreaterThanOrEqual(0.85); // lead's bar for the F1 fix
+        for (const m of ['bike', 'drive'] as const) expect(conn[m].pct, m).toBeGreaterThanOrEqual(0.75);
+        expect(conn.walk.glueArcs).toBeGreaterThan(0);
+        // The concrete F1 scenario: landmarks on both sides of the East River share one walk component.
+        const probes: Record<string, Array<[name: string, lon: number, lat: number]>> = {
+          nyc: [['Times Square', -73.9855, 40.758], ['Prospect Park', -73.969, 40.6602], ['Bedford Av & N 7th', -73.9568, 40.7176], ['Astoria', -73.9235, 40.7644]],
+          vancouver: [['Downtown', -123.1207, 49.2827], ['Metrotown', -123.0031, 49.2276], ['Lonsdale Quay', -123.0819, 49.3097]],
+        };
+        for (const mode of ['walk', 'bike'] as const) {
+          const comps = (probes[id] ?? []).map(([name, lon, lat]) => [name, conn[mode].componentOf(nearestNode(all, lon, lat))] as const);
+          for (const [name, comp] of comps) expect(comp, `${mode}: ${name}`).toBeGreaterThanOrEqual(0);
+          for (const [name, comp] of comps) expect(comp, `${mode}: ${name} is cut off from ${comps[0][0]}`).toBe(comps[0][1]);
+        }
+      });
+
+      it.skipIf(id !== 'nyc')('the engine finds a walk route Times Square → Prospect Park (review F1)', { timeout: 180_000 }, () => {
+        const all = manifest.tiles.map(([tx, ty]) => unpackGraphTile(new Uint8Array(readFileSync(join(dir, graphTilePath(tx, ty, manifest.zoom))))));
+        const graph = new Graph(all);
+        const spatial = new SpatialIndex(graph);
+        const searcher = new Searcher(graph, new NoveltyScorer(graph, new MapCellLookup()));
+        const from = spatial.nearestArc(-73.9855, 40.758, ArcFlag.WALK)!, to = spatial.nearestArc(-73.969, 40.6602, ArcFlag.WALK)!;
+        expect(from).not.toBeNull(); expect(to).not.toBeNull();
+        const p = searcher.run(from, to, { lambda: 0, mode: 'walk' });
+        expect(p, 'no walk path across the East River').not.toBeNull();
+        expect(p!.lengthM).toBeGreaterThan(10_000); // ~12–14 km on foot
+        expect(p!.lengthM).toBeLessThan(20_000);
+        let glueM = 0;
+        for (const a of Array.from(p!.arcs)) if (graph.arcFlags[a] & ArcFlag.GLUE) glueM += graph.arcLen[a];
+        console.log(`nyc walk Times Square → Prospect Park: ${Math.round(p!.lengthM)} m over ${p!.arcs.length} arcs, ${Math.round(glueM)} m of glue, ${p!.settled} settled`);
       });
     });
   }

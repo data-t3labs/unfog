@@ -6,7 +6,7 @@ import { Graph } from './graph';
 import { MapCellLookup } from './cells';
 import { NoveltyScorer } from './novelty';
 import { Searcher, hasImmediateUTurn } from './search';
-import { LAMBDA_SWEEP, findCandidates, snapPoint, sweep } from './candidates';
+import { LAMBDA_SWEEP, findCandidates, selectAlternatives, snapPoint, sweep, type ScoredPath } from './candidates';
 import { SpatialIndex } from './spatial';
 import { findLoops } from './loop';
 
@@ -106,6 +106,21 @@ describe('lattice across a tile boundary', () => {
     expect(sw.searches).toBeLessThan(1 + LAMBDA_SWEEP.length);
   });
 
+  it('"Balanced" is the distinct alternative with the best new metres per extra metre, not the runner-up by new metres (review F5)', () => {
+    const sp = (lengthM: number, newM: number, segs: number[], lambda = 1): ScoredPath =>
+      ({ arcs: Uint32Array.from(segs), lengthM, newM, cost: 0, startFrac: 0, endFrac: 1, settled: 0, lambda, segments: new Set(segs) });
+    const direct = sp(1000, 0, [1, 2, 3, 4, 5], 0);
+    const most = sp(1250, 900, [11, 12, 13, 14, 15]);
+    const nearClone = sp(1240, 850, [21, 22, 23, 24, 25]); // nearly as long, less new: a poor third option
+    const cheap = sp(1010, 400, [31, 32, 33, 34, 35]); // 400 new metres for 10 extra metres
+    const dup = sp(1230, 880, [11, 12, 13, 14, 45]); // shares 80 % with Most new
+    const feasible = [most, dup, nearClone, cheap]; // ranked by new metres, as sweep() returns them
+    expect(selectAlternatives(direct, feasible, 1)).toEqual([most]);
+    expect(selectAlternatives(direct, feasible, 2)).toEqual([most, cheap]);
+    expect(selectAlternatives(direct, feasible, 3)).toEqual([most, cheap, nearClone]);
+    expect(selectAlternatives(direct, [sp(1100, 0, [51, 52])], 2)).toEqual([]); // nothing beats Direct
+  });
+
   it('drive respects oneway rows, walk does not', () => {
     const ow = makeLattice({ size: 6, spacingM: 100, onewayRows: [2] });
     const g = new Graph([...ow.tiles.values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
@@ -128,8 +143,8 @@ describe('loop mode', () => {
     expect(res.candidates.length).toBeGreaterThanOrEqual(1);
     expect(res.candidates.length).toBeLessThanOrEqual(3);
     for (const c of res.candidates) {
-      expect(c.lengthM).toBeGreaterThanOrEqual(1200);
-      expect(c.lengthM).toBeLessThanOrEqual(3000);
+      expect(c.lengthM).toBeGreaterThanOrEqual(1500); // ±25 % of the 2 km target
+      expect(c.lengthM).toBeLessThanOrEqual(2500);
       expect(c.coords[0][0]).toBeCloseTo(from[0], 5);
       expect(c.coords[c.coords.length - 1][0]).toBeCloseTo(from[0], 5);
       expect(c.coords[c.coords.length - 1][1]).toBeCloseTo(from[1], 5);

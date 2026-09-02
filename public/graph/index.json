@@ -9,15 +9,15 @@
       -73.65336,
       40.98588
     ],
-    "builtAt": "2026-09-02T08:03:22.578Z",
+    "builtAt": "2026-09-02T11:09:49.766Z",
     "source": "BBBike NewYork.osm.pbf 2026-09-02",
     "stats": {
-      "nodes": 310008,
-      "arcs": 778326,
+      "nodes": 358145,
+      "arcs": 916492,
       "km": 32447.7
     },
     "tileCount": 67,
-    "bytes": 15317491
+    "bytes": 16823605
   },
   {
     "id": "vancouver",
@@ -29,14 +29,14 @@
       -122.5235,
       49.43752
     ],
-    "builtAt": "2026-09-02T08:02:36.906Z",
+    "builtAt": "2026-09-02T11:09:39.626Z",
     "source": "BBBike Vancouver.osm.pbf 2026-09-02",
     "stats": {
-      "nodes": 174499,
-      "arcs": 419836,
+      "nodes": 193742,
+      "arcs": 479772,
       "km": 15256.6
     },
     "tileCount": 61,
-    "bytes": 8715716
+    "bytes": 9378305
   }
 ]
