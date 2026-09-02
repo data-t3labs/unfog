@@ -87,6 +87,12 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   only), pedestrian, footway (NOT footway=sidewalk|crossing), path, cycleway, track, steps, bridleway}; drop construction/proposed/
   raceway/platform/bus_stop/elevator/corridor; access=private|no drops unless mode-specific tags allow. Per-mode bits from tags (see
   `osm-rules.ts` — the single rule table with unit tests).
+- GLUE connectors (review F1, 2026-09-02): sidewalks, crossings, traffic islands, driveways, parking aisles and unnamed service roads
+  are OSM's only links between bridge walkways / park paths / plazas and the street grid — dropping them all split NYC's walk network
+  at the East River. They enter the build as *candidates*; graph-build keeps only the segments that join otherwise separate parts of
+  the walk or bike network (Kruskal over per-mode union-find, shortest first, dangling ends trimmed) and flags them `ArcFlag.GLUE`:
+  walk + bike (dismount per tags), never drive; the engine prices them at plain length with 0 new metres and `stats.km` excludes them.
+  Result: NYC walk connectivity 31 % → 95 % for +18 % arcs and 0 km change. `--no-sidewalk-glue` / `--no-service-glue` opt out.
 - Topology: graph nodes = way endpoints + nodes shared by ≥2 kept ways; arcs = way runs between graph nodes; shape = intermediate nodes.
 - Tiling: arcs stored in the tile of their from-node; foreign endpoints included as FOREIGN nodes. Output `public/graph/<region>/`.
 
@@ -106,8 +112,9 @@ manifest bbox), `--source "<text>"`, `--index <file>` (default `public/graph/ind
 (`packGraphTile`), `manifest.json` (`RegionManifest` with per-tile bytes), and the region merged into `index.json`
 (manifests without `tiles`, plus `tileCount` + `bytes`). Stale tiles from a previous build of the same region are removed.
 The PBF reader streams blob by blob (two passes: highway ways, then only the referenced nodes), so memory is set by the
-kept graph, not the extract: Vancouver (65 MB) builds in ≈ 5 s / 0.53 GB peak RSS and NYC (153 MB) in ≈ 11 s / 0.74 GB
-on the M2 with Node's default heap.
+kept graph plus the glue candidates: Vancouver (65 MB) builds in ≈ 5 s / 0.9 GB peak RSS and NYC (153 MB) in ≈ 10 s / 1.4 GB
+on the M2 with Node's default heap. The CLI prints per-mode connectivity (largest component / walk-reachable nodes) after
+every build — expect ≥ 95 % walk for a city extract; a drop means a rule change cut the network.
 For bigger extracts (a state/province) raise the heap: `NODE_OPTIONS=--max-old-space-size=8192 npm run build-graph -- …`.
 Only zlib-compressed PBFs are supported (BBBike/Geofabrik default); re-encode others with
 `osmium cat in.pbf -o out.pbf --output-format pbf,pbf_compression=zlib`.
