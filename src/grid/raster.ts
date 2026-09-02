@@ -46,3 +46,26 @@ export function rasterizeTrack(
   }
   return out;
 }
+
+/**
+ * Cells in `a` that are not in `b` (both as returned by rasterizeTrack: sorted per tile). Used
+ * when a track id is re-marked with more points (recording checkpoints): only the difference gets
+ * counted. Tiles left empty are dropped.
+ */
+export function subtractRaster(a: Map<number, Uint32Array>, b: Map<number, Uint32Array>): Map<number, Uint32Array> {
+  const out = new Map<number, Uint32Array>();
+  for (const [key, cells] of a) {
+    const old = b.get(key);
+    if (!old || old.length === 0) { out.set(key, cells); continue; }
+    const keep = new Uint32Array(cells.length);
+    let n = 0, j = 0;
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
+      while (j < old.length && old[j] < c) j++;
+      if (j < old.length && old[j] === c) continue;
+      keep[n++] = c;
+    }
+    if (n > 0) out.set(key, keep.subarray(0, n));
+  }
+  return out;
+}

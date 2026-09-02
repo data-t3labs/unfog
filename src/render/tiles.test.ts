@@ -84,6 +84,11 @@ describe('fog tile', () => {
     expect(rgba(noHalo, 512, px, py + 8)[3]).toBe(204);
     const lighter = await renderOverlayTile({ z, x, y, mode: 'fog' }, { ...S, fogAlpha: 0.5 }, p);
     expect(rgba(lighter, 512, px, py + 120)[3]).toBe(128);
+    // widest feather (σ 6 cells = 24 px here): halo reaches further, core still crisp, far still fog
+    const widest = await renderOverlayTile({ z, x, y, mode: 'fog' }, { ...S, feather: 6, halo: 0.8 }, p);
+    expect(rgba(widest, 512, px, py)[3]).toBeLessThanOrEqual(3);
+    expect(rgba(widest, 512, px, py + 32)[3]).toBeLessThan(rgba(wide, 512, px, py + 32)[3]);
+    expect(rgba(widest, 512, px, py + 120)[3]).toBe(204);
   });
 
   it('empty regions are a flat fog tile (fast path) and match the far-field of a rendered tile', async () => {
@@ -99,19 +104,22 @@ describe('fog tile', () => {
     const seamX = (x + 1) * cellsPerTile;
     q.line(seamX - 60, HCY - 30, seamX + 60, HCY + 30, 1);
     q.line(seamX - 3, HCY - 60, seamX + 3, HCY + 60, 3);
-    const left = await renderOverlayTile({ z, x, y, mode: 'fog' }, S, q);
-    const right = await renderOverlayTile({ z, x: x + 1, y, mode: 'fog' }, S, q);
-    const both = await renderOverlayRegion({ level: 14, cx0: x * cellsPerTile, cy0: y * cellsPerTile, cellPx: 4, width: 1024, height: 512, mode: 'fog' }, S, q);
-    let maxDiff = 0;
-    for (let py = 0; py < 512; py++) {
-      for (let px = 0; px < 1024; px++) {
-        const tile = px < 512 ? left : right;
-        const a = tile[(py * 512 + (px & 511)) * 4 + 3];
-        const b = both[(py * 1024 + px) * 4 + 3];
-        maxDiff = Math.max(maxDiff, Math.abs(a - b));
+    // defaults, and the widest feather / strongest halo the settings allow (σ = 6 cells)
+    for (const settings of [S, { ...S, feather: 6, halo: 0.8 }]) {
+      const left = await renderOverlayTile({ z, x, y, mode: 'fog' }, settings, q);
+      const right = await renderOverlayTile({ z, x: x + 1, y, mode: 'fog' }, settings, q);
+      const both = await renderOverlayRegion({ level: 14, cx0: x * cellsPerTile, cy0: y * cellsPerTile, cellPx: 4, width: 1024, height: 512, mode: 'fog' }, settings, q);
+      let maxDiff = 0;
+      for (let py = 0; py < 512; py++) {
+        for (let px = 0; px < 1024; px++) {
+          const tile = px < 512 ? left : right;
+          const a = tile[(py * 512 + (px & 511)) * 4 + 3];
+          const b = both[(py * 1024 + px) * 4 + 3];
+          maxDiff = Math.max(maxDiff, Math.abs(a - b));
+        }
       }
+      expect(maxDiff).toBeLessThanOrEqual(2);
     }
-    expect(maxDiff).toBeLessThanOrEqual(2);
     // heat too (different margin/sigmas)
     const hl = await renderOverlayTile({ z, x, y, mode: 'heat' }, S, q);
     const hr = await renderOverlayTile({ z, x: x + 1, y, mode: 'heat' }, S, q);
@@ -200,17 +208,21 @@ describe('render performance', () => {
   it('renders a synthetic city tile at z12 / z15 / z17 well under budget', async () => {
     const { provider } = syntheticCity();
     const results: Record<string, number> = {};
-    for (const [z, mode] of [[12, 'fog'], [15, 'fog'], [17, 'fog'], [15, 'heat']] as Array<[number, 'fog' | 'heat']>) {
+    const cases: Array<[number, 'fog' | 'heat', RenderSettings, string]> = [
+      [12, 'fog', S, 'z12-fog'], [15, 'fog', S, 'z15-fog'], [17, 'fog', S, 'z17-fog'], [15, 'heat', S, 'z15-heat'],
+      [15, 'fog', { ...S, feather: 6, halo: 0.8 }, 'z15-fog-feather6'],
+    ];
+    for (const [z, mode, settings, label] of cases) {
       const t = tileAt(z, HCX, HCY);
-      await renderOverlayTile({ z, ...t, mode }, S, provider); // warm-up (JIT + overview cache)
+      await renderOverlayTile({ z, ...t, mode }, settings, provider); // warm-up (JIT + overview cache)
       const times: number[] = [];
       for (let i = 0; i < 5; i++) {
         const t0 = performance.now();
-        await renderOverlayTile({ z, ...t, mode }, S, provider);
+        await renderOverlayTile({ z, ...t, mode }, settings, provider);
         times.push(performance.now() - t0);
       }
       times.sort((a, b) => a - b);
-      results[`z${z}-${mode}`] = times[2];
+      results[label] = Math.round(times[2] * 10) / 10;
     }
     // eslint-disable-next-line no-console
     console.log('render timings (median of 5, ms):', JSON.stringify(results));
@@ -218,5 +230,6 @@ describe('render performance', () => {
     expect(results['z12-fog']).toBeLessThan(100);
     expect(results['z17-fog']).toBeLessThan(50);
     expect(results['z15-heat']).toBeLessThan(50);
+    expect(results['z15-fog-feather6']).toBeLessThan(50);
   });
 });

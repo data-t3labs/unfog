@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cellToTile, lonLatToCell, parseTileKey, tileKey } from './cell';
-import { rasterizeTrack } from './raster';
+import { rasterizeTrack, subtractRaster } from './raster';
 
 const A: [number, number] = [-73.9568, 40.7176];
 const B: [number, number] = [-73.954, 40.7176]; // ~236 m east
@@ -43,5 +43,20 @@ describe('rasterizeTrack', () => {
   it('accepts [lon, lat, t] points and ignores t', () => {
     const r = rasterizeTrack([[A[0], A[1], 1e12], [B[0], B[1], 1e12 + 1000]]);
     expect(totalCells(r)).toBe(totalCells(rasterizeTrack([A, B])));
+  });
+
+  it('subtractRaster keeps only cells the earlier polyline did not touch (checkpoint merges)', () => {
+    const C: [number, number] = [-73.954, 40.7196]; // ~220 m north of B
+    const old = rasterizeTrack([A, B]);
+    const full = rasterizeTrack([A, B, C]);
+    const diff = subtractRaster(full, old);
+    expect(totalCells(diff)).toBe(totalCells(full) - totalCells(old));
+    for (const [k, cells] of diff) {
+      const o = old.get(k);
+      for (const c of cells) expect(o ? o.includes(c) : false).toBe(false);
+      for (let i = 1; i < cells.length; i++) expect(cells[i]).toBeGreaterThan(cells[i - 1]);
+    }
+    expect(totalCells(subtractRaster(old, old))).toBe(0);
+    expect(subtractRaster(old, new Map())).toEqual(old);
   });
 });

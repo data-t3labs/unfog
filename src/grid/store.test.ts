@@ -79,13 +79,39 @@ describe('CellStore', () => {
     const s = store();
     await s.markTrack(track('t1', [A, B]));
     const v1 = (await s.getStats()).version;
-    const again = await s.markTrack(track('t1', [B, A]));
+    const again = await s.markTrack(track('t1', [A, B]));
     expect(again.stats.version).toBe(v1);
     expect(again.touched).toEqual([]);
     await s.markTrack(track('t2', [A, B]));
     const t = await tileOrEmpty(s, 14, ATX, ATY);
     expect(t[ACY % TILE_SIZE * TILE_SIZE + (ACX % TILE_SIZE)]).toBe(2);
     expect((await s.listTracks()).map((x) => x.id).sort()).toEqual(['t1', 't2']);
+  });
+
+  it('re-marking an id with more points counts only the new cells (recording checkpoints)', async () => {
+    const s = store();
+    const C: [number, number] = [-73.954, 40.7196]; // ~220 m north of B
+    const [CCX, CCY] = lonLatToCell(C[0], C[1]);
+    const { tx: CTX, ty: CTY } = cellToTile(CCX, CCY);
+    const r1 = await s.markTrack(track('sess', [A, B], 'session'));
+    const r2 = await s.markTrack(track('sess', [A, B, C], 'session'));
+    expect(r2.stats.version).toBe(r1.stats.version + 1);
+    expect(r2.stats.visitedCells).toBeGreaterThan(r1.stats.visitedCells + 20);
+    const ab = await tileOrEmpty(s, 14, ATX, ATY);
+    expect(ab[(ACY & 255) * TILE_SIZE + (ACX & 255)]).toBe(1); // A→B not double counted
+    const bc = await tileOrEmpty(s, 14, CTX, CTY);
+    expect(bc[(CCY & 255) * TILE_SIZE + (CCX & 255)]).toBe(1); // B→C counted once
+    expect((await s.listTracks()).length).toBe(1);
+    expect((await s.getTrack('sess'))?.points).toHaveLength(3);
+    // same points again: nothing changes, the record stays
+    const r3 = await s.markTrack(track('sess', [A, B, C], 'session'));
+    expect(r3.stats).toEqual(r2.stats);
+    expect(r3.touched).toEqual([]);
+    // the same id inside one payload merges too
+    const r4 = await s.applyPayload({ tracks: [track('p', [A, B]), track('p', [A, B, C])], meta: { source: 'gpx', items: 1 } });
+    expect(ab[(ACY & 255) * TILE_SIZE + (ACX & 255)]).toBe(2);
+    expect(r4.stats.visitedCells).toBe(r2.stats.visitedCells);
+    expect((await s.listTracks()).map((x) => x.id).sort()).toEqual(['p', 'sess']);
   });
 
   it('saturates at 255', async () => {

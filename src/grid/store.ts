@@ -6,8 +6,10 @@
  * Semantics (docs/BUILD-PLAN.md §2.1):
  * - FoW / backup cell tiles merge with MAX (idempotent).
  * - A track increments each touched base cell ONCE (rasteriser dedupes), saturating at 255.
- *   A track id that already exists is a no-op — importers that derive stable ids get idempotent
- *   re-imports for free.
+ *   Re-marking an id that already exists MERGES: the stored polyline is re-rasterised and only
+ *   cells it did not touch get +1, then the record is replaced by the new points. So the recorder
+ *   can checkpoint a running session under one id every minute and finish with the full track
+ *   without double counting, and importers with stable ids get idempotent re-imports.
  * - Overview levels 10/6/2 hold the max of their children, recomputed for the cells a changed
  *   base tile covers (16×16 level-10 cells, one level-6 cell, one level-2 cell).
  * - `deleteTrack` removes the record only; counts are NOT decremented. Counts are the union of
@@ -26,7 +28,7 @@ import { deflateSync, inflateSync } from 'fflate';
 import type { ApplyResult, TrackSummary } from './api';
 import { cellAreaM2, distanceM, parseTileKey, tileId, tileKey, TILE_SIZE } from './cell';
 import { levelKeyRange, openGridDb, type GridDb, type ImportRecord, type TileRecord, type TrackRecord } from './db';
-import { DEFAULT_RASTER, rasterizeTrack } from './raster';
+import { DEFAULT_RASTER, rasterizeTrack, subtractRaster } from './raster';
 import type { CellCounts, CellTileProvider, GridStats, ImportPayload, Level, Track } from './types';
 import { decodeBackup, encodeBackup, type BackupTile } from './backup';
 
@@ -213,10 +215,8 @@ export class CellStore implements CellTileProvider {
       await this.init();
       const touched = new Map<number, { tx: number; ty: number }>();
       const marked = await this.markTrackInternal(track, touched);
-      if (marked) {
-        this.bumpVersion();
-        await this.flush();
-      }
+      if (marked) this.bumpVersion(); // map tiles refresh only when cells changed
+      await this.flush(); // the track record is (re)written either way
       return { stats: { ...this.stats }, touched: [...touched.values()] };
     });
   }
@@ -483,27 +483,38 @@ export class CellStore implements CellTileProvider {
     return changed;
   }
 
-  /** Rasterise + mark a track once. Returns false when the id already exists (no-op). */
+  /**
+   * Rasterise + mark a track. If the id already exists (in the database or pending in this
+   * operation) only the cells the stored polyline did not touch are counted — see the header.
+   * Returns true when any cell changed.
+   */
   private async markTrackInternal(track: Track, touched: Map<number, { tx: number; ty: number }>): Promise<boolean> {
     const db = this.db as GridDb;
-    if (this.pendingTracks.some((r) => r.id === track.id) || (await db.get('tracks', track.id))) return false;
-    const raster = rasterizeTrack(track.points);
+    const pendingIdx = this.pendingTracks.findIndex((r) => r.id === track.id);
+    const previous = pendingIdx >= 0 ? this.pendingTracks[pendingIdx] : await db.get('tracks', track.id);
+    let raster = rasterizeTrack(track.points);
+    if (previous) {
+      // What the earlier version already counted; re-rasterising is deterministic and cheap.
+      raster = subtractRaster(raster, rasterizeTrack(recordToTrack(previous).points));
+    }
+    let changed = false;
     for (const [key, idx] of raster) {
       const { tx, ty } = parseTileKey(key);
       const e = await this.ensure(14, tx, ty);
       const dst = e.counts;
       const areas = this.areasForRow(ty);
-      let newly = 0, area = 0, changed = false;
+      let newly = 0, area = 0, tileChanged = false;
       for (let j = 0; j < idx.length; j++) {
         const i = idx[j];
         const c = dst[i];
         if (c === 0) { newly++; area += areas[i >> 8]; }
-        if (c < 255) { dst[i] = c + 1; changed = true; }
+        if (c < 255) { dst[i] = c + 1; tileChanged = true; }
       }
-      if (changed) await this.commitBaseChange(e, newly, area, touched);
+      if (tileChanged) { changed = true; await this.commitBaseChange(e, newly, area, touched); }
     }
-    this.pendingTracks.push(trackToRecord(track));
-    return true;
+    const rec = trackToRecord(track);
+    if (pendingIdx >= 0) this.pendingTracks[pendingIdx] = rec; else this.pendingTracks.push(rec);
+    return changed;
   }
 
   /** Bookkeeping after a base tile changed: stats, dirty, overview pyramid, auto-flush. */
