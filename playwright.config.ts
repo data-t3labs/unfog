@@ -10,6 +10,8 @@ const headlessShell =
 const executablePath = fs.existsSync(headlessShell) ? headlessShell : undefined;
 
 const iphone = devices['iPhone 15'];
+/** Build output for the preview server (gitignored via node_modules/). */
+const E2E_DIST = 'node_modules/.cache/unfog-e2e/dist';
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -34,10 +36,30 @@ export default defineConfig({
     geolocation: { longitude: -73.9568, latitude: 40.7176 },
     permissions: ['geolocation'],
   },
-  webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:5173/unfog/',
-    reuseExistingServer: true,
-    timeout: 90_000,
-  },
+  webServer: [
+    {
+      // HMR + watcher off (tests/e2e/vite.e2e.config.ts): a src/ edit during a run would otherwise
+      // full-reload the page mid-test.
+      command: 'npx vite --config tests/e2e/vite.e2e.config.ts --port 5173 --strictPort',
+      url: 'http://localhost:5173/unfog/',
+      reuseExistingServer: true,
+      timeout: 90_000,
+      // The e2e config imports vite.config without an extension (tsconfig has no allowImportingTsExtensions).
+      env: { VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true' },
+    },
+    // Production build + `vite preview` for the offline tests (tests/e2e/real.spec.ts): the service
+    // worker only exists in a build (initPwa returns early under import.meta.env.DEV). Own outDir and
+    // port so it never collides with `npm run build` / `npm run preview`. Skip with PW_NO_PREVIEW=1;
+    // the offline block then skips itself. A preview already listening on :4174 is reused (no rebuild).
+    ...(process.env.PW_NO_PREVIEW
+      ? []
+      : [
+          {
+            command: `npx vite build --outDir ${E2E_DIST} && npx vite preview --outDir ${E2E_DIST} --port 4174 --strictPort`,
+            url: 'http://localhost:4174/unfog/',
+            reuseExistingServer: true,
+            timeout: 180_000,
+          },
+        ]),
+  ],
 });

@@ -117,10 +117,13 @@ export function createDataScreen(ctx: AppContext): DataScreen {
   function describePayload(p: ImportPayload): string {
     const name = p.meta.fileName ?? p.meta.source;
     const parts: string[] = [];
-    if (p.cellTiles?.length) parts.push(`${fmtInt(p.cellTiles.length)} tiles`);
+    // "map tiles" = z14 cell tiles (the Stats screen's "map tiles with data"), not Fog of World tiles.
+    if (p.cellTiles?.length) parts.push(`${fmtInt(p.cellTiles.length)} map tiles`);
     if (p.tracks?.length) parts.push(`${fmtInt(p.tracks.length)} track${p.tracks.length === 1 ? '' : 's'}`);
     const src = sourceName(p.meta.source);
-    return `${name}: ${src}${parts.length ? ` — ${parts.join(', ')}` : ''}${p.meta.note ? ` (${p.meta.note})` : ''}`;
+    // Bare FoW tiles picked together arrive as "2 Fog of World tiles" — don't repeat the source after it.
+    const head = name.includes(src) ? name : `${name}: ${src}`;
+    return `${head}${parts.length ? ` — ${parts.join(', ')}` : ''}${p.meta.note ? ` (${p.meta.note})` : ''}`;
   }
 
   // ---- export
@@ -133,6 +136,11 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       const d = new Date();
       const name = `unfog-backup-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}.${engines.gridMock ? 'json' : 'zip'}`;
       const r = await shareOrDownload(name, new Uint8Array(bytes), engines.gridMock ? 'application/json' : 'application/zip');
+      if (r === 'cancelled') {
+        // Share sheet dismissed: no file left the device, so this is not a backup.
+        toast('Backup cancelled', { duration: 2500 });
+        return;
+      }
       writeJSON(LAST_BACKUP_KEY, { at: Date.now() } satisfies LastBackup);
       renderBackupInfo();
       toast(r === 'shared' ? 'Backup shared — save it to Files or iCloud Drive' : 'Backup downloaded', { kind: 'success', duration: 5000 });

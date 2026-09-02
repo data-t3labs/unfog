@@ -34,6 +34,27 @@ Fog of World → long-press **Sync** → Compress) on the phone; a charged phone
 | 23 | Wait for a new deploy, relaunch. | "Update available — Reload" toast; Reload loads the new version without losing data. | |
 | 24 | Import GPX (Apple Health export `workout-routes/*.gpx`) and a Google Timeline JSON. | Each shows as "1 track" / "N tracks"; stats list the sources. | |
 
+## Things the headless suite cannot prove — check on the phone
+
+The real-engine e2e suite (`tests/e2e/real.spec.ts`, Chromium with an iPhone 15 profile) drives the same
+code paths, but a few behaviours only exist on iOS. Do these explicitly:
+
+| # | Step | Expected | Result / iOS build |
+|---|------|----------|--------------------|
+| A1 | Data → Import files → in the Files picker, navigate to iCloud Drive → Fog of World → Sync and try to multi-select two **raw tile files** (no extension, e.g. `23e4lltkkoke`). | Files are selectable (the picker honours `application/octet-stream` in the `accept` list). If they are greyed out, that is an iOS `accept` filter problem: note it, then use Sync.zip instead (the zip path is always allowed). | |
+| A2 | Same picker: pick `Sync.zip` **and** a `.gpx` in one go. | Both import; the result list has one line per file. | |
+| A3 | Data → Export backup → in the share sheet tap **Cancel** (swipe it away). | Toast "Backup cancelled"; "No backup yet" / the old date stays; Stats → Last backup unchanged. (A dismissed share sheet must not count as a backup.) | |
+| A4 | Export backup → **Save to Files** → iCloud Drive. Then Stop a recording → Export GPX → Save to Files. | Files land with the names `unfog-backup-YYYYMMDD.zip` / `unfog-YYYY-MM-DD-HHMM.gpx`; the app toasts "Backup shared" / "GPX shared". In a Safari tab (not installed) the share sheet still offers files; if it does not, the app falls back to a download banner. | |
+| A5 | Fresh install, Home Screen app, location never granted: tap **Record** first (not the locate button). | One iOS prompt; after Allow the banner appears within a few seconds and the first fix is the first point (the dot appears where you stand). Deny → toast with the Help link, no banner, Record stays idle. | |
+| A6 | Record indoors / just after launch (coarse first fixes). | Fixes worse than 50 m are dropped silently — the banner distance stays 0 m until accuracy improves; the summary shows "N dropped". Walk to a window if it never starts. | |
+| A7 | Record, then lock the phone for 2 minutes. | On unlock the banner is still there and the elapsed time kept running; distance only grows again after the next fix (iOS gives none while locked). | |
+| A8 | Record, switch to Camera for 5+ minutes (or take several photos), come back. | If iOS killed the app: relaunch shows "Unfinished recording · N fixes" with Resume / Finish and save / Discard (the sheet cannot be dismissed by tapping outside). Resume keeps the same session; Finish saves every point. | |
+| A9 | Airplane mode **before the very first launch** of a fresh install (worst case: basemap style never cached). | The app still opens: plain grey ground instead of streets, fog/heat overlay renders over it, stats + Data work, routing works where graph data is cached. Turning networking back on swaps in the real basemap without a relaunch. | |
+| A10 | Airplane mode → "Where to?" → type a place. | Status "Search needs a connection", no crash; long-press still drops a pin and routes if graph data is cached. | |
+| A11 | Route somewhere in NYC that was never opened online, while offline, **without** having downloaded the region. | "No routing data for this area yet" with the region/area download buttons; tapping one fails with a clear "Download failed" line (no spinner stuck). | |
+| A12 | Help → Settings → change a slider with a finger drag (not a tap). | The value label follows the drag; the overlay re-renders only when the finger lifts (one re-render per gesture, no stutter). | |
+| A13 | Delete the Home Screen icon → Safari → same URL. | Data is gone (separate container) and the install card is back; importing the backup restores everything. | |
+
 ## Known iOS caveats (design expectations, not bugs)
 
 - **No background location.** Recording only works in the foreground with the screen on. Locking the phone or switching apps pauses fixes; long gaps are not bridged. Fill gaps with Apple Health / Strava GPX or Google Timeline imports.

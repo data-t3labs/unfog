@@ -3,7 +3,7 @@
  * protocols, route layers, user dot + destination pin, follow mode, long-press, camera memory.
  */
 import * as maplibregl from 'maplibre-gl';
-import type { RasterTileSource } from 'maplibre-gl';
+import type { RasterTileSource, StyleSpecification } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 // MapLibre 6 resolves its worker as `./maplibre-gl-worker.mjs` next to import.meta.url, which
 // neither Vite's dev pre-bundle nor the production chunk provides. Bundle the worker (with its
@@ -33,6 +33,23 @@ const CAMERA_KEY = 'unfog.camera';
 const OVERLAY_SOURCE = 'unfog-overlay';
 const OVERLAY_LAYER = 'unfog-overlay';
 const HIDE_SYMBOLS = /^poi|transit|housenumber|airport|station/;
+
+/**
+ * Basemap-less style used when the OpenFreeMap style cannot be fetched (offline before the service
+ * worker cached it, host down). Without a loaded style MapLibre never fires `load`, so the fog
+ * overlay, the route layers and everything gated on `onReady` would never appear. A plain ground
+ * keeps the fog/heat overlay and routing usable; the real style is retried on `online`.
+ */
+export const FALLBACK_STYLE_NAME = 'unfog-fallback';
+const FALLBACK_GROUND: Record<Basemap, string> = { bright: '#e9e6df', dark: '#23252c' };
+function fallbackStyle(basemap: Basemap): StyleSpecification {
+  return {
+    version: 8,
+    name: FALLBACK_STYLE_NAME,
+    sources: {},
+    layers: [{ id: 'unfog-ground', type: 'background', paint: { 'background-color': FALLBACK_GROUND[basemap] } }],
+  };
+}
 
 interface SavedCamera {
   c: LonLat;
@@ -75,6 +92,10 @@ export class UnfogMap {
   private readyCbs: Array<() => void> = [];
   private ready = false;
   private routeMode = false;
+  /** A style (real or fallback) has loaded at least once. */
+  private styleLoaded = false;
+  /** The fallback style is showing instead of the basemap. */
+  private onFallback = false;
   follow = false;
   lastFix: Fix | null = null;
 
@@ -116,7 +137,11 @@ export class UnfogMap {
     this.userEl.innerHTML = '<div class="user-dot-halo"></div><div class="user-dot-core"></div>';
     this.userMarker = new maplibregl.Marker({ element: this.userEl, anchor: 'center' });
 
-    map.on('style.load', () => this.onStyleLoad());
+    map.on('style.load', () => {
+      this.styleLoaded = true;
+      this.onFallback = map.getStyle()?.name === FALLBACK_STYLE_NAME;
+      this.onStyleLoad();
+    });
     map.on('load', () => {
       this.ready = true;
       for (const cb of this.readyCbs) cb();
@@ -126,11 +151,36 @@ export class UnfogMap {
     map.on('dragstart', () => this.userMoved());
     map.on('wheel', () => this.userMoved());
     map.on('error', (e) => {
-      // Tile errors are noisy offline; keep the console useful.
       const msg = e.error?.message ?? '';
+      // Before any style has loaded, an error that is not about a tile/source is the style request
+      // itself failing (offline, host down): fall back to the plain ground so the app still works.
+      const ev = e as unknown as Record<string, unknown>;
+      if (!this.styleLoaded && !('tile' in ev) && !('sourceId' in ev) && !('source' in ev)) {
+        console.warn('[map] basemap style unavailable, using the plain fallback:', msg);
+        this.useFallbackStyle();
+        return;
+      }
+      // Tile errors are noisy offline; keep the console useful.
       if (!/tile|fetch|network/i.test(msg)) console.warn('[map]', msg);
     });
+    window.addEventListener('online', () => this.retryBasemap());
     this.installLongPress();
+  }
+
+  private useFallbackStyle(): void {
+    this.onFallback = true;
+    this.map.setStyle(fallbackStyle(this.basemap), { diff: false });
+  }
+
+  /** Connectivity is back: swap the fallback ground for the real basemap. */
+  private retryBasemap(): void {
+    if (!this.onFallback) return;
+    this.map.setStyle(STYLE_URLS[this.basemap]);
+  }
+
+  /** True while the plain fallback ground is showing instead of the basemap. */
+  get basemapUnavailable(): boolean {
+    return this.onFallback;
   }
 
   onReady(cb: () => void): void {
