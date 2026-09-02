@@ -1,7 +1,10 @@
 /**
  * The app shell: full-bleed map, top chrome (search pill, Fog/Heat/Off, legend, locate), bottom
- * chrome (stat chip, Record, tab bar), screen panels (Stats / Data / Help), sheet + banner hosts.
- * Layout and tokens follow docs/mockups/mockup.html.
+ * chrome (empty-state hint, stat chip, Record, tab bar), screen panels (Stats / Data / Help),
+ * sheet + banner hosts. Layout and tokens follow docs/mockups/mockup.html.
+ *
+ * The bottom chrome's height is published as `--bottom-h` on <html> so things that float above it
+ * (toasts, the map attribution) stay clear of the chip / sheet / tab bar in every state.
  */
 import { icons } from './icons';
 import type { OverlayLayer } from './settings';
@@ -22,8 +25,12 @@ export interface Shell {
   bannerHost: HTMLElement;
   bottom: HTMLElement;
   floatRow: HTMLElement;
+  /** Stat chip: the area value ("0.26 km²"); "explored" is a fixed label next to it. */
   statBig: HTMLElement;
+  /** Stat chip second line ("4,992 cells"). */
   statSub: HTMLElement;
+  /** One-line hint shown while nothing has been explored yet; tapping opens Data. */
+  hint: HTMLButtonElement;
   recordBtn: HTMLButtonElement;
   sheetHost: HTMLElement;
   tabs: HTMLElement;
@@ -37,6 +44,8 @@ export interface Shell {
   /** Route sheet / recording: hide the stat chip + Record + tabs. */
   setMapChromeHidden(hidden: boolean): void;
   setLocateActive(on: boolean): void;
+  /** No visited cells yet → show the "import or record" hint under the map. */
+  setEmptyState(on: boolean): void;
 }
 
 export function createShell(mount: HTMLElement): Shell {
@@ -71,10 +80,13 @@ export function createShell(mount: HTMLElement): Shell {
     el('div', { class: 'row' }, bannerHost, el('div', { class: 'stack' }, seg, legend, locateBtn)),
   );
 
-  const statBig = el('div', { class: 'big', text: '—' });
-  const statSub = el('div', { class: 'sub', text: 'explored' });
+  const statBig = el('span', { class: 'val', text: '—' });
+  const statSub = el('div', { class: 'sub', text: '' });
+  // The space between the spans keeps textContent readable ("0.26 km² explored"); flex ignores it.
+  const statChip = el('div', { class: 'chip stat-chip' }, el('div', { class: 'big' }, statBig, ' ', el('span', { class: 'lbl', text: 'explored' })), statSub);
+  const hint = el('button', { class: 'hint', type: 'button', hidden: true }, svg(icons.upload, 'ic dim'), 'Import your Fog of World history or tap Record');
   const recordBtn = el('button', { class: 'record', type: 'button' }, el('span', { class: 'dot' }), 'Record');
-  const floatRow = el('div', { class: 'float' }, el('div', { class: 'chip stat-chip' }, statBig, statSub), recordBtn);
+  const floatRow = el('div', { class: 'float' }, statChip, recordBtn);
   const sheetHost = el('div', { class: 'sheet-host' });
 
   const tabDefs: Array<[Tab, string, string]> = [
@@ -90,7 +102,7 @@ export function createShell(mount: HTMLElement): Shell {
     tabButtons[id] = b;
     tabs.appendChild(b);
   }
-  const bottom = el('div', { class: 'bottom' }, floatRow, sheetHost, tabs);
+  const bottom = el('div', { class: 'bottom' }, hint, floatRow, sheetHost, tabs);
 
   const screens = {
     stats: el('section', { class: 'screen', id: 'screen-stats', hidden: true }),
@@ -105,18 +117,25 @@ export function createShell(mount: HTMLElement): Shell {
   let tabCb: ((t: Tab) => void) | null = null;
   let layerCb: ((l: OverlayLayer) => void) | null = null;
   let chromeHidden = false;
+  let emptyState = false;
 
   const applyChrome = () => {
     const onMap = currentTab === 'map';
     top.hidden = !onMap;
     floatRow.hidden = !onMap || chromeHidden;
+    hint.hidden = !onMap || chromeHidden || !emptyState;
     sheetHost.hidden = !onMap;
     tabs.hidden = onMap && chromeHidden;
   };
 
+  // Publish the bottom chrome's height (toasts + map attribution float above it).
+  const publishBottom = () => document.documentElement.style.setProperty('--bottom-h', `${bottom.offsetHeight}px`);
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(publishBottom).observe(bottom);
+  else window.addEventListener('resize', publishBottom);
+
   const shell: Shell = {
     root, mapEl, top, searchPill, searchText, searchClear, seg, legend, locateBtn, bannerHost, bottom, floatRow,
-    statBig, statSub, recordBtn, sheetHost, tabs, screens,
+    statBig, statSub, hint, recordBtn, sheetHost, tabs, screens,
     get currentTab() { return currentTab; },
     showTab(tab) {
       currentTab = tab;
@@ -126,6 +145,7 @@ export function createShell(mount: HTMLElement): Shell {
       }
       for (const [id, s] of Object.entries(screens)) s.hidden = id !== tab;
       applyChrome();
+      publishBottom();
       tabCb?.(tab);
     },
     onTab(cb) { tabCb = cb; },
@@ -142,9 +162,15 @@ export function createShell(mount: HTMLElement): Shell {
     setMapChromeHidden(hidden) {
       chromeHidden = hidden;
       applyChrome();
+      publishBottom();
     },
     setLocateActive(on) {
       locateBtn.classList.toggle('active', on);
+    },
+    setEmptyState(on) {
+      emptyState = on;
+      applyChrome();
+      publishBottom();
     },
   };
 
@@ -156,6 +182,7 @@ export function createShell(mount: HTMLElement): Shell {
       layerCb?.(layer);
     });
   }
+  hint.addEventListener('click', () => shell.showTab('data'));
   shell.showTab('map');
   return shell;
 }

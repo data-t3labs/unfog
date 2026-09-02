@@ -16,6 +16,11 @@ export function fmtDistance(m: number, units: Units): string {
   return `${km < 10 ? km.toFixed(1) : Math.round(km)} km`;
 }
 
+/** fmtDistance without a trailing ".0" ("3 km", "4.5 km", "1.2 mi") — for chips and labels. */
+export function fmtDistanceTidy(m: number, units: Units): string {
+  return fmtDistance(m, units).replace(/\.0(?=\s)/, '');
+}
+
 export function fmtArea(m2: number, units: Units): string {
   if (!Number.isFinite(m2)) return '—';
   if (units === 'imperial') {

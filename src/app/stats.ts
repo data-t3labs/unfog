@@ -35,6 +35,17 @@ export function createStatsScreen(ctx: AppContext): StatsScreen {
       const lastImport = readJSON<LastImport | null>(LAST_IMPORT_KEY, null);
       const lastBackup = readJSON<LastBackup | null>(LAST_BACKUP_KEY, null);
       clear(body);
+      if (stats.visitedCells === 0) {
+        body.appendChild(
+          el(
+            'div',
+            { class: 'empty-state' },
+            el('div', { class: 'name', text: 'Nothing explored yet' }),
+            el('p', { class: 'muted', text: 'Import your Fog of World history (or GPX / Google Timeline) from Data, or tap Record on the map and take a walk.' }),
+            el('button', { class: 'btn primary small', type: 'button', onclick: () => ctx.shell.showTab('data') }, 'Go to Data'),
+          ),
+        );
+      }
       body.append(
         el('div', { class: 'stat-grid' }, tile(fmtArea(stats.areaM2, units), 'explored', true), tile(fmtInt(stats.visitedCells), 'visited cells'), tile(fmtInt(stats.tiles), 'map tiles with data')),
         el('h3', { text: 'Tracks' }),
@@ -68,7 +79,7 @@ export function createStatsScreen(ctx: AppContext): StatsScreen {
       );
     } catch (e) {
       clear(body);
-      body.appendChild(el('div', { class: 'error', text: `Could not load stats: ${String((e as Error)?.message ?? e)}` }));
+      body.appendChild(el('div', { class: 'error', text: `Could not load stats: ${String((e as Error)?.message ?? e)}. Reload to try again.` }));
     }
   }
 

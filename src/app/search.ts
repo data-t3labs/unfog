@@ -52,6 +52,10 @@ export function createSearch(ctx: AppContext): SearchPanel {
           toast('No GPS fix yet — try again in a moment.');
         }
       }),
+      row(svg(icons.loop), 'Explore a loop from here', 'A round trip through streets you have never walked', () => {
+        api.close();
+        ctx.openLoop();
+      }),
       row(svg(icons.pin), 'Drop a pin', 'Long-press anywhere on the map', () => {
         api.close();
         toast('Long-press the map to set a destination', { duration: 2500 });
@@ -96,7 +100,7 @@ export function createSearch(ctx: AppContext): SearchPanel {
       const c = ctx.map.center();
       const res = await geocode(q, { lon: c[0], lat: c[1] }, abort.signal);
       if (my !== seq) return;
-      status.textContent = res.length ? '' : 'No matches';
+      status.textContent = res.length ? '' : 'No matches — try a street or place name';
       render(res);
     } catch (e) {
       if ((e as Error).name === 'AbortError' || my !== seq) return;

@@ -60,6 +60,7 @@ type UnfogWindow = {
     ready: boolean;
     mock: boolean;
     openRoute?: (d: { name: string; locality?: string; lonlat: [number, number]; origin?: [number, number] }) => void;
+    openLoop?: (from?: [number, number]) => void;
     ctx?: {
       engines: {
         grid: {
@@ -71,6 +72,7 @@ type UnfogWindow = {
         };
         route: {
           route(req: { from: [number, number]; to: [number, number]; mode: string; detour: number }): Promise<{ candidates: RouteCandidate[]; shortestM: number }>;
+          loop(req: { from: [number, number]; mode: string; targetKm: number }): Promise<{ candidates: RouteCandidate[]; shortestM: number }>;
         };
       };
       dataChanged(): Promise<void>;
@@ -246,6 +248,33 @@ async function openRoute(page: Page, dest: { name: string; locality?: string; lo
   await expect(page.locator('.sheet.route')).toBeVisible();
 }
 
+/**
+ * Every candidate line is drawn in the strip of map between the top chrome and the sheet
+ * (route-sheet fit padding, BUILD-PLAN §2.2) — checked in CSS pixels at the 393×852 viewport.
+ */
+async function expectLinesAboveSheet(page: Page, coords: Array<[number, number]>): Promise<void> {
+  await idle(page); // fitBounds animates for 600 ms
+  const r = await page.evaluate((cs) => {
+    const map = (window as unknown as UnfogWindow).__unfog!.ctx!.map.map;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const c of cs) {
+      const p = map.project(c);
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+    return {
+      minX, maxX, minY, maxY,
+      sheetTop: document.querySelector('.sheet.route')!.getBoundingClientRect().top,
+      chromeBottom: document.querySelector('.top')!.getBoundingClientRect().bottom,
+      width: window.innerWidth,
+    };
+  }, coords);
+  const desc = `lines y ${r.minY.toFixed(0)}–${r.maxY.toFixed(0)}, x ${r.minX.toFixed(0)}–${r.maxX.toFixed(0)}; chrome bottom ${r.chromeBottom.toFixed(0)}, sheet top ${r.sheetTop.toFixed(0)}`;
+  expect(r.maxY, `lines end above the sheet (${desc})`).toBeLessThan(r.sheetTop);
+  expect(r.minY, `lines start below the top chrome (${desc})`).toBeGreaterThan(r.chromeBottom);
+  expect(r.minX, `lines inside the viewport (${desc})`).toBeGreaterThan(0);
+  expect(r.maxX, `lines inside the viewport (${desc})`).toBeLessThan(r.width);
+}
+
 /** Wait for a (re)route to finish: the spinner is gone and at least one candidate row is there. */
 async function waitRouted(page: Page): Promise<CandRow[]> {
   const sheet = page.locator('.sheet.route');
@@ -326,15 +355,30 @@ test.describe('Unfog real engines', () => {
   test('boots with the real grid + route workers and an empty store', async ({ page }) => {
     await boot(page);
     await expect(page.locator('canvas.maplibregl-canvas')).toBeVisible();
-    await expect(page.locator('.stat-chip .big')).toHaveText('0.00 km²');
-    await expect(page.locator('.stat-chip .sub')).toContainText('0 cells');
+    await expect(page.locator('.stat-chip .val')).toHaveText('0.00 km²');
+    await expect(page.locator('.stat-chip .big')).toHaveText('0.00 km² explored');
+    await expect(page.locator('.stat-chip .sub')).toHaveText('0 cells');
+    // Empty state: a one-line hint under the map (tap → Data) and the Stats screen says so too.
+    const hint = page.locator('.hint');
+    await expect(hint).toBeVisible();
+    await expect(hint).toHaveText('Import your Fog of World history or tap Record');
     const s = await stats(page);
     expect(s.visitedCells).toBe(0);
     expect(s.tiles).toBe(0);
     // No "mock mode" toast.
     await expect(page.locator('.toast', { hasText: /mock/i })).toHaveCount(0);
+    await idle(page);
+    await shot(page, 'empty');
     await page.getByRole('tab', { name: 'Stats' }).click();
     await expect(page.locator('#screen-stats')).not.toContainText('mock');
+    await expect(page.locator('#screen-stats .empty-state')).toContainText('Nothing explored yet');
+    await expect(page.locator('#screen-stats .stat.big .v')).toHaveText('0.00 km²');
+    await shot(page, 'stats-empty');
+    await page.locator('#screen-stats .empty-state').getByRole('button', { name: 'Go to Data' }).click();
+    await expect(page.locator('#screen-data')).toBeVisible();
+    await page.getByRole('tab', { name: 'Map' }).click();
+    await hint.click();
+    await expect(page.locator('#screen-data')).toBeVisible();
   });
 
   test('1. import: two FoW tiles → 36,983 cells; re-import is idempotent', async ({ page }) => {
@@ -353,8 +397,9 @@ test.describe('Unfog real engines', () => {
     expect(s1.areaM2).toBeGreaterThan(2e6); // ≈ 36,983 × 82 m² (Hainan, 18.6° N) ≈ 3 km²
     expect(s1.areaM2).toBeLessThan(4e6);
     await page.getByRole('tab', { name: 'Map' }).click();
-    await expect(page.locator('.stat-chip .sub')).toHaveText('explored · 36,983 cells');
-    await expect(page.locator('.stat-chip .big')).toHaveText(/^\d\.\d km²$/);
+    await expect(page.locator('.stat-chip .sub')).toHaveText('36,983 cells');
+    await expect(page.locator('.stat-chip .val')).toHaveText(/^\d\.\d km²$/);
+    await expect(page.locator('.hint')).toBeHidden(); // no longer empty
     await shot(page, 'import');
 
     // Second import of the same files: nothing new, the store unchanged.
@@ -469,6 +514,12 @@ test.describe('Unfog real engines', () => {
     expect(routeFeatures).toBeGreaterThan(0);
     await idle(page);
     await shot(page, 'route-empty-grid');
+    // The camera fits every candidate (and the pin) between the top chrome and the sheet.
+    const firstCoords = await page.evaluate(async (req) => {
+      const r = await (window as unknown as UnfogWindow).__unfog!.ctx!.engines.route.route(req);
+      return r.candidates.flatMap((c) => c.coords).concat([req.from, req.to]);
+    }, { from: BEDFORD_N7, to: DOMINO_PARK.lonlat, mode: 'walk', detour: 0.25 });
+    await expectLinesAboveSheet(page, firstCoords);
     test.info().annotations.push({ type: 'candidates-empty-grid', description: first.map((c) => `${c.name} ${c.lengthM} m ${c.pctNew}% new`).join(' | ') });
 
     // Mark the direct route as walked (a GPX-like track), invalidate, and re-open.
@@ -547,7 +598,7 @@ test.describe('Unfog real engines', () => {
     await bar.getByRole('button', { name: 'End' }).click();
     await expect(bar).toBeHidden();
     await expect(page.locator('.search .ph')).toHaveText('Where to?');
-    await expect(page.getByRole('button', { name: 'Record' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
     await expect(page.locator('.tabs')).toBeVisible();
     // The GeoJSON source re-tiles asynchronously after setData([]).
     await expect
@@ -603,7 +654,7 @@ test.describe('Unfog real engines', () => {
     const b = await boot(page, { share: 'none' });
     const before = await stats(page);
     await context.setGeolocation({ longitude: BEDFORD_N7[0], latitude: BEDFORD_N7[1], accuracy: 5 });
-    await page.getByRole('button', { name: 'Record' }).click();
+    await page.getByRole('button', { name: 'Record', exact: true }).click();
     const banner = page.locator('.rec-banner');
     await expect(banner).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('.app')).toHaveClass(/recording/);
@@ -647,7 +698,7 @@ test.describe('Unfog real engines', () => {
     // The store has the cells and the session; the Data tab lists it with GPX export + delete.
     const after = await stats(page);
     expect(after.visitedCells).toBeGreaterThan(before.visitedCells + 5);
-    await expect(page.locator('.stat-chip .sub')).not.toContainText('· 0 cells');
+    await expect(page.locator('.stat-chip .sub')).not.toHaveText('0 cells');
     const tracks = await page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.engines.grid.listTracks());
     expect(tracks.filter((t) => t.source === 'session')).toHaveLength(1);
     expect(tracks[0].points).toBe(9);
@@ -712,7 +763,8 @@ test.describe('Unfog real engines', () => {
     await expect(page.locator('.toast', { hasText: 'All data deleted' })).toBeVisible();
     await expect.poll(async () => (await stats(page)).visitedCells).toBe(0);
     await page.getByRole('tab', { name: 'Map' }).click();
-    await expect(page.locator('.stat-chip .sub')).toHaveText('explored · 0 cells');
+    await expect(page.locator('.stat-chip .sub')).toHaveText('0 cells');
+    await expect(page.locator('.hint')).toBeVisible(); // empty again
 
     // Restore from the backup file through the same picker.
     const summary = await importFiles(page, [backupPath]);
@@ -721,7 +773,8 @@ test.describe('Unfog real engines', () => {
     const s = await stats(page);
     expect(s.visitedCells).toBe(FOW_CELLS);
     await page.getByRole('tab', { name: 'Map' }).click();
-    await expect(page.locator('.stat-chip .sub')).toHaveText('explored · 36,983 cells');
+    await expect(page.locator('.stat-chip .sub')).toHaveText('36,983 cells');
+    await expect(page.locator('.hint')).toBeHidden();
     expect(b.errors).toEqual([]);
   });
 
@@ -769,14 +822,14 @@ test.describe('Unfog real engines', () => {
     // Imperial: the stat chip shows mi².
     await settings.getByRole('group', { name: 'Units' }).getByRole('button', { name: 'miles' }).click();
     await page.getByRole('tab', { name: 'Map' }).click();
-    await expect(page.locator('.stat-chip .big')).toHaveText(/mi²$/);
+    await expect(page.locator('.stat-chip .val')).toHaveText(/mi²$/);
     await idle(page);
     await shot(page, 'settings-dark-imperial');
     // Survives a reload.
     await page.reload();
     await waitReady(page);
     await expect(page.locator('html')).toHaveClass(/dark/);
-    await expect(page.locator('.stat-chip .big')).toHaveText(/mi²$/);
+    await expect(page.locator('.stat-chip .val')).toHaveText(/mi²$/);
     expect(b.errors).toEqual([]);
   });
 
@@ -785,7 +838,7 @@ test.describe('Unfog real engines', () => {
     const card = page.locator('.install-card');
     await expect(card).toBeVisible();
     await expect(card).toContainText('Add to Home Screen');
-    await expect(page.getByRole('button', { name: 'Record' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
     await card.getByRole('button', { name: 'Dismiss' }).click();
     await expect(card).toBeHidden();
     await page.reload();
@@ -803,7 +856,7 @@ test.describe('Unfog real engines', () => {
   test('10. resume after process death: reload mid-recording offers Resume/Finish; Finish keeps the points', async ({ page, context }) => {
     const b = await boot(page);
     await context.setGeolocation({ longitude: BEDFORD_N7[0], latitude: BEDFORD_N7[1], accuracy: 5 });
-    await page.getByRole('button', { name: 'Record' }).click();
+    await page.getByRole('button', { name: 'Record', exact: true }).click();
     await expect(page.locator('.rec-banner')).toBeVisible({ timeout: 20_000 });
     await walk(context, page, BEDFORD_N7, [-0.0002, 0.00008], 5);
     const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.session') ?? 'null'));
@@ -860,7 +913,7 @@ test.describe('Unfog real engines', () => {
     });
     expect(state.overlay, 'fog overlay layer exists without a basemap').toBe(true);
     expect(state.routes, 'route layers exist without a basemap').toBe(true);
-    await expect(page.locator('.stat-chip .sub')).toHaveText('explored · 36,983 cells');
+    await expect(page.locator('.stat-chip .sub')).toHaveText('36,983 cells');
     await openRoute(page, DOMINO_PARK);
     await waitRouted(page);
     await idle(page);
@@ -874,6 +927,114 @@ test.describe('Unfog real engines', () => {
     await styleReq;
     await expect.poll(styleName, { timeout: 30_000 }).not.toBe('unfog-fallback');
     await page.waitForFunction(() => Boolean((window as unknown as UnfogWindow).__unfog!.ctx!.map.map.getLayer('unfog-overlay')), null, { timeout: 30_000 });
+    expect(b.errors).toEqual([]);
+  });
+
+  test('12. loop mode on the real NYC graph: 3 km walk from Bedford & N 7th → 1–3 loops within ±25 %, drawn above the sheet; chips, slider, mode, Go/End', async ({ page }) => {
+    const b = await boot(page);
+    // Entry point: the search panel's "Explore a loop from here" row.
+    await page.getByRole('button', { name: 'Search destination' }).click();
+    await page.getByRole('option', { name: /Explore a loop from here/ }).click();
+    await expect(page.locator('.search-panel')).toBeHidden();
+    const sheet = page.locator('.sheet.route.loop');
+    await expect(sheet).toBeVisible();
+    await expect(sheet).toHaveAttribute('data-kind', 'loop');
+    await expect(sheet.locator('h2')).toContainText('Explore from here');
+    await expect(sheet.locator('.chips button.on')).toHaveText('3 km');
+    await expect(sheet.locator('.modes button.on')).toHaveText('Walk');
+    await expect(page.locator('.search .val')).toHaveText('Loop from here');
+    const loops = await waitRouted(page);
+    test.info().annotations.push({ type: 'loops-3km-walk', description: loops.map((c) => `${c.name} ${c.lengthM} m ${c.pctNew}% new ${c.etaMin} min`).join(' | ') });
+    expect(loops.length).toBeGreaterThanOrEqual(1);
+    expect(loops.length).toBeLessThanOrEqual(3);
+    loops.forEach((c, i) => {
+      expect(c.name).toBe(`Loop ${'ABC'[i]}`);
+      expect(c.lengthM, `${c.name} within ±25 % of 3 km`).toBeGreaterThanOrEqual(2250);
+      expect(c.lengthM, `${c.name} within ±25 % of 3 km`).toBeLessThanOrEqual(3750);
+      expect(c.pctNew, `${c.name} is mostly new on an empty store`).toBeGreaterThan(50);
+      expect(c.etaMin).toBeGreaterThan(20); // 4.8 km/h
+    });
+    expect(loops[0].selected).toBe(true);
+    await expect(sheet.locator('h2 small')).toHaveText(`${loops.length} loop${loops.length === 1 ? '' : 's'} of about 3 km`);
+    await expect(sheet.locator('.route-status')).not.toContainText('map centre'); // started from the user's position
+    // Closed rings that start near the origin; drawn on the map, fitted above the sheet.
+    const ring = await page.evaluate(async (req) => {
+      const r = await (window as unknown as UnfogWindow).__unfog!.ctx!.engines.route.loop(req);
+      const d = (a: [number, number], b: [number, number]) => Math.hypot((a[0] - b[0]) * 84_300, (a[1] - b[1]) * 111_000);
+      return {
+        coords: r.candidates.flatMap((c) => c.coords),
+        closes: r.candidates.map((c) => d(c.coords[0], c.coords[c.coords.length - 1])),
+        startsNear: r.candidates.map((c) => d(c.coords[0], req.from)),
+      };
+    }, { from: BEDFORD_N7, mode: 'walk', targetKm: 3 });
+    for (const m of ring.closes) expect(m).toBeLessThan(30);
+    for (const m of ring.startsNear) expect(m).toBeLessThan(300);
+    const routeFeatures = await page.evaluate(() => (window as unknown as { __unfog: { ctx: { map: { map: { querySourceFeatures(s: string): unknown[] } } } } }).__unfog.ctx.map.map.querySourceFeatures('unfog-routes').length);
+    expect(routeFeatures).toBeGreaterThan(0);
+    await expectLinesAboveSheet(page, ring.coords);
+    await shot(page, 'loop');
+
+    // 5 km chip → every loop within ±25 % of 5 km; the choice persists.
+    await sheet.getByRole('button', { name: '5 km' }).click();
+    await expect(sheet.locator('.chips button.on')).toHaveText('5 km');
+    await expect(sheet.getByLabel('Loop length', { exact: true })).toHaveValue('5');
+    const inRange = (lo: number, hi: number) => async () => {
+      const rows = await readCands(page).catch(() => [] as CandRow[]);
+      return rows.length > 0 && rows.every((c) => c.lengthM >= lo && c.lengthM <= hi);
+    };
+    await expect.poll(inRange(3750, 6250), { timeout: 60_000 }).toBe(true);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.routePrefs') ?? '{}'))).toMatchObject({ loopKm: 5, mode: 'walk' });
+    // Slider → 2 km (no chip lit).
+    await sheet.getByLabel('Loop length', { exact: true }).fill('2');
+    await expect(sheet.locator('.slider-loop')).toContainText('2 km');
+    await expect(sheet.locator('.chips button.on')).toHaveText('2 km');
+    await expect.poll(inRange(1500, 2500), { timeout: 60_000 }).toBe(true);
+    const walk2 = await readCands(page);
+    // Bike: the same length takes fewer minutes.
+    await sheet.getByRole('button', { name: 'Bike' }).click();
+    await expect(sheet.locator('.modes button.on')).toHaveText('Bike');
+    await expect.poll(inRange(1500, 2500), { timeout: 60_000 }).toBe(true);
+    const bike2 = await readCands(page);
+    expect(bike2[0].etaMin).toBeLessThan(walk2[0].etaMin);
+    await shot(page, 'loop-bike-2km');
+
+    // Go → follow bar names the loop; End restores the chrome and clears the lines.
+    await sheet.getByRole('button', { name: 'Go' }).click();
+    const bar = page.locator('.follow-bar');
+    await expect(bar).toBeVisible();
+    await expect(sheet).toBeHidden();
+    await expect(bar).toContainText('Loop A');
+    await expect(bar).toContainText('round trip from here');
+    await expect(page.locator('.fab.active')).toHaveCount(1);
+    await bar.getByRole('button', { name: 'End' }).click();
+    await expect(bar).toBeHidden();
+    await expect(page.locator('.search .ph')).toHaveText('Where to?');
+    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { __unfog: { ctx: { map: { map: { querySourceFeatures(s: string): unknown[] } } } } }).__unfog.ctx.map.map.querySourceFeatures('unfog-routes').length))
+      .toBe(0);
+    expect(b.errors).toEqual([]);
+  });
+
+  test('12b. the empty route sheet offers a loop instead', async ({ page }) => {
+    const b = await boot(page);
+    // A pin mid-East River (≈450 m from Kent Av and from the FDR greenway): nothing to snap to within
+    // 300 m → an error with a next step and the loop button.
+    await openRoute(page, { name: 'East River', lonlat: [-73.97, 40.7205] });
+    const sheet = page.locator('.sheet.route');
+    const status = sheet.locator('.route-status');
+    await expect(status.locator('.spinner')).toBeHidden({ timeout: 60_000 });
+    await expect(status.locator('.error')).toContainText(/street|route/i);
+    await expect(sheet.locator('.cand')).toHaveCount(0);
+    await expect(sheet.getByRole('button', { name: 'Go' })).toBeDisabled();
+    await shot(page, 'route-error');
+    await status.getByRole('button', { name: /Explore a loop from here/ }).click();
+    await expect(sheet).toHaveAttribute('data-kind', 'loop');
+    await expect(sheet.locator('h2')).toContainText('Explore from here');
+    const loops = await waitRouted(page);
+    expect(loops.length).toBeGreaterThanOrEqual(1);
+    await sheet.getByRole('button', { name: 'Close' }).click();
+    await expect(sheet).toBeHidden();
     expect(b.errors).toEqual([]);
   });
 });
@@ -927,7 +1088,7 @@ test.describe('Unfog offline (vite preview + service worker)', () => {
     await context.setOffline(true);
     await page.reload();
     await waitReady(page, 120_000);
-    await expect(page.locator('.stat-chip .sub')).toHaveText('explored · 36,983 cells');
+    await expect(page.locator('.stat-chip .sub')).toHaveText('36,983 cells');
     expect((await stats(page)).visitedCells).toBe(FOW_CELLS);
     await shot(page, 'offline-boot');
     // Route over tiles fetched while online: served from the 'graph' runtime cache.

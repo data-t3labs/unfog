@@ -76,7 +76,7 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   rank by new metres; return ≤3: "Most new", "Balanced", "Direct" (Direct = shortest, always present).
 - Modes: walk (ignores oneway; steps allowed), bike (oneway unless `oneway:bicycle=no`; steps = dismount), drive (oneway, no
   footways; no turn restrictions in v1). Snap origin/destination to the nearest arc (grid-bucketed), split virtually.
-- Loop mode (stretch): heading fan of 8, 2 via-points on a circle of radius T/4, own-route arcs ×5, keep 3 best.
+- Loop mode ("Explore from here", shipped 2026-09-02): heading fan of 8, 2 via-points on a circle of radius ~0.22·T, own-route arcs ×5, ±25 % length window, keep 3 best; UI chips 2/3/5/8 km + 1–15 km slider.
 - Budget: < 2 s for a 10 km city route on an iPhone; graphs never materialise per-edge objects.
 
 ### 2.4 Graph build (`tools/build-graph`, `src/routing/graph-build.ts`)

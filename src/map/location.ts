@@ -152,8 +152,8 @@ export function describeLocationError(kind: LocationError): string {
     case 'timeout':
       return 'Still waiting for a GPS fix — try near a window or outside.';
     case 'unsupported':
-      return 'This browser has no location support.';
+      return 'Location is not available in this browser. Open Unfog in Safari.';
     default:
-      return 'Location unavailable right now.';
+      return 'Location is unavailable right now. Try again in a moment.';
   }
 }

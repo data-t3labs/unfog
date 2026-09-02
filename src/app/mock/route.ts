@@ -67,6 +67,26 @@ export function createMockRoute(synth: SynthCells): RouteApi {
     return unseen;
   }
 
+  /** Walk the grid intersections corner to corner (Manhattan steps); one vertex per intersection. */
+  function walkCorners(corners: Array<[number, number]>): LonLat[] {
+    const uv: Array<[number, number]> = [];
+    let cur = corners[0];
+    uv.push(cur);
+    for (let c = 1; c < corners.length; c++) {
+      const nxt = corners[c];
+      const di = Math.sign(nxt[0] - cur[0]), dj = Math.sign(nxt[1] - cur[1]);
+      while (cur[0] !== nxt[0] || cur[1] !== nxt[1]) {
+        cur = [cur[0] + (cur[0] !== nxt[0] ? di : 0), cur[1] + (cur[0] === nxt[0] && cur[1] !== nxt[1] ? dj : 0)];
+        uv.push(cur);
+      }
+    }
+    return uv.map(([i, j]) => fromUV(g, i * g.su, j * g.sv));
+  }
+
+  function dedupe(path: LonLat[]): LonLat[] {
+    return path.filter((p, k) => k === 0 || p[0] !== path[k - 1][0] || p[1] !== path[k - 1][1]);
+  }
+
   /** Grid walk from → A → jogs → B → to, with vertices at every intersection. */
   function gridPath(from: LonLat, to: LonLat, dv: number, du: number): LonLat[] {
     const [ua, va] = toUV(g, from);
@@ -80,22 +100,59 @@ export function createMockRoute(synth: SynthCells): RouteApi {
       [iB + du, jB],
       [iB, jB],
     ];
-    const uv: Array<[number, number]> = [];
-    let cur = corners[0];
-    uv.push(cur);
-    for (let c = 1; c < corners.length; c++) {
-      const nxt = corners[c];
-      const di = Math.sign(nxt[0] - cur[0]), dj = Math.sign(nxt[1] - cur[1]);
-      while (cur[0] !== nxt[0] || cur[1] !== nxt[1]) {
-        cur = [cur[0] + (cur[0] !== nxt[0] ? di : 0), cur[1] + (cur[0] === nxt[0] && cur[1] !== nxt[1] ? dj : 0)];
-        uv.push(cur);
+    return dedupe([from, ...walkCorners(corners), to]);
+  }
+
+  /**
+   * Loops: rectangles of streets around the start (a blocks along the avenues × b along the
+   * numbered streets, perimeter ≈ target) in all four quadrants; the three with the most
+   * never-visited metres win, like the real engine's heading fan.
+   */
+  function loops(req: LoopRequest): RouteResult {
+    const t0 = performance.now();
+    const target = req.targetKm * 1000;
+    const [u0, v0] = toUV(g, req.from);
+    const i0 = Math.round(u0 / g.su), j0 = Math.round(v0 / g.sv);
+    type Raw = { path: LonLat[]; len: number; newM: number };
+    const raws: Raw[] = [];
+    const maxA = Math.max(1, Math.floor(target / 2 / g.su));
+    const stepA = Math.max(1, Math.ceil(maxA / 8));
+    for (let a = 1; a <= maxA; a += stepA) {
+      const b = Math.round((target / 2 - a * g.su) / g.sv);
+      if (b < 1) continue;
+      for (const [sa, sb] of [[1, 1], [-1, 1], [1, -1], [-1, -1]] as const) {
+        const corners: Array<[number, number]> = [[i0, j0], [i0 + sa * a, j0], [i0 + sa * a, j0 + sb * b], [i0, j0 + sb * b], [i0, j0]];
+        const path = dedupe([req.from, ...walkCorners(corners), req.from]);
+        const len = legLength(path);
+        if (len < 0.75 * target || len > 1.25 * target) continue;
+        raws.push({ path, len, newM: newMetres(path) });
       }
     }
-    const path: LonLat[] = [from];
-    for (const [i, j] of uv) path.push(fromUV(g, i * g.su, j * g.sv));
-    path.push(to);
-    // Drop consecutive duplicates.
-    return path.filter((p, k) => k === 0 || p[0] !== path[k - 1][0] || p[1] !== path[k - 1][1]);
+    raws.sort((x, y) => y.newM - x.newM || Math.abs(x.len - target) - Math.abs(y.len - target));
+    const picked: Raw[] = [];
+    for (const r of raws) {
+      if (picked.some((p) => Math.abs(p.newM - r.newM) < 40 && Math.abs(p.len - r.len) < 80)) continue;
+      picked.push(r);
+      if (picked.length === (req.maxCandidates ?? 3)) break;
+    }
+    const names: RouteCandidate['name'][] = ['Most new', 'Balanced', 'Direct'];
+    const candidates: RouteCandidate[] = picked.map((r, i) => ({
+      name: names[Math.min(i, 2)],
+      coords: r.path,
+      lengthM: Math.round(r.len),
+      newM: Math.round(r.newM),
+      pctNew: Math.round((100 * r.newM) / Math.max(1, r.len)),
+      lambda: 1.5,
+      etaMin: Math.round((r.len / 1000 / SPEED_KMH[req.mode]) * 60),
+    }));
+    return { candidates, shortestM: Math.round(target), budgetM: Math.round(1.25 * target), graphTiles: 4, ms: Math.round(performance.now() - t0) };
+  }
+
+  /** Same shape as the route worker's error: `name` tells the UI to offer a download. */
+  function noCoverage(): Error {
+    const e = new Error('No routing data for this area');
+    e.name = 'NoCoverageError';
+    return e;
   }
 
   function candidates(req: RouteRequest): RouteResult {
@@ -179,27 +236,15 @@ export function createMockRoute(synth: SynthCells): RouteApi {
     },
     async route(req: RouteRequest): Promise<RouteResult> {
       await sleep(180);
-      if (!covered(req.from) || !covered(req.to)) throw new Error('No graph coverage for this area');
+      if (!covered(req.from) || !covered(req.to)) throw noCoverage();
       const far = distanceM(req.from[0], req.from[1], req.to[0], req.to[1]);
-      if (far > 40_000) throw new Error('Destination is too far for a single route (40 km max)');
+      if (far > 40_000) throw new Error('This destination is more than 40 km away. Pick something closer.');
       return candidates(req);
     },
     async loop(req: LoopRequest): Promise<RouteResult> {
       await sleep(150);
-      if (!covered(req.from)) throw new Error('No graph coverage for this area');
-      const [u, v] = toUV(g, req.from);
-      const side = (req.targetKm * 1000) / 4;
-      const to = fromUV(g, u + side, v + side);
-      const res = candidates({ from: req.from, to, mode: req.mode, detour: 0.3 });
-      for (const c of res.candidates) {
-        const back = c.coords.slice().reverse();
-        c.coords = c.coords.concat(back.slice(1));
-        c.lengthM *= 2;
-        c.newM = Math.round(c.newM * 1.2);
-        c.pctNew = Math.round((100 * c.newM) / Math.max(1, c.lengthM));
-        c.etaMin *= 2;
-      }
-      return res;
+      if (!covered(req.from)) throw noCoverage();
+      return loops(req);
     },
     async invalidateCells() {},
   };

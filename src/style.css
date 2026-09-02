@@ -74,11 +74,12 @@ p { margin: 0 0 10px; }
 /* id selector: maplibre-gl.css (loaded after this file) sets .maplibregl-map { position: relative } */
 #map.map { position: absolute; inset: 0; width: 100%; height: 100%; }
 .maplibregl-canvas { outline: none; }
-.app .maplibregl-ctrl-bottom-left { bottom: var(--tabbar); left: var(--sal); }
+/* --bottom-h (set by the shell) = tab bar + stat chip / sheet: the ⓘ never sits under the chip. */
+.app .maplibregl-ctrl-bottom-left { bottom: var(--bottom-h, var(--tabbar)); left: var(--sal); }
 .app .maplibregl-ctrl-attrib { font-size: 10px; background: rgba(255, 255, 255, 0.6); }
-.app .maplibregl-ctrl-attrib.maplibregl-compact { border-radius: 10px; margin: 0 0 6px 6px; }
+.app .maplibregl-ctrl-attrib.maplibregl-compact { border-radius: 10px; margin: 0 0 6px 16px; }
 .app .maplibregl-ctrl-attrib a { color: #333; }
-.app.recording .record { display: none; }
+.app.recording .record, .app.recording .hint { display: none; }
 
 /* user dot (mock.js) + destination pin */
 .user-dot { width: 44px; height: 44px; position: relative; pointer-events: none; }
@@ -150,8 +151,18 @@ html.light .seg button.on { background: #fff; }
 }
 .float > * { pointer-events: auto; }
 .chip { background: var(--bg); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); border-radius: 12px; padding: 10px 12px; box-shadow: var(--shadow); }
-.chip .big { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+/* "0.26 km² explored" on one line, "4,992 cells" beneath. */
+.chip .big { display: flex; align-items: baseline; gap: 5px; font-size: 17px; font-weight: 700; letter-spacing: -0.3px; white-space: nowrap; }
+.chip .big .lbl { font-size: 13px; font-weight: 500; color: var(--fg-2); letter-spacing: 0; }
 .chip .sub { font-size: 12px; color: var(--fg-2); margin-top: 2px; }
+.chip .sub:empty { display: none; }
+/* Empty state: one line above the chip row while nothing has been explored (tap → Data). */
+.hint {
+  align-self: center; margin: 0 calc(16px + var(--sar)) 10px calc(16px + var(--sal)); padding: 9px 14px 9px 12px; border: 0; border-radius: 12px;
+  background: var(--bg); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur); box-shadow: var(--shadow);
+  display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--fg-2); text-align: left;
+}
+.hint .ic { color: var(--accent); }
 .record {
   display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 16px 0 14px; border: 0;
   border-radius: 22px; background: var(--bg); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
@@ -168,8 +179,10 @@ html.light .seg button.on { background: #fff; }
 
 /* ---------------------------------------------------------------- sheets */
 .sheet {
-  position: relative; background: var(--bg-solid); border-radius: 18px 18px 0 0; padding: 8px 16px var(--home);
-  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.35); max-height: calc(100dvh - 120px); overflow-y: auto; -webkit-overflow-scrolling: touch;
+  position: relative; background: var(--bg-solid); border-radius: 18px 18px 0 0; padding: 8px calc(16px + var(--sar)) var(--home) calc(16px + var(--sal));
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.35); overflow-y: auto; -webkit-overflow-scrolling: touch;
+  /* Never taller than the space under the search pill (status bar + pill + a strip of map). */
+  max-height: calc(100dvh - var(--top-pad) - 8px - 48px - 48px);
 }
 .grab { width: 36px; height: 5px; border-radius: 3px; background: var(--fg-3); opacity: 0.5; margin: 0 auto 12px; }
 .sheet h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.4px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding-right: 36px; }
@@ -180,8 +193,13 @@ html.light .seg button.on { background: #fff; }
 .modes { display: flex; gap: 8px; margin: 10px 0 10px; }
 .modes button { appearance: none; border: 0; background: var(--bg-2); color: var(--fg-2); font-size: 14px; font-weight: 600; padding: 8px 14px; border-radius: 20px; display: flex; gap: 6px; align-items: center; }
 .modes button.on { background: var(--fg); color: var(--bg-solid); }
-.slider { display: flex; align-items: center; justify-content: space-between; font-size: 13px; color: var(--fg-2); margin-bottom: 6px; }
-.slider b { color: var(--fg); font-weight: 600; }
+/* Loop mode: length presets above the slider. */
+.chips { display: flex; gap: 8px; margin: 2px 0 8px; }
+.chips button { flex: 1; appearance: none; border: 0; background: var(--bg-2); color: var(--fg-2); font-size: 14px; font-weight: 600; height: 34px; border-radius: 10px; padding: 0 8px; white-space: nowrap; }
+.chips button.on { background: var(--fg); color: var(--bg-solid); }
+.route-error { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 4px 0 6px; }
+.slider, .slider-loop { display: flex; align-items: center; justify-content: space-between; font-size: 13px; color: var(--fg-2); margin-bottom: 6px; }
+.slider b, .slider-loop b { color: var(--fg); font-weight: 600; }
 .range { --fill: 25%; appearance: none; -webkit-appearance: none; width: 100%; height: 26px; background: transparent; margin: 0 0 6px; display: block; }
 .range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--fg) var(--fill), var(--bg-2) var(--fill)); }
 .range::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35); margin-top: -11px; border: 0; }
@@ -206,7 +224,7 @@ html.light .seg button.on { background: #fff; }
 .progress { height: 6px; border-radius: 3px; background: var(--bg-2); overflow: hidden; margin: 8px 0; }
 .progress .bar { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width 0.15s; }
 .follow-bar {
-  display: flex; align-items: center; gap: 12px; padding: 12px 16px calc(var(--home) + 4px);
+  display: flex; align-items: center; gap: 12px; padding: 12px calc(16px + var(--sar)) calc(var(--home) + 4px) calc(16px + var(--sal));
   background: var(--bg-solid); box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.35); border-radius: 18px 18px 0 0;
 }
 
@@ -235,15 +253,18 @@ html.light .seg button.on { background: #fff; }
 .stat .v { font-size: 22px; font-weight: 700; letter-spacing: -0.4px; font-variant-numeric: tabular-nums; }
 .stat.big .v { font-size: 32px; }
 .stat .l { font-size: 12px; color: var(--fg-2); margin-top: 2px; }
+.empty-state { background: var(--bg-2); border-radius: 12px; padding: 14px; margin: 12px 0 4px; }
+.empty-state .name { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+.empty-state p { margin-bottom: 10px; }
 
 /* ---------------------------------------------------------------- screens */
 .screen {
   position: absolute; inset: 0 0 var(--tabbar); z-index: 8; background: var(--bg-solid); overflow-y: auto; -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain; padding-bottom: 24px;
 }
-.screen-head { position: sticky; top: 0; z-index: 1; padding: calc(var(--top-pad) + 6px) 20px 10px; background: var(--bg-solid); border-bottom: 1px solid var(--line); }
+.screen-head { position: sticky; top: 0; z-index: 1; padding: calc(var(--top-pad) + 6px) calc(20px + var(--sar)) 10px calc(20px + var(--sal)); background: var(--bg-solid); border-bottom: 1px solid var(--line); }
 .screen-head h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.6px; }
-.screen-body { padding: 8px 20px 0; max-width: 640px; }
+.screen-body { padding: 8px calc(20px + var(--sar)) 0 calc(20px + var(--sal)); max-width: 640px; }
 .screen-body h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--fg-2); margin: 22px 0 8px; }
 .screen-body h3:first-child { margin-top: 12px; }
 ul.plain { list-style: none; margin: 0; padding: 0; }
@@ -275,18 +296,18 @@ ul.plain.bullets li { display: list-item; list-style: disc; margin-left: 18px; b
   opacity: 0; transform: translateY(8px); transition: opacity 0.18s, transform 0.18s;
 }
 .search-panel.show { opacity: 1; transform: none; }
-.search-head { display: flex; align-items: center; gap: 6px; padding: calc(var(--top-pad) + 6px) 12px 10px 8px; border-bottom: 1px solid var(--line); }
+.search-head { display: flex; align-items: center; gap: 6px; padding: calc(var(--top-pad) + 6px) calc(12px + var(--sar)) 10px calc(8px + var(--sal)); border-bottom: 1px solid var(--line); }
 .search-field { flex: 1; display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 12px; border-radius: 12px; background: var(--bg-2); }
 .search-input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--fg); font-size: 17px; outline: none; -webkit-appearance: none; appearance: none; user-select: text; -webkit-user-select: text; }
 .search-input::-webkit-search-cancel-button { -webkit-appearance: none; }
-.search-body { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px 8px var(--home); }
+.search-body { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px calc(8px + var(--sar)) var(--home) calc(8px + var(--sal)); }
 .search-status { padding: 8px 12px; font-size: 13px; }
 .result { display: flex; align-items: center; gap: 12px; width: 100%; padding: 11px 10px; border: 0; background: transparent; border-radius: 12px; text-align: left; }
 .result:active { background: var(--bg-2); }
 .quick { border-bottom: 1px solid var(--line); padding-bottom: 4px; margin-bottom: 4px; }
 
 /* install card (hidden while a route sheet or the follow bar is up) */
-.install-card { position: relative; margin: 0 12px 10px; padding: 14px 16px; border-radius: 16px; background: var(--bg-solid); box-shadow: var(--shadow); border: 1px solid var(--line); }
+.install-card { position: relative; margin: 0 calc(12px + var(--sar)) 10px calc(12px + var(--sal)); padding: 14px 16px; border-radius: 16px; background: var(--bg-solid); box-shadow: var(--shadow); border: 1px solid var(--line); }
 .sheet-host .sheet:not([hidden]) ~ .install-card, .sheet-host .follow-bar:not([hidden]) ~ .install-card { display: none; }
 .install-card .card-close { position: absolute; top: 4px; right: 4px; }
 .install-card .st { color: var(--fg-2); font-size: 13px; margin: 2px 0 10px; }
@@ -294,14 +315,21 @@ ul.plain.bullets li { display: list-item; list-style: disc; margin-left: 18px; b
 .install-steps li { display: flex; align-items: center; gap: 12px; font-size: 14px; }
 .install-steps .ic { width: 32px; height: 32px; border-radius: 8px; background: var(--bg-2); color: var(--blue); }
 
-/* toasts */
-/* Below the top chrome (search pill + seg + locate) — the one zone that stays free in every state. */
-.toasts { position: fixed; left: 16px; right: 16px; top: calc(var(--top-pad) + 8px + 48px + 10px + 44px + 10px + 44px + 14px); z-index: 50; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+/* toasts — one at a time (src/app/ui.ts queues them), floating just above the bottom chrome:
+   --bottom-h = tab bar + stat chip / sheet / follow bar, so no button is ever covered (the 36 px
+   band keeps clear of the map ⓘ). While a modal sheet is up (.top) they sit under the search pill,
+   over the dimmed backdrop, away from the modal's buttons. */
+.toasts {
+  position: fixed; left: calc(16px + var(--sal)); right: calc(16px + var(--sar)); bottom: calc(var(--bottom-h, var(--tabbar)) + 36px); z-index: 50;
+  display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none;
+}
+.toasts.top { bottom: auto; top: calc(var(--top-pad) + 8px + 48px + 12px); }
 .toast {
   pointer-events: auto; display: flex; align-items: center; gap: 12px; max-width: 480px; padding: 10px 14px; border-radius: 12px;
   background: rgba(30, 31, 38, 0.96); color: #f4f4f6; font-size: 14px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
-  opacity: 0; transform: translateY(-8px); transition: opacity 0.2s, transform 0.2s;
+  opacity: 0; transform: translateY(8px); transition: opacity 0.2s, transform 0.2s;
 }
+.toasts.top .toast { transform: translateY(-8px); }
 .toast.show { opacity: 1; transform: none; }
 .toast.error { background: #6a1d1a; }
 .toast.success { background: #1f4a2b; }

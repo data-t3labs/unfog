@@ -89,12 +89,12 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       addedCells = Math.max(0, after.visitedCells - before.visitedCells);
       addedArea = Math.max(0, after.areaM2 - before.areaM2);
     } catch (e) {
-      lines.push(`Import failed: ${String((e as Error)?.message ?? e)}`);
+      lines.push(`Import failed: ${String((e as Error)?.message ?? e)}. Check the file and try again.`);
     }
     importProgress.hidden = true;
     importStatus.textContent = '';
     clear(importResult);
-    const summary = anyOk ? `${fmtInt(addedCells)} new cells, ${fmtArea(addedArea, units())} added` : 'Nothing imported';
+    const summary = anyOk ? `${fmtInt(addedCells)} new cells, ${fmtArea(addedArea, units())} added` : 'Nothing imported — see why below';
     importResult.append(el('div', { class: 'name', text: summary }), el('ul', { class: 'plain small' }, lines.map((l) => el('li', { text: l }))));
     if (anyOk) {
       writeJSON(LAST_IMPORT_KEY, { at: Date.now(), summary } satisfies LastImport);
@@ -158,7 +158,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       renderBackupInfo();
       toast(r === 'shared' ? 'Backup shared — save it to Files or iCloud Drive' : 'Backup downloaded', { kind: 'success', duration: 5000 });
     } catch (e) {
-      toast(`Export failed: ${String((e as Error)?.message ?? e)}`, { kind: 'error' });
+      toast(`Export failed: ${String((e as Error)?.message ?? e)}. Try again.`, { kind: 'error' });
     } finally {
       exportBtn.disabled = false;
     }
@@ -179,7 +179,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
     try {
       [regions, downloads] = await Promise.all([engines.route.listRegions(), engines.route.listDownloads()]);
     } catch (e) {
-      regionsList.appendChild(el('div', { class: 'error', text: `Could not list regions: ${String((e as Error)?.message ?? e)}` }));
+      regionsList.appendChild(el('div', { class: 'error', text: `Could not list routing data: ${String((e as Error)?.message ?? e)}. Reload to try again.` }));
       return;
     }
     const dl = readJSON<RegionDownloads>(REGION_DL_KEY, {});
@@ -206,7 +206,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
           writeJSON(REGION_DL_KEY, cur);
           toast(`${r.name} ready for offline routing`, { kind: 'success' });
         } catch (e) {
-          toast(`Download failed: ${String((e as Error)?.message ?? e)}`, { kind: 'error' });
+          toast(`Download failed: ${String((e as Error)?.message ?? e)}. Check your connection and try again.`, { kind: 'error', duration: 6000 });
         }
         void renderRegions();
       });
@@ -238,7 +238,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
     try {
       tracks = (await engines.grid.listTracks()).filter((t) => t.source === 'session').sort((a, b) => (b.startMs ?? 0) - (a.startMs ?? 0));
     } catch (e) {
-      sessionsList.appendChild(el('div', { class: 'error', text: `Could not list sessions: ${String((e as Error)?.message ?? e)}` }));
+      sessionsList.appendChild(el('div', { class: 'error', text: `Could not list sessions: ${String((e as Error)?.message ?? e)}. Reload to try again.` }));
       return;
     }
     if (!tracks.length) {
@@ -281,7 +281,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       toast('All data deleted');
       void refresh();
     } catch (e) {
-      toast(`Delete failed: ${String((e as Error)?.message ?? e)}`, { kind: 'error' });
+      toast(`Could not delete: ${String((e as Error)?.message ?? e)}. Reload and try again.`, { kind: 'error' });
     }
   });
 

@@ -22,7 +22,7 @@ import { Recorder, type RecorderEvents } from './record/session';
 
 declare global {
   interface Window {
-    __unfog?: { ready: boolean; mock: boolean; openRoute?: (d: Destination) => void; ctx?: AppContext };
+    __unfog?: { ready: boolean; mock: boolean; openRoute?: (d: Destination) => void; openLoop?: (from?: [number, number]) => void; ctx?: AppContext };
   }
 }
 
@@ -59,9 +59,11 @@ async function boot(): Promise<void> {
     try {
       const s = await engines.grid.getStats();
       shell.statBig.textContent = fmtArea(s.areaM2, getSettings().units);
-      shell.statSub.textContent = `explored · ${fmtInt(s.visitedCells)} cells`;
+      shell.statSub.textContent = `${fmtInt(s.visitedCells)} cells`;
+      shell.setEmptyState(s.visitedCells === 0);
     } catch {
       shell.statBig.textContent = '—';
+      shell.statSub.textContent = '';
     }
   }
 
@@ -88,11 +90,11 @@ async function boot(): Promise<void> {
     },
     async requestLocation() {
       if (!locationMgr.supported) {
-        toast('This browser has no location support', { kind: 'error' });
+        toast('Location is not available in this browser. Open Unfog in Safari.', { kind: 'error' });
         return false;
       }
       if (window.isSecureContext === false) {
-        toast('Location needs HTTPS', { kind: 'error' });
+        toast('Location only works over a secure (https) connection. Open Unfog from its https address.', { kind: 'error', duration: 6000 });
         return false;
       }
       locationMgr.retain('map');
@@ -113,6 +115,10 @@ async function boot(): Promise<void> {
     openRoute(dest) {
       shell.showTab('map');
       routeSheet.open(dest);
+    },
+    openLoop(from) {
+      shell.showTab('map');
+      routeSheet.openLoop(from);
     },
   };
 
@@ -178,16 +184,17 @@ async function boot(): Promise<void> {
     showInstallCardIfNeeded(ctx);
     window.setTimeout(() => dataScreen.maybeNag(), 4000);
     map.map.once('idle', () => {
-      window.__unfog = { ready: true, mock: engines.gridMock || engines.routeMock, openRoute: (d) => ctx.openRoute(d), ctx };
+      window.__unfog = { ready: true, mock: engines.gridMock || engines.routeMock, openRoute: (d) => ctx.openRoute(d), openLoop: (from) => ctx.openLoop(from), ctx };
     });
   });
   if (engines.gridMock || engines.routeMock) {
-    toast(forceMock ? 'Mock mode: synthetic data, nothing is saved' : 'Engines unavailable — showing mock data', { duration: 4000 });
+    if (forceMock) toast('Mock mode: synthetic data, nothing is saved', { duration: 4000 });
+    else toast('The map engines did not start — showing sample data instead. Reload to try again.', { kind: 'error', duration: 8000, action: { label: 'Reload', onClick: () => location.reload() } });
   }
 }
 
 boot().catch((e: unknown) => {
   console.error(e);
   const mount = document.getElementById('app');
-  if (mount) mount.replaceChildren(el('div', { class: 'boot' }, el('div', { class: 'error', text: `Unfog could not start: ${String((e as Error)?.message ?? e)}` }), el('button', { class: 'btn', type: 'button', onclick: () => location.reload() }, 'Reload')));
+  if (mount) mount.replaceChildren(el('div', { class: 'boot' }, el('div', { class: 'error', text: `Unfog could not start: ${String((e as Error)?.message ?? e)}. Reload to try again; if it keeps failing, check your connection.` }), el('button', { class: 'btn', type: 'button', onclick: () => location.reload() }, 'Reload')));
 });

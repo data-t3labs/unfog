@@ -44,7 +44,7 @@ export async function shareOrDownload(name: string, content: BlobPart, type: str
 
 export async function exportTrackGpx(track: Track): Promise<void> {
   if (track.points.length < 2) {
-    toast('Nothing to export — the track has fewer than 2 points');
+    toast('Nothing to export — this walk has fewer than 2 fixes.');
     return;
   }
   const r = await shareOrDownload(gpxFileName(track), trackToGpx(track), 'application/gpx+xml');
@@ -157,7 +157,7 @@ export function createRecordUI(ctx: AppContext, hooks: RecorderEvents): RecordUI
               try {
                 await ctx.engines.grid.markTrack(track);
               } catch (e) {
-                toast(`Could not save the session: ${String((e as Error)?.message ?? e)}`, { kind: 'error' });
+                toast(`Could not save the session: ${String((e as Error)?.message ?? e)}. Try again.`, { kind: 'error' });
                 return;
               }
             }

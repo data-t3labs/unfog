@@ -16,6 +16,7 @@ type UnfogWindow = Window & {
     ready: boolean;
     mock: boolean;
     openRoute?: (d: { name: string; locality?: string; lonlat: [number, number] }) => void;
+    openLoop?: (from?: [number, number]) => void;
     ctx?: {
       map: {
         map: {
@@ -63,7 +64,18 @@ test.describe('Unfog smoke (mock engines)', () => {
     await expect(page.locator('canvas.maplibregl-canvas')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Search destination' })).toBeVisible();
     await expect(page.locator('.seg button.on')).toHaveText('Fog');
-    await expect(page.locator('.stat-chip .big')).not.toHaveText(/—|…/);
+    await expect(page.locator('.stat-chip .val')).not.toHaveText(/—|…/);
+    await expect(page.locator('.stat-chip .big')).toContainText('explored');
+    await expect(page.locator('.stat-chip .sub')).toContainText(/\d cells$/);
+    // Toasts sit above the bottom chrome, never over a button (the mock-mode toast is up at boot).
+    const toast = page.locator('.toast');
+    if (await toast.count()) {
+      const t = await toast.first().boundingBox();
+      const chip = await page.locator('.stat-chip').boundingBox();
+      const search = await page.locator('.search').boundingBox();
+      expect(t!.y + t!.height).toBeLessThanOrEqual(chip!.y);
+      expect(t!.y).toBeGreaterThanOrEqual(search!.y + search!.height);
+    }
     await idle(page);
     await shot(page, 'fog');
   });
@@ -116,7 +128,57 @@ test.describe('Unfog smoke (mock engines)', () => {
     await page.locator('.follow-bar').getByRole('button', { name: 'End' }).click();
     await expect(page.locator('.follow-bar')).toBeHidden();
     await expect(page.locator('.search .ph')).toHaveText('Where to?');
-    await expect(page.getByRole('button', { name: 'Record' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
+  });
+
+  test('loop mode: "Explore a loop from here" lists loops, chips + slider re-run, Go/End', async ({ page }) => {
+    await boot(page);
+    await page.getByRole('button', { name: 'Search destination' }).click();
+    await page.getByRole('option', { name: /Explore a loop from here/ }).click();
+    await expect(page.locator('.search-panel')).toBeHidden();
+    const sheet = page.locator('.sheet.route.loop');
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator('h2')).toContainText('Explore from here');
+    await expect(sheet.locator('.chips button')).toHaveCount(4);
+    await expect(sheet.locator('.chips button.on')).toHaveText('3 km');
+    await expect(sheet.locator('.cand').first()).toBeVisible({ timeout: 30_000 });
+    const n = await sheet.locator('.cand').count();
+    expect(n).toBeGreaterThanOrEqual(1);
+    expect(n).toBeLessThanOrEqual(3);
+    await expect(sheet.locator('.cand.on .name')).toHaveText('Loop A');
+    const names = await sheet.locator('.cand .name').allTextContents();
+    expect(names).toEqual(['Loop A', 'Loop B', 'Loop C'].slice(0, n));
+    await expect(sheet.locator('.cand.on .st')).toContainText(/km · \d+ min/);
+    await expect(sheet.locator('.cand.on .new')).toContainText('% new');
+    await expect(page.locator('.search .val')).toHaveText('Loop from here');
+    const routeFeatures = await page.evaluate(() => (window as UnfogWindow).__unfog?.ctx?.map.map.querySourceFeatures('unfog-routes').length ?? 0);
+    expect(routeFeatures).toBeGreaterThan(0);
+    await idle(page);
+    await shot(page, 'loop');
+
+    // A length chip re-runs; the slider follows; the choice persists.
+    await sheet.getByRole('button', { name: '5 km' }).click();
+    await expect(sheet.locator('.chips button.on')).toHaveText('5 km');
+    await expect(sheet.getByLabel('Loop length', { exact: true })).toHaveValue('5');
+    await expect(sheet.locator('.cand').first()).toBeVisible({ timeout: 30_000 });
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.routePrefs') ?? '{}'))).toMatchObject({ loopKm: 5 });
+    await sheet.getByLabel('Loop length', { exact: true }).fill('8');
+    await expect(sheet.locator('.chips button.on')).toHaveText('8 km');
+    await sheet.getByLabel('Loop length', { exact: true }).fill('4.5');
+    await expect(sheet.locator('.chips button.on')).toHaveCount(0);
+    await expect(sheet.locator('.slider-loop')).toContainText('4.5 km');
+
+    // Go collapses to the follow bar naming the loop; End restores the chrome.
+    await expect(sheet.locator('.cand').first()).toBeVisible({ timeout: 30_000 });
+    await sheet.getByRole('button', { name: 'Go' }).click();
+    const bar = page.locator('.follow-bar');
+    await expect(bar).toBeVisible();
+    await expect(bar).toContainText('Loop A');
+    await expect(bar).toContainText('round trip from here');
+    await bar.getByRole('button', { name: 'End' }).click();
+    await expect(bar).toBeHidden();
+    await expect(page.locator('.search .ph')).toHaveText('Where to?');
+    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
   });
 
   test('Data, Stats and Help screens open', async ({ page }) => {
@@ -125,6 +187,15 @@ test.describe('Unfog smoke (mock engines)', () => {
     await expect(page.locator('#screen-data')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Import files' })).toBeVisible();
     await expect(page.locator('#screen-data .row-item').first()).toBeVisible();
+    // A toast on this screen must stay below every button (above the tab bar), not over Import files.
+    const toast = page.locator('.toast');
+    if (await toast.count()) {
+      const t = await toast.first().boundingBox();
+      const importBtn = await page.getByRole('button', { name: 'Import files' }).boundingBox();
+      const tabs = await page.locator('.tabs').boundingBox();
+      expect(t!.y).toBeGreaterThan(importBtn!.y + importBtn!.height);
+      expect(t!.y + t!.height).toBeLessThanOrEqual(tabs!.y);
+    }
     await shot(page, 'data');
 
     await page.getByRole('tab', { name: 'Stats' }).click();
@@ -147,12 +218,12 @@ test.describe('Unfog smoke (mock engines)', () => {
     await expect(card).toBeVisible();
     await expect(card).toContainText('Add to Home Screen');
     // The stat chip and Record must stay reachable above the card.
-    await expect(page.getByRole('button', { name: 'Record' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
     await idle(page);
     await shot(page, 'install');
     await card.getByRole('button', { name: 'Dismiss' }).click();
     await expect(card).toBeHidden();
-    await page.getByRole('button', { name: 'Record' }).click();
+    await page.getByRole('button', { name: 'Record', exact: true }).click();
     await expect(page.locator('.rec-banner')).toBeVisible({ timeout: 20_000 });
     await page.getByRole('button', { name: 'Stop recording' }).click();
     await expect(page.locator('.record-summary')).toBeVisible({ timeout: 20_000 });
@@ -161,7 +232,7 @@ test.describe('Unfog smoke (mock engines)', () => {
 
   test('recording starts and stops with a summary', async ({ page, context }) => {
     await boot(page);
-    await page.getByRole('button', { name: 'Record' }).click();
+    await page.getByRole('button', { name: 'Record', exact: true }).click();
     await expect(page.locator('.rec-banner')).toBeVisible({ timeout: 20_000 });
     await context.setGeolocation({ longitude: -73.9572, latitude: 40.7179 });
     await page.waitForTimeout(800);

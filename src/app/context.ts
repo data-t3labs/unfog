@@ -29,4 +29,6 @@ export interface AppContext {
   /** Start location updates from a user gesture; resolves false when denied/unavailable (a toast is shown). */
   requestLocation(): Promise<boolean>;
   openRoute(dest: Destination): void;
+  /** Loop mode ("Explore from here"): round trips from the user's position, else the map centre. */
+  openLoop(from?: LonLat): void;
 }

@@ -51,6 +51,12 @@ export function clear(node: Element): void {
 }
 
 // ---------------------------------------------------------------- toasts
+//
+// One toast at a time, queued — never stacked. The host floats just above the bottom chrome
+// (`--bottom-h`: tab bar + stat chip / sheet, kept up to date by the shell) so it never covers
+// a button, and moves to the top while a modal sheet is up so it stays clear of the modal's
+// buttons. A sticky toast (duration 0, e.g. "Update available") steps aside for a transient one
+// and comes back after it.
 
 let toastHost: HTMLElement | null = null;
 
@@ -63,31 +69,118 @@ export interface ToastOptions {
   kind?: 'info' | 'error' | 'success';
 }
 
-export function toast(text: string, opts: ToastOptions = {}): () => void {
+const TOAST_DEFAULT_MS = 3500;
+const TOAST_FADE_MS = 220;
+const TOAST_MAX_QUEUE = 5;
+
+interface Pending {
+  text: string;
+  opts: ToastOptions;
+  node: HTMLElement | null;
+  timer: number;
+  done: boolean;
+}
+
+const queue: Pending[] = [];
+let current: Pending | null = null;
+let fading = false;
+
+function host(): HTMLElement {
   if (!toastHost) {
     toastHost = el('div', { class: 'toasts', role: 'status', 'aria-live': 'polite' });
     document.body.appendChild(toastHost);
   }
-  if (opts.id) toastHost.querySelector(`[data-toast="${opts.id}"]`)?.remove();
+  return toastHost;
+}
+
+const isSticky = (p: Pending) => (p.opts.duration ?? TOAST_DEFAULT_MS) === 0;
+
+/** Show (or queue) a toast; returns a function that removes it whether showing or pending. */
+export function toast(text: string, opts: ToastOptions = {}): () => void {
+  if (opts.id) {
+    for (let i = queue.length - 1; i >= 0; i--) if (queue[i].opts.id === opts.id) queue.splice(i, 1);
+    if (current?.opts.id === opts.id) finish(current);
+  } else if (current && !current.done && current.text === text) {
+    // The same message is on screen already: don't repeat it.
+    const cur = current;
+    return () => finish(cur);
+  } else {
+    const dup = queue.find((q) => q.text === text);
+    if (dup) return () => finish(dup);
+  }
+  const p: Pending = { text, opts, node: null, timer: 0, done: false };
+  queue.push(p);
+  while (queue.length > TOAST_MAX_QUEUE) {
+    const i = queue.findIndex((q) => !isSticky(q));
+    queue.splice(i < 0 ? 0 : i, 1);
+  }
+  pump();
+  return () => finish(p);
+}
+
+function pump(): void {
+  if (fading) return;
+  if (current) {
+    if (isSticky(current) && queue.length) {
+      // Step aside for the transient toast; come back once it is gone.
+      const s = current;
+      hide(s);
+      s.done = false;
+      s.node = null;
+      queue.push(s);
+    }
+    return;
+  }
+  // Transient toasts go first; a sticky one waits until nothing transient is pending.
+  let i = queue.findIndex((q) => !isSticky(q));
+  if (i < 0) i = 0;
+  const next = queue.splice(i, 1)[0];
+  if (next) show(next);
+}
+
+function show(p: Pending): void {
+  const h = host();
+  h.classList.toggle('top', Boolean(document.querySelector('.backdrop.show')));
   const node = el(
     'div',
-    { class: `toast ${opts.kind ?? 'info'}`, 'data-toast': opts.id ?? '' },
-    el('span', { class: 'toast-text', text }),
-    opts.action
-      ? el('button', { class: 'toast-action', type: 'button', onclick: () => { opts.action!.onClick(); dismiss(); } }, opts.action.label)
+    { class: `toast ${p.opts.kind ?? 'info'}`, 'data-toast': p.opts.id ?? '' },
+    el('span', { class: 'toast-text', text: p.text }),
+    p.opts.action
+      ? el('button', { class: 'toast-action', type: 'button', onclick: () => { p.opts.action!.onClick(); finish(p); } }, p.opts.action.label)
       : null,
   );
-  toastHost.appendChild(node);
+  p.node = node;
+  current = p;
+  h.appendChild(node);
   requestAnimationFrame(() => node.classList.add('show'));
-  let timer = 0;
-  const dismiss = () => {
-    window.clearTimeout(timer);
-    node.classList.remove('show');
-    window.setTimeout(() => node.remove(), 250);
-  };
-  const duration = opts.duration ?? 3500;
-  if (duration > 0) timer = window.setTimeout(dismiss, duration);
-  return dismiss;
+  const duration = p.opts.duration ?? TOAST_DEFAULT_MS;
+  if (duration > 0) p.timer = window.setTimeout(() => finish(p), duration);
+}
+
+/** Remove a toast: drop it from the queue, or fade it out and let the next one follow. */
+function finish(p: Pending): void {
+  if (p.done) return;
+  const qi = queue.indexOf(p);
+  if (qi >= 0) {
+    queue.splice(qi, 1);
+    p.done = true;
+    return;
+  }
+  if (current === p) hide(p);
+}
+
+function hide(p: Pending): void {
+  p.done = true;
+  window.clearTimeout(p.timer);
+  const node = p.node;
+  current = null;
+  fading = true;
+  node?.classList.remove('show');
+  window.setTimeout(() => {
+    node?.remove();
+    fading = false;
+    pump();
+  }, TOAST_FADE_MS);
 }
 
 // ---------------------------------------------------------------- confirm sheet
