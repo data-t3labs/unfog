@@ -1,0 +1,42 @@
+[
+  {
+    "id": "nyc",
+    "name": "New York City",
+    "zoom": 12,
+    "bbox": [
+      -74.37369,
+      40.47417,
+      -73.65336,
+      40.98588
+    ],
+    "builtAt": "2026-09-02T08:03:22.578Z",
+    "source": "BBBike NewYork.osm.pbf 2026-09-02",
+    "stats": {
+      "nodes": 310008,
+      "arcs": 778326,
+      "km": 32447.7
+    },
+    "tileCount": 67,
+    "bytes": 15317491
+  },
+  {
+    "id": "vancouver",
+    "name": "Metro Vancouver",
+    "zoom": 12,
+    "bbox": [
+      -123.30655,
+      48.98424,
+      -122.5235,
+      49.43752
+    ],
+    "builtAt": "2026-09-02T08:02:36.906Z",
+    "source": "BBBike Vancouver.osm.pbf 2026-09-02",
+    "stats": {
+      "nodes": 174499,
+      "arcs": 419836,
+      "km": 15256.6
+    },
+    "tileCount": 61,
+    "bytes": 8715716
+  }
+]

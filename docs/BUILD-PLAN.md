@@ -90,6 +90,30 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
 - Topology: graph nodes = way endpoints + nodes shared by ≥2 kept ways; arcs = way runs between graph nodes; shape = intermediate nodes.
 - Tiling: arcs stored in the tile of their from-node; foreign endpoints included as FOREIGN nodes. Output `public/graph/<region>/`.
 
+#### How to run (wave 1 D)
+```
+# 1. extracts (gitignored cache; skip if present)
+curl -L -o tools/build-graph/cache/Vancouver.osm.pbf https://download.bbbike.org/osm/bbbike/Vancouver/Vancouver.osm.pbf
+curl -L -o tools/build-graph/cache/NewYork.osm.pbf   https://download.bbbike.org/osm/bbbike/NewYork/NewYork.osm.pbf
+# 2. build the CLI (Vite SSR bundle → tools/build-graph/dist/cli.js) and run it
+npm run build-graph -- --pbf tools/build-graph/cache/Vancouver.osm.pbf --region vancouver --name "Metro Vancouver"
+npm run build-graph -- --pbf tools/build-graph/cache/NewYork.osm.pbf   --region nyc       --name "New York City"
+# any bbox via Overpass (the in-app download path), e.g. Williamsburg:
+npm run build-graph -- --overpass -73.978,40.703,-73.938,40.729 --region williamsburg --name "Williamsburg"
+```
+Options: `--out <dir>` (default `public/graph/<region>`), `--bbox w,s,e,n` (PBF: keep only ways touching the box; also the
+manifest bbox), `--source "<text>"`, `--index <file>` (default `public/graph/index.json`). Output: `12/<x>/<y>.ufg`
+(`packGraphTile`), `manifest.json` (`RegionManifest` with per-tile bytes), and the region merged into `index.json`
+(manifests without `tiles`, plus `tileCount` + `bytes`). Stale tiles from a previous build of the same region are removed.
+The PBF reader streams blob by blob (two passes: highway ways, then only the referenced nodes), so memory is set by the
+kept graph, not the extract: Vancouver (65 MB) builds in ≈ 5 s / 0.53 GB peak RSS and NYC (153 MB) in ≈ 11 s / 0.74 GB
+on the M2 with Node's default heap.
+For bigger extracts (a state/province) raise the heap: `NODE_OPTIONS=--max-old-space-size=8192 npm run build-graph -- …`.
+Only zlib-compressed PBFs are supported (BBBike/Geofabrik default); re-encode others with
+`osmium cat in.pbf -o out.pbf --output-format pbf,pbf_compression=zlib`.
+Tests: `npx vitest run src/routing tools` — the Vancouver cross-check and the prebuilt-region sanity checks skip when the
+extract / `public/graph/<region>` is absent.
+
 ### 2.5 Imports / exports
 - FoW: `src/import/fow.ts` — accept .zip (any nesting; match tile files by NAME pattern; skip `.`/`__MACOSX`/`FoW-Sync-Lock`), bare tile
   files (multi-select), `.fwss` (`Model/*/` entries only). Real fixtures: `tests/fixtures/fow/23e4lltkkoke`, `cd36lltksiwo` (MIT, fog-machine).
