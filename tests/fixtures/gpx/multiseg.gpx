@@ -1,0 +1,44 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<gpx creator="StravaGPX" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd http://www.garmin.com/xmlschemas/GpxExtensions/v3 http://www.garmin.com/xmlschemas/GpxExtensionsv3.xsd http://www.garmin.com/xmlschemas/TrackPointExtension/v1 http://www.garmin.com/xmlschemas/TrackPointExtensionv1.xsd" version="1.1" xmlns="http://www.topografix.com/GPX/1/1" xmlns:gpxtpx="http://www.garmin.com/xmlschemas/TrackPointExtension/v1" xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
+ <metadata>
+  <name>metadata name must not become the track name</name>
+  <time>2024-07-04T13:00:00Z</time>
+ </metadata>
+ <!-- a comment with a <trkpt lat="0" lon="0"/> inside must be ignored -->
+ <wpt lat="40.70000" lon="-73.99000"><name>Waypoint (ignored)</name></wpt>
+ <rte><name>Route (ignored)</name><rtept lat="40.70100" lon="-73.99100"/><rtept lat="40.70200" lon="-73.99200"/></rte>
+ <trk>
+  <name>Morning Ride</name>
+  <type>cycling</type>
+  <trkseg>
+   <trkpt lat='40.71000' lon='-73.95000'>
+    <ele>5.0</ele>
+    <time>2024-07-04T13:00:00Z</time>
+    <extensions>
+     <gpxtpx:TrackPointExtension>
+      <gpxtpx:hr>120</gpxtpx:hr>
+     </gpxtpx:TrackPointExtension>
+    </extensions>
+   </trkpt>
+   <trkpt lat='40.71050' lon='-73.94950'>
+    <ele>5.2</ele>
+    <time>2024-07-04T13:00:20Z</time>
+   </trkpt>
+   <trkpt lat='40.71100' lon='-73.94900'>
+    <time>2024-07-04T13:00:40Z</time>
+   </trkpt>
+  </trkseg>
+  <trkseg>
+   <trkpt lat="40.72000" lon="-73.94000"><time>2024-07-04T13:30:00Z</time></trkpt>
+   <trkpt lat="40.72050" lon="-73.93950"><time>2024-07-04T13:30:20Z</time></trkpt>
+  </trkseg>
+ </trk>
+ <trk>
+  <name><![CDATA[Evening <Walk>]]></name>
+  <trkseg>
+   <trkpt lat="40.73000" lon="-73.95500"><time>2024-07-04T22:00:00Z</time></trkpt>
+   <trkpt lat="40.73020" lon="-73.95480"><time>2024-07-04T22:00:30Z</time></trkpt>
+   <trkpt lat="40.73040" lon="-73.95460"/>
+  </trkseg>
+ </trk>
+</gpx>

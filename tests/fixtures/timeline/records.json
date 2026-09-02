@@ -1,0 +1,16 @@
+{
+  "locations": [
+    { "latitudeE7": 407176000, "longitudeE7": -739568000, "accuracy": 10, "source": "WIFI", "deviceTag": 1, "timestamp": "2023-11-05T14:00:00.000Z" },
+    { "latitudeE7": 407179000, "longitudeE7": -739563000, "accuracy": 12, "timestamp": "2023-11-05T14:05:00.000Z" },
+    { "latitudeE7": 407182000, "longitudeE7": -739558000, "accuracy": 1200, "source": "CELL", "timestamp": "2023-11-05T14:07:00.000Z" },
+    { "latitudeE7": 407185000, "longitudeE7": -739553000, "accuracy": 15, "timestamp": "2023-11-05T14:10:00.000Z" },
+    { "latitudeE7": 407188000, "longitudeE7": -739548000, "accuracy": 9, "timestamp": "2023-11-05T14:15:00.000Z" },
+    { "latitudeE7": 407600000, "longitudeE7": -739860000, "accuracy": 20, "timestamp": "2023-11-05T15:00:00.000Z" },
+    { "latitudeE7": 407603000, "longitudeE7": -739855000, "accuracy": 20, "timestamp": "2023-11-05T15:04:00.000Z" },
+    { "latitudeE7": 407176000, "longitudeE7": -739568000, "accuracy": 8, "timestampMs": "1699344000000" },
+    { "latitudeE7": 407179000, "longitudeE7": -739563000, "accuracy": 8, "timestampMs": "1699344300000" },
+    { "latitudeE7": 407182000, "longitudeE7": -739558000, "accuracy": 8, "timestampMs": "1699344600000" },
+    { "accuracy": 5, "timestamp": "2023-11-07T09:00:00.000Z" },
+    { "latitudeE7": "garbage", "longitudeE7": -739558000, "accuracy": 8, "timestamp": "2023-11-07T09:01:00.000Z" }
+  ]
+}

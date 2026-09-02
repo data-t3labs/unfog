@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<gpx:gpx version="1.0" creator="unfog-test" xmlns:gpx="http://www.topografix.com/GPX/1/0">
+<gpx:trk><gpx:trkseg>
+<gpx:trkpt lon="-73.99000" lat="40.73000"/>
+<gpx:trkpt lon="-73.98950" lat="40.73030"/>
+<gpx:trkpt lon="-73.98900" lat="40.73060"/>
+<gpx:trkpt lon="-73.98850" lat="40.73090"/>
+</gpx:trkseg></gpx:trk>
+</gpx:gpx>

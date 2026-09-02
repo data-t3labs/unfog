@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="unfog-test" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>Bedford Ave &amp; N 7th</name>
+    <trkseg>
+      <trkpt lat="40.71760" lon="-73.95680"><time>2024-05-12T14:03:11Z</time></trkpt>
+      <trkpt lat="40.71790" lon="-73.95640"><time>2024-05-12T14:03:41Z</time></trkpt>
+      <trkpt lat="40.71820" lon="-73.95600"><time>2024-05-12T14:04:11Z</time></trkpt>
+      <trkpt lat="40.71850" lon="-73.95560"><time>2024-05-12T14:04:41Z</time></trkpt>
+    </trkseg>
+  </trk>
+</gpx>

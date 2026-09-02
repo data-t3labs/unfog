@@ -1,0 +1,74 @@
+{
+  "semanticSegments": [
+    {
+      "startTime": "2024-03-10T08:00:00.000-04:00",
+      "endTime": "2024-03-10T09:30:00.000-04:00",
+      "startTimeTimezoneUtcOffsetMinutes": -240,
+      "endTimeTimezoneUtcOffsetMinutes": -240,
+      "visit": {
+        "hierarchyLevel": 0,
+        "probability": 0.93,
+        "topCandidate": {
+          "placeId": "ChIJd8BlQ2BZwokRAFUEcm_qrcA",
+          "semanticType": "HOME",
+          "probability": 0.98,
+          "placeLocation": { "latLng": "40.7176°, -73.9568°" }
+        }
+      }
+    },
+    {
+      "startTime": "2024-03-10T09:30:00.000-04:00",
+      "endTime": "2024-03-10T09:40:00.000-04:00",
+      "timelinePath": [
+        { "point": "geo:40.7176,-73.9568", "time": "2024-03-10T09:30:00.000-04:00" },
+        { "point": "geo:40.7181,-73.9561", "time": "2024-03-10T09:32:00.000-04:00" },
+        { "point": "geo:40.7186,-73.9554", "time": "2024-03-10T09:34:00.000-04:00" },
+        { "point": "geo:40.7191,-73.9547", "time": "2024-03-10T09:36:00.000-04:00" },
+        { "point": "not a point" },
+        { "point": "geo:40.7196,-73.9540", "time": "2024-03-10T09:38:00.000-04:00" }
+      ]
+    },
+    {
+      "startTime": "2024-03-10T09:40:00.000-04:00",
+      "endTime": "2024-03-10T09:55:00.000-04:00",
+      "activity": {
+        "start": { "latLng": "40.7196°, -73.9540°" },
+        "end": { "latLng": "40.7215°, -73.9512°" },
+        "distanceMeters": 320.5,
+        "topCandidate": { "type": "WALKING", "probability": 0.91 }
+      }
+    },
+    {
+      "startTime": "2024-03-10T10:00:00.000-04:00",
+      "endTime": "2024-03-10T10:20:00.000-04:00",
+      "activity": {
+        "start": { "latLng": "40.7215°, -73.9512°" },
+        "end": { "latLng": "40.7580°, -73.9855°" },
+        "distanceMeters": 5200,
+        "topCandidate": { "type": "IN_SUBWAY", "probability": 0.8 }
+      }
+    },
+    {
+      "startTime": "2024-03-10T10:20:00.000-04:00",
+      "endTime": "2024-03-10T11:00:00.000-04:00",
+      "visit": {
+        "hierarchyLevel": 0,
+        "probability": 0.7,
+        "topCandidate": {
+          "placeId": "ChIJ",
+          "semanticType": "UNKNOWN",
+          "probability": 0.5,
+          "placeLocation": { "latLng": "40.7580°, -73.9855°" }
+        }
+      }
+    },
+    { "startTime": "2024-03-11T08:00:00.000-04:00", "endTime": "2024-03-11T08:10:00.000-04:00", "timelineMemory": { "trip": {} } },
+    { "startTime": "2024-03-11T08:10:00.000-04:00", "endTime": "2024-03-11T08:20:00.000-04:00", "visit": { "topCandidate": { "placeLocation": {} } } }
+  ],
+  "rawSignals": [
+    { "position": { "LatLng": "40.7176°, -73.9568°", "accuracyMeters": 12, "altitudeMeters": 10, "source": "WIFI", "timestamp": "2024-03-10T08:05:00.000-04:00" } },
+    { "position": { "LatLng": "40.7180°, -73.9560°", "accuracyMeters": 800, "source": "CELL", "timestamp": "2024-03-10T08:06:00.000-04:00" } },
+    { "activityRecord": { "probableActivities": [{ "type": "STILL", "confidence": 0.9 }], "timestamp": "2024-03-10T08:06:30.000-04:00" } }
+  ],
+  "userLocationProfile": { "frequentPlaces": [] }
+}
