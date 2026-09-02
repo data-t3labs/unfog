@@ -1,4 +1,5 @@
 /// <reference types="vitest/config" />
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
@@ -6,7 +7,16 @@ import { VitePWA } from 'vite-plugin-pwa';
 // app must go through import.meta.env.BASE_URL.
 export default defineConfig({
   base: '/unfog/',
-  build: { target: 'es2022', sourcemap: true },
+  build: {
+    target: 'es2022',
+    sourcemap: true,
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        welcome: fileURLToPath(new URL('./welcome/index.html', import.meta.url)),
+      },
+    },
+  },
   worker: { format: 'es' },
   plugins: [
     VitePWA({
@@ -33,6 +43,7 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         navigateFallback: '/unfog/index.html',
+        navigateFallbackDenylist: [/\/unfog\/welcome/],
         runtimeCaching: [
           {
             // Basemap vector tiles, style, glyphs, sprites — cached as you pan so revisited areas work offline.
