@@ -119,4 +119,37 @@ describe('fetchOverpassWays', () => {
     await expect(fetchOverpassWays(bbox, { fetch: fetch as typeof globalThis.fetch, signal: ac.signal })).rejects.toMatchObject({ name: 'AbortError' });
     expect(n).toBe(0);
   });
+
+  // A server that never answers (overpass-api.de under load holds the connection open) must not
+  // hold the ladder open with it: engine.downloadArea wraps fetch with a deadline per attempt.
+  it('with fetchWithDeadline: a fetch that never answers is cut at the deadline and retried; an outer abort still wins', async () => {
+    const { fetchWithDeadline } = await import('./engine');
+    let n = 0;
+    const hanging: typeof globalThis.fetch = (_input, init) =>
+      new Promise((resolve, reject) => {
+        n++;
+        if (n >= 2) return resolve(ok(doc));
+        init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    const attempts: Array<{ attempt: number; error?: unknown }> = [];
+    const ways = await fetchOverpassWays(bbox, { fetch: fetchWithDeadline(20, undefined, hanging), retryDelaysMs: [0, 0, 0], alternates: [], onAttempt: (a) => attempts.push(a) });
+    expect(ways).toHaveLength(1);
+    expect(n).toBe(2);
+    expect(attempts.find((a) => a.error)?.error).toMatchObject({ message: 'Overpass did not answer within 0 s' }); // 20 ms rounds to 0 s
+    expect((attempts.find((a) => a.error)?.error as Error).name).toBe('Error'); // retryable, not an abort
+
+    // The caller's own abort (offline) is re-thrown as that abort: no retry.
+    const ac = new AbortController();
+    let m = 0;
+    const hangForever: typeof globalThis.fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        m++;
+        init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    const p = fetchOverpassWays(bbox, { fetch: fetchWithDeadline(10_000, ac.signal, hangForever), retryDelaysMs: [0, 0, 0], alternates: [], signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 5));
+    ac.abort(Object.assign(new Error('No internet connection'), { name: 'OfflineError' }));
+    await expect(p).rejects.toMatchObject({ name: 'OfflineError' });
+    expect(m).toBe(1);
+  });
 });

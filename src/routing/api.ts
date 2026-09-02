@@ -81,6 +81,8 @@ export interface DownloadProgress {
   phase: 'fetch' | 'build' | 'store';
   done: number;
   total: number;
+  /** Optional status for the UI, e.g. "Overpass is busy (HTTP 504) — retrying in 15 s". */
+  note?: string;
 }
 
 export interface RouteApi {

@@ -32,7 +32,7 @@ Fog of World → long-press **Sync** → Compress) on the phone; a charged phone
 | 20 | Delete the Home Screen icon, reinstall from Safari, open, Data → Import → pick the backup zip. | Everything restored (same area in the stat chip; sessions listed). | |
 | 21 | Airplane mode, relaunch from the Home Screen, pan around your area. | App loads offline; previously viewed basemap tiles show; unvisited basemap areas are blank but the fog/heat overlay still renders; search shows "needs a connection". | |
 | 22 | Data → Routing data → Download New York City (on Wi-Fi), then airplane mode → plan a route in NYC. | Progress to 100 %; "Offline since …" line; routing works offline. | |
-| 23 | Wait for a new deploy, relaunch. | "Update available — Reload" toast; Reload loads the new version without losing data. | |
+| 23 | Wait for a new deploy, relaunch. | "Update available — Reload" toast (it never reloads on its own — a recording in progress keeps going); Reload loads the new version without losing data. Help → the last line reads "Unfog 0.1.0 · build <new sha>". | |
 | 24 | Import GPX (Apple Health export `workout-routes/*.gpx`) and a Google Timeline JSON. | Each shows as "1 track" / "N tracks"; stats list the sources. | |
 
 ## Things the headless suite cannot prove — check on the phone

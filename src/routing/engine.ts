@@ -20,6 +20,70 @@ import { TileSource, type TileSourceOptions, type TileSourcePerf } from './tiles
 
 const DEG = Math.PI / 180;
 export const MAX_AREA_RADIUS_KM = 8;
+/**
+ * Retry sleeps of the Overpass fetch, per endpoint (research §1a: back off ≥ 30 s on 429).
+ * Passed explicitly so the progress note can say how long the wait is.
+ */
+const OVERPASS_RETRY_DELAYS_MS = [15_000, 30_000, 60_000];
+
+/** No connection: said up front instead of after the retry loop's minutes of sleeping. */
+export class OfflineError extends Error {
+  constructor() {
+    super('No internet connection');
+    this.name = 'OfflineError';
+  }
+}
+
+/**
+ * Overpass answered but had no routable way in the box (open water, or a regional mirror that
+ * does not cover the area): nothing is stored, and the message is not about the connection.
+ */
+export class EmptyAreaError extends Error {
+  constructor() {
+    super('No streets found in this area. Zoom in on a town and try again.');
+    this.name = 'EmptyAreaError';
+  }
+}
+
+const isOffline = (): boolean => typeof navigator !== 'undefined' && navigator.onLine === false;
+
+/** Server-side Overpass budget (`[timeout:90]`) plus slack for the transfer. */
+const OVERPASS_TIMEOUT_S = 90;
+const OVERPASS_DEADLINE_MS = (OVERPASS_TIMEOUT_S + 30) * 1000;
+
+/**
+ * `fetch` with a deadline. An overloaded overpass-api.de dispatcher holds the connection open
+ * without ever answering (seen 2026-09-02: 4 min and counting), which the retry ladder never
+ * gets to see. A deadline rejection is an ordinary (retryable) error; an abort of `outer`
+ * (offline) is re-thrown as that abort so the ladder stops.
+ */
+export function fetchWithDeadline(ms: number, outer?: AbortSignal, base: typeof fetch = fetch): typeof fetch {
+  return async (input, init) => {
+    const ctrl = new AbortController();
+    const onOuter = () => ctrl.abort(outer?.reason);
+    if (outer?.aborted) onOuter();
+    else outer?.addEventListener('abort', onOuter, { once: true });
+    const timer = setTimeout(() => ctrl.abort(), ms);
+    try {
+      return await base(input, { ...init, signal: ctrl.signal });
+    } catch (e) {
+      if (outer?.aborted) throw outer.reason instanceof Error ? outer.reason : e;
+      if (ctrl.signal.aborted) throw new Error(`Overpass did not answer within ${Math.round(ms / 1000)} s`);
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', onOuter);
+    }
+  };
+}
+
+/** One failed Overpass attempt as a status line: what went wrong and what happens next. */
+function describeAttempt(error: unknown, delayMs: number | undefined, lastOnEndpoint: boolean, lastEndpoint: boolean): string {
+  const status = (error as { status?: number } | null)?.status;
+  const what = typeof status === 'number' ? `Overpass is busy (HTTP ${status})` : 'Overpass did not answer';
+  if (lastOnEndpoint) return lastEndpoint ? `${what} — giving up` : `${what} — trying another server`;
+  return `${what} — retrying in ${Math.round((delayMs ?? 0) / 1000)} s`;
+}
 
 /** No graph tile has data for the request. Crosses Comlink with name + message intact. */
 export class NoCoverageError extends Error {
@@ -118,15 +182,41 @@ export class RouteEngine implements RouteApi {
 
   async downloadArea(center: LonLat, radiusKm: number, onProgress?: (p: DownloadProgress) => void): Promise<{ tiles: number; bytes: number }> {
     if (!(radiusKm > 0) || radiusKm > MAX_AREA_RADIUS_KM) throw new Error(`Radius must be 0–${MAX_AREA_RADIUS_KM} km`);
+    if (isOffline()) throw new OfflineError();
     // Agent D's modules (wave 1): imported lazily so the worker boots without them and tests do not depend on them.
-    const [{ fetchOverpassWays }, { buildGraphTiles }] = await Promise.all([import('./overpass'), import('./graph-build')]);
+    const [{ fetchOverpassWays, DEFAULT_OVERPASS_ENDPOINT, ALTERNATE_OVERPASS_ENDPOINTS }, { buildGraphTiles }] = await Promise.all([import('./overpass'), import('./graph-build')]);
     const bbox = circleBBox(center, radiusKm);
     onProgress?.({ phase: 'fetch', done: 0, total: 1 });
-    const ways = await fetchOverpassWays(bbox);
+    // Losing the connection mid-download aborts the retry loop at once instead of sleeping through it.
+    const abort = new AbortController();
+    const onOffline = () => abort.abort(new OfflineError());
+    const scope = globalThis as { addEventListener?: (t: string, cb: () => void) => void; removeEventListener?: (t: string, cb: () => void) => void };
+    scope.addEventListener?.('offline', onOffline);
+    const endpoints = [DEFAULT_OVERPASS_ENDPOINT, ...ALTERNATE_OVERPASS_ENDPOINTS];
+    let ways;
+    try {
+      ways = await fetchOverpassWays(bbox, {
+        signal: abort.signal,
+        timeoutS: OVERPASS_TIMEOUT_S,
+        fetch: fetchWithDeadline(OVERPASS_DEADLINE_MS, abort.signal),
+        retryDelaysMs: OVERPASS_RETRY_DELAYS_MS,
+        // Each failed attempt becomes a progress note so the sheet can say "busy — retrying in 15 s".
+        onAttempt: ({ endpoint, attempt, error }) => {
+          if (!error) return;
+          const lastOnEndpoint = attempt >= OVERPASS_RETRY_DELAYS_MS.length;
+          const lastEndpoint = endpoint === endpoints[endpoints.length - 1];
+          onProgress?.({ phase: 'fetch', done: 0, total: 1, note: describeAttempt(error, OVERPASS_RETRY_DELAYS_MS[attempt - 1], lastOnEndpoint, lastEndpoint) });
+        },
+      });
+    } finally {
+      scope.removeEventListener?.('offline', onOffline);
+    }
     onProgress?.({ phase: 'fetch', done: 1, total: 1 });
     onProgress?.({ phase: 'build', done: 0, total: 1 });
     const built = buildGraphTiles(ways);
     onProgress?.({ phase: 'build', done: 1, total: 1 });
+    // An empty area would be stored, listed on Data, and still route to "no coverage" — say so instead.
+    if (built.tiles.size === 0) throw new EmptyAreaError();
     const id = `${center[0].toFixed(4)},${center[1].toFixed(4)},${radiusKm}km`;
     const rec = await this.tiles.storeArea({ id, center, radiusKm }, built.tiles, onProgress);
     this.graphs.length = 0;

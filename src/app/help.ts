@@ -141,7 +141,14 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
       sections.location,
       sections.routes,
       sections.settings,
-      el('p', { class: 'muted small about', text: `Unfog ${APP_VERSION} · Map © OpenFreeMap / OpenStreetMap contributors · Search by Photon (komoot) · Everything stays on this device.` }),
+      // The build stamp tells which deploy this phone runs after an "Update available" reload.
+      el(
+        'p',
+        { class: 'muted small about' },
+        `Unfog ${APP_VERSION} · build `,
+        el('span', { class: 'build', text: typeof __UNFOG_BUILD__ === 'string' ? __UNFOG_BUILD__ : 'dev' }),
+        ' · Map © OpenFreeMap / OpenStreetMap contributors · Search by Photon (komoot) · Everything stays on this device.',
+      ),
     ),
   );
 

@@ -362,20 +362,32 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     }
     const progress = el('div', { class: 'progress', hidden: true }, el('div', { class: 'bar' }));
     const progressText = el('div', { class: 'muted small' });
-    const runDownload = async (label: string, task: (onProgress: (p: { phase: string; done: number; total: number }) => void) => Promise<unknown>) => {
+    const runDownload = async (label: string, task: (onProgress: (p: { phase: string; done: number; total: number; note?: string }) => void) => Promise<unknown>) => {
       progress.hidden = false;
       progressText.textContent = `${label}…`;
       for (const b of box.querySelectorAll('button')) b.disabled = true;
+      // Progress arrives on the callback's own MessagePort, the result on the worker's: a progress
+      // event can land after the rejection and overwrite the error line, so ignore it once settled.
+      let live = true;
       try {
+        // Offline, the Overpass fetch would retry for minutes before failing: say so now.
+        if (navigator.onLine === false) throw new Error('No internet connection');
         await task((p) => {
+          if (!live) return;
           const pct = p.total ? Math.round((100 * p.done) / p.total) : 0;
           (progress.firstElementChild as HTMLElement).style.width = `${pct}%`;
-          progressText.textContent = `${label}: ${p.phase} ${p.done}/${p.total}`;
+          // A note (e.g. "Overpass is busy — retrying in 15 s") replaces the bare phase counter.
+          progressText.textContent = p.note ? `${label}: ${p.note}` : `${label}: ${p.phase} ${p.done}/${p.total}`;
         });
+        live = false;
         toast('Routing data ready', { kind: 'success' });
         void run();
       } catch (e) {
-        progressText.textContent = `Download failed: ${String((e as Error)?.message ?? e)}. Check your connection and try again.`;
+        live = false;
+        const err = e as Error;
+        // EmptyAreaError (worker, name kept across Comlink): the server answered, the box has no streets.
+        progressText.textContent = err?.name === 'EmptyAreaError' ? String(err.message) : `Download failed: ${String(err?.message ?? e)}. Check your connection and try again.`;
+        progress.hidden = true;
         for (const b of box.querySelectorAll('button')) b.disabled = false;
       }
     };

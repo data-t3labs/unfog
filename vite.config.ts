@@ -1,12 +1,28 @@
 /// <reference types="vitest/config" />
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+
+/**
+ * Build stamp shown on the Help screen ("Unfog 0.1.0 · build 73d1693") so a phone can tell which
+ * deploy it runs after an "Update available — Reload". `UNFOG_BUILD` overrides (the e2e update
+ * test builds a v2 with it); else the short git sha; else the build time.
+ */
+function buildStamp(): string {
+  if (process.env.UNFOG_BUILD) return process.env.UNFOG_BUILD;
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return new Date().toISOString().slice(0, 16).replace('T', ' ');
+  }
+}
 
 // Served from GitHub Pages at https://data-t3labs.github.io/unfog/ — every absolute URL in the
 // app must go through import.meta.env.BASE_URL.
 export default defineConfig({
   base: '/unfog/',
+  define: { __UNFOG_BUILD__: JSON.stringify(buildStamp()) },
   build: {
     target: 'es2022',
     sourcemap: true,
