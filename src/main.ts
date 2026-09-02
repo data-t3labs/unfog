@@ -65,6 +65,7 @@ async function boot(): Promise<void> {
 
   let routeSheet: ReturnType<typeof createRouteSheet>;
   let statsScreen: ReturnType<typeof createStatsScreen>;
+  let helpScreen: ReturnType<typeof createHelpScreen>;
 
   async function refreshStatChip(): Promise<void> {
     try {
@@ -131,6 +132,10 @@ async function boot(): Promise<void> {
       shell.showTab('map');
       routeSheet.openLoop(from);
     },
+    openHelp(section) {
+      shell.showTab('help');
+      helpScreen.show(section);
+    },
   };
 
   // ---- location → map
@@ -172,7 +177,7 @@ async function boot(): Promise<void> {
   const recordUI = createRecordUI(ctx, recordHooks);
   const dataScreen = createDataScreen(ctx);
   statsScreen = createStatsScreen(ctx);
-  const helpScreen = createHelpScreen(ctx);
+  helpScreen = createHelpScreen(ctx);
 
   shell.searchPill.addEventListener('click', () => search.open());
   shell.searchClear.addEventListener('click', () => routeSheet.close());

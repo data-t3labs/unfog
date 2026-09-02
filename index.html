@@ -17,10 +17,10 @@
   <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
   <link rel="dns-prefetch" href="https://photon.komoot.io">
   <style>
-    /* Boot placeholder before the bundle runs (replaced by src/style.css). */
+    /* Boot placeholder before the bundle runs (src/style.css takes over). No font here: #app outlives the
+       boot and anything set on it would override the app's rem type scale for inherited text. */
     html, body { margin: 0; height: 100%; background: #f4f2ee; }
-    #app { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-      font: 14px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif; color: #5c5e66; }
+    #app { position: fixed; inset: 0; }
   </style>
 </head>
 <body>

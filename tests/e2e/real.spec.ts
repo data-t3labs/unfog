@@ -362,6 +362,7 @@ test.describe('Unfog real engines', () => {
     const hint = page.locator('.hint');
     await expect(hint).toBeVisible();
     await expect(hint).toHaveText('Import your Fog of World history or tap Record');
+    expect((await hint.boundingBox())!.height, 'hint is a 44 px touch target').toBeGreaterThanOrEqual(44);
     const s = await stats(page);
     expect(s.visitedCells).toBe(0);
     expect(s.tiles).toBe(0);
@@ -379,6 +380,13 @@ test.describe('Unfog real engines', () => {
     await page.getByRole('tab', { name: 'Map' }).click();
     await hint.click();
     await expect(page.locator('#screen-data')).toBeVisible();
+    // First run on Data: the picker trap is named, and the how-to opens Help with the export steps expanded.
+    await expect(page.locator('#screen-data')).toContainText('If Sync.zip is greyed out');
+    await page.getByRole('button', { name: /How to get Sync.zip/ }).click();
+    await expect(page.locator('#screen-help')).toBeVisible();
+    await expect(page.locator('#help-export')).toHaveAttribute('open', '');
+    await expect(page.locator('#help-install')).not.toHaveAttribute('open', '');
+    await expect(page.locator('#help-export')).toContainText('Long-press the "Sync" folder');
   });
 
   test('1. import: two FoW tiles → 36,983 cells; re-import is idempotent', async ({ page }) => {
@@ -389,7 +397,8 @@ test.describe('Unfog real engines', () => {
     const lines = await page.locator('#screen-data .import-result li').allTextContents();
     expect(lines.length).toBeGreaterThanOrEqual(1);
     for (const l of lines) expect(l).toMatch(/Fog of World/);
-    expect(lines.join('\n')).toMatch(/\d+ map tiles/);
+    // No internal cell-tile count in the per-file lines (the summary line carries the numbers).
+    expect(lines.join('\n')).not.toMatch(/map tiles/);
     await expect(page.locator('.toast.success')).toContainText('36,983 new cells');
     const s1 = await stats(page);
     expect(s1.visitedCells).toBe(FOW_CELLS);
@@ -509,6 +518,9 @@ test.describe('Unfog real engines', () => {
     expect(first[first.length - 1].name).toBe('Direct');
     await expect(sheet.locator('h2 small')).toContainText(/direct$/);
     await expect(sheet.locator('.route-status')).not.toContainText('map centre'); // origin = the user's position
+    // The selected row is the only pressed one (assistive tech reads the selection).
+    await expect(sheet.locator('.cand[aria-pressed="true"]')).toHaveCount(1);
+    await expect(sheet.locator('.modes button[aria-pressed="true"]')).toHaveText('Walk');
     // The route lines are on the map.
     const routeFeatures = await page.evaluate(() => (window as unknown as { __unfog: { ctx: { map: { map: { querySourceFeatures(s: string): unknown[] } } } } }).__unfog.ctx.map.map.querySourceFeatures('unfog-routes').length);
     expect(routeFeatures).toBeGreaterThan(0);
@@ -674,7 +686,7 @@ test.describe('Unfog real engines', () => {
     const summary = page.locator('.record-summary');
     await expect(summary).toBeVisible({ timeout: 20_000 });
     await expect(summary.locator('h2')).toHaveText('Walk recorded');
-    await expect(summary.locator('p')).toContainText(/9 fixes/); // first watch fix + 8 steps
+    await expect(summary.locator('p')).toContainText(/9 GPS points/); // first watch fix + 8 steps
     const sumDist = parseDistanceM((await summary.locator('.stat').first().locator('.v').textContent()) ?? '');
     expect(sumDist).toBeGreaterThanOrEqual(100);
     const newCells = Number((await summary.locator('.stat').nth(2).locator('.v').textContent())?.replace(/,/g, ''));
@@ -703,10 +715,10 @@ test.describe('Unfog real engines', () => {
     expect(tracks.filter((t) => t.source === 'session')).toHaveLength(1);
     expect(tracks[0].points).toBe(9);
     await page.getByRole('tab', { name: 'Data' }).click();
-    const row = page.locator('#screen-data .row-item', { hasText: 'fixes' });
+    const row = page.locator('#screen-data .row-item', { hasText: 'GPS points' });
     await expect(row).toHaveCount(1);
     await expect(row).toContainText(/^Walk /);
-    await expect(row).toContainText('9 fixes');
+    await expect(row).toContainText('9 GPS points');
     await expect(row.getByRole('button', { name: 'Export GPX' })).toBeVisible();
     await shot(page, 'data-session');
     await page.getByRole('tab', { name: 'Stats' }).click();
@@ -716,7 +728,7 @@ test.describe('Unfog real engines', () => {
     await page.getByRole('tab', { name: 'Data' }).click();
     await row.getByRole('button', { name: 'Delete session' }).click();
     await page.locator('.sheet.modal').getByRole('button', { name: 'Delete' }).click();
-    await expect(page.locator('#screen-data .row-item', { hasText: 'fixes' })).toHaveCount(0);
+    await expect(page.locator('#screen-data .row-item', { hasText: 'GPS points' })).toHaveCount(0);
     expect((await stats(page)).visitedCells).toBe(after.visitedCells);
     expect(b.errors).toEqual([]);
   });
@@ -790,7 +802,7 @@ test.describe('Unfog real engines', () => {
     await settings.locator('summary').click();
     await expect(settings.locator('.settings')).toBeVisible();
     await settings.getByLabel('Fog softness').fill('3');
-    await expect(settings.locator('.setting', { hasText: 'Fog softness' })).toContainText('3.00 cells');
+    await expect(settings.locator('.setting', { hasText: 'Fog softness' })).toContainText('25%'); // 3 cells on the 2–6 range
     // RasterTileSource.setTiles applies asynchronously → poll.
     await expect.poll(tilesUrl).not.toBe(v0);
     const v1 = await tilesUrl();
@@ -866,7 +878,7 @@ test.describe('Unfog real engines', () => {
     await waitReady(page);
     const sheet = page.locator('.sheet.modal', { hasText: 'Unfinished recording' });
     await expect(sheet).toBeVisible();
-    await expect(sheet).toContainText('6 fixes');
+    await expect(sheet).toContainText('6 GPS points');
     await shot(page, 'resume');
     // Resume continues the same session with the same points.
     await sheet.getByRole('button', { name: 'Resume recording' }).click();
@@ -1118,7 +1130,7 @@ test.describe('Unfog offline (vite preview + service worker)', () => {
     await nyc.getByRole('button', { name: 'Download' }).click();
     await expect(page.locator('.toast', { hasText: 'ready for offline routing' })).toBeVisible({ timeout: 120_000 });
     await expect(nyc).toContainText('Offline since');
-    await expect(nyc).toContainText('67 tiles');
+    await expect(nyc).toContainText(/\d+(\.\d+)? MB/); // size, not the internal tile count
     await expect(nyc.getByRole('button', { name: 'Update' })).toBeVisible();
     const cachedAfterDownload = await page.evaluate(async () => (await (await caches.open('graph')).keys()).length);
     expect(cachedAfterDownload).toBeGreaterThanOrEqual(67);

@@ -10,6 +10,7 @@ import type { RegionManifest } from '../routing/graph-format';
 import type { DownloadProgress } from '../routing/api';
 import type { AppContext } from './context';
 import { fmtArea, fmtBytes, fmtDate, fmtDateTime, fmtDistance, fmtInt, fmtRelative } from './format';
+import { GREYED_OUT_HINT } from './help';
 import { icons } from './icons';
 import type { ImportOutcome, ImportProgress } from './import-types';
 import { requestPersistentStorage } from './pwa';
@@ -36,6 +37,9 @@ export function createDataScreen(ctx: AppContext): DataScreen {
   // ---- import
   const fileInput = el('input', { type: 'file', multiple: true, accept: ACCEPT, class: 'visually-hidden', 'aria-hidden': 'true', tabindex: -1 });
   const importBtn = el('button', { class: 'btn primary wide', type: 'button', onclick: () => fileInput.click() }, svg(icons.upload), 'Import files');
+  // First run: the export steps live in Help; give them a door from here and name the iOS picker trap.
+  const howToBtn = el('button', { class: 'btn link', type: 'button', onclick: () => ctx.openHelp('export') }, 'How to get Sync.zip out of Fog of World', svg(icons.chevron, 'ic dim'));
+  const importNote = el('p', { class: 'muted small import-note', text: GREYED_OUT_HINT });
   const importProgress = el('div', { class: 'progress', hidden: true }, el('div', { class: 'bar' }));
   const importStatus = el('div', { class: 'muted small' });
   const importResult = el('div', { class: 'import-result' });
@@ -119,7 +123,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       }
     }
     const p = o.payload;
-    status.textContent = `Applying ${p.meta.fileName ?? p.meta.source}…`;
+    status.textContent = `Adding ${p.meta.fileName ?? sourceName(p.meta.source)} to the map…`;
     try {
       // The cell tiles arrived here transferred from the import worker; hand them on to the grid
       // worker the same way. A structured clone of a 40 MB chunk is ~30 ms and leaves a third copy
@@ -136,8 +140,8 @@ export function createDataScreen(ctx: AppContext): DataScreen {
   function describePayload(p: ImportPayload): string {
     const name = p.meta.fileName ?? p.meta.source;
     const parts: string[] = [];
-    // "map tiles" = z14 cell tiles (the Stats screen's "map tiles with data"), not Fog of World tiles.
-    if (p.cellTiles?.length) parts.push(`${fmtInt(p.cellTiles.length)} map tiles`);
+    // Tracks are worth naming (GPX / Timeline); the cell-tile count is an internal unit — the
+    // summary line above already says what the import added.
     if (p.tracks?.length) parts.push(`${fmtInt(p.tracks.length)} track${p.tracks.length === 1 ? '' : 's'}`);
     const src = sourceName(p.meta.source);
     // Bare FoW tiles picked together arrive as "2 Fog of World tiles" — don't repeat the source after it.
@@ -192,9 +196,11 @@ export function createDataScreen(ctx: AppContext): DataScreen {
     if (!regions.length && !downloads.length) regionsList.appendChild(el('p', { class: 'muted', text: 'No prebuilt regions published yet. Routing will offer to download an area when you plan a route.' }));
     for (const r of regions) {
       const got = dl[r.id];
+      // builtAt is an ISO date; tile counts are an internal unit and only truncate the line on a phone.
+      const built = Date.parse(r.builtAt);
       const sub = got
-        ? `Offline since ${fmtDate(got.at)} · ${fmtInt(got.tiles)} tiles · ${fmtBytes(got.bytes)}`
-        : `${fmtInt(r.stats.km)} km of streets · ${r.tiles.length ? `${fmtInt(r.tiles.length)} tiles · ` : ''}built ${r.builtAt}`;
+        ? `Offline since ${fmtDate(got.at)} · ${fmtBytes(got.bytes)}`
+        : `${fmtInt(r.stats.km)} km of streets · built ${Number.isFinite(built) ? fmtDate(built) : r.builtAt}`;
       const progress = el('div', { class: 'progress', hidden: true }, el('div', { class: 'bar' }));
       const btn = el('button', { class: `btn small ${got ? 'ghost' : ''}`, type: 'button' }, got ? 'Update' : 'Download');
       btn.addEventListener('click', async () => {
@@ -229,7 +235,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
         el(
           'div',
           { class: 'row-item' },
-          el('div', { class: 't' }, el('div', { class: 'name', text: `Area · ${d.radiusKm} km around ${d.center[1].toFixed(3)}, ${d.center[0].toFixed(3)}` }), el('div', { class: 'st', text: `${fmtInt(d.tiles)} tiles · ${fmtBytes(d.bytes)} · ${fmtDate(Date.parse(d.builtAt))}` })),
+          el('div', { class: 't' }, el('div', { class: 'name', text: `Area · ${d.radiusKm} km around ${d.center[1].toFixed(3)}, ${d.center[0].toFixed(3)}` }), el('div', { class: 'st', text: `${fmtBytes(d.bytes)} · downloaded ${fmtDate(Date.parse(d.builtAt))}` })),
           del,
         ),
       );
@@ -268,7 +274,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
         el(
           'div',
           { class: 'row-item' },
-          el('div', { class: 't' }, el('div', { class: 'name', text: t.name ?? 'Session' }), el('div', { class: 'st', text: `${fmtDateTime(t.startMs)} · ${fmtDistance(t.lengthM, units())} · ${fmtInt(t.points)} fixes` })),
+          el('div', { class: 't' }, el('div', { class: 'name', text: t.name ?? 'Session' }), el('div', { class: 'st', text: `${fmtDateTime(t.startMs)} · ${fmtDistance(t.lengthM, units())} · ${fmtInt(t.points)} GPS point${t.points === 1 ? '' : 's'}` })),
           exp,
           del,
         ),
@@ -297,8 +303,10 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       'div',
       { class: 'screen-body' },
       el('h3', { text: 'Import' }),
-      el('p', { class: 'muted', text: 'Fog of World Sync.zip / raw Sync files / .fwss, GPX (Apple Health, Strava), Google Timeline JSON, Unfog backups. Pick several at once.' }),
+      el('p', { class: 'muted', text: 'Your Fog of World history (Sync.zip or the files inside the Sync folder, or a .fwss snapshot), GPX from Apple Health or Strava, Google Timeline JSON, and Unfog backups. You can pick several at once.' }),
       importBtn,
+      howToBtn,
+      importNote,
       fileInput,
       importProgress,
       importStatus,

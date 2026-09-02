@@ -77,7 +77,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   const modeBtns = new Map<Mode, HTMLButtonElement>();
   const modes = el('div', { class: 'modes' });
   for (const [m, label, icon] of MODES) {
-    const b = el('button', { type: 'button', onclick: () => setMode(m) }, svg(icon), label);
+    const b = el('button', { type: 'button', 'aria-pressed': 'false', onclick: () => setMode(m) }, svg(icon), label);
     modeBtns.set(m, b);
     modes.appendChild(b);
   }
@@ -94,7 +94,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   const chipBtns = new Map<number, HTMLButtonElement>();
   const chips = el('div', { class: 'chips', role: 'group', 'aria-label': 'Preset lengths' });
   for (const k of LOOP_CHIPS_KM) {
-    const b = el('button', { type: 'button', onclick: () => setLoopKm(k) });
+    const b = el('button', { type: 'button', 'aria-pressed': 'false', onclick: () => setLoopKm(k) });
     chipBtns.set(k, b);
     chips.appendChild(b);
   }
@@ -143,7 +143,10 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   }
 
   function renderModes(): void {
-    for (const [m, b] of modeBtns) b.classList.toggle('on', m === prefs.mode);
+    for (const [m, b] of modeBtns) {
+      b.classList.toggle('on', m === prefs.mode);
+      b.setAttribute('aria-pressed', String(m === prefs.mode));
+    }
   }
 
   function renderControls(): void {
@@ -166,7 +169,9 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     loopSlider.style.setProperty('--fill', `${((prefs.loopKm - LOOP_KM.min) / (LOOP_KM.max - LOOP_KM.min)) * 100}%`);
     for (const [k, b] of chipBtns) {
       b.textContent = fmtDistanceTidy(k * 1000, units());
-      b.classList.toggle('on', Math.abs(prefs.loopKm - k) < 0.01);
+      const on = Math.abs(prefs.loopKm - k) < 0.01;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
     }
   }
 
@@ -194,7 +199,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     result.candidates.forEach((c, i) => {
       const row = el(
         'button',
-        { class: `cand ${i === selected ? 'on' : ''}`, type: 'button', onclick: () => select(i) },
+        { class: `cand ${i === selected ? 'on' : ''}`, type: 'button', 'aria-pressed': String(i === selected), onclick: () => select(i) },
         el('div', { class: 'sw', style: `background:${candidateColor(i, n)}` }),
         el('div', { class: 't' }, el('div', { class: 'name', text: candName(c, i) }), el('div', { class: 'st', text: `${km(c.lengthM)} · ${fmtMinutes(c.etaMin)}` })),
         el('div', { class: 'new' }, `${Math.round(c.pctNew)}% new`, el('small', { text: `${km(c.newM)} unexplored` })),
@@ -250,6 +255,13 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   }
 
   const fromMapCentre = () => originNote.includes('map centre');
+  /** Status line when the start is the map centre: says why, and how to start from your own position. */
+  const originLine = () => {
+    const what = kind === 'loop' ? 'Loops' : 'Routes';
+    return originNote.includes('no location')
+      ? `${what} start at the map centre — no location yet. Tap the locate button to start from where you are.`
+      : `${what} start at the map centre.`;
+  };
 
   async function run(): Promise<void> {
     if (!kind || (kind === 'route' && !dest)) return;
@@ -280,7 +292,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
       result = res;
       selected = 0;
       // Only worth a line when we could not start from the user's position.
-      setStatus(fromMapCentre() ? el('div', { class: 'muted small', text: `${kind === 'loop' ? 'Loops' : 'Routes'} ${originNote}` }) : null);
+      setStatus(fromMapCentre() ? el('div', { class: 'muted small', text: originLine() }) : null);
       renderTitle();
       renderSlider();
       renderCands();
@@ -409,7 +421,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     );
     map.showRoutes([c], 0);
     if (ok) map.setFollow(true, 16.5);
-    else toast('Following without your location — tap the locate button to see yourself on the route.');
+    else toast('Showing the route without your location — tap the locate button to see yourself on it. End closes it.');
   }
 
   const rerun = debounce(() => void run(), 350);

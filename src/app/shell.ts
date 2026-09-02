@@ -57,11 +57,11 @@ export function createShell(mount: HTMLElement): Shell {
   const searchRow = el('div', { class: 'search-row' }, searchPill, searchClear);
 
   const segButtons: Record<OverlayLayer, HTMLButtonElement> = {
-    fog: el('button', { type: 'button', 'data-layer': 'fog', text: 'Fog' }),
-    heat: el('button', { type: 'button', 'data-layer': 'heat', text: 'Heat' }),
-    off: el('button', { type: 'button', 'data-layer': 'off', text: 'Off' }),
+    fog: el('button', { type: 'button', 'data-layer': 'fog', 'aria-pressed': 'false', text: 'Fog' }),
+    heat: el('button', { type: 'button', 'data-layer': 'heat', 'aria-pressed': 'false', text: 'Heat' }),
+    off: el('button', { type: 'button', 'data-layer': 'off', 'aria-pressed': 'false', text: 'Off' }),
   };
-  const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Overlay' }, segButtons.fog, segButtons.heat, segButtons.off);
+  const seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Map overlay' }, segButtons.fog, segButtons.heat, segButtons.off);
   const legend = el(
     'div',
     { class: 'legend', hidden: true },
@@ -84,7 +84,12 @@ export function createShell(mount: HTMLElement): Shell {
   const statSub = el('div', { class: 'sub', text: '' });
   // The space between the spans keeps textContent readable ("0.26 km² explored"); flex ignores it.
   const statChip = el('div', { class: 'chip stat-chip' }, el('div', { class: 'big' }, statBig, ' ', el('span', { class: 'lbl', text: 'explored' })), statSub);
-  const hint = el('button', { class: 'hint', type: 'button', hidden: true }, svg(icons.upload, 'ic dim'), 'Import your Fog of World history or tap Record');
+  const hint = el(
+    'button',
+    { class: 'hint', type: 'button', hidden: true, 'aria-label': 'Import your Fog of World history or tap Record. Opens Data.' },
+    svg(icons.upload, 'ic dim'),
+    el('span', { text: 'Import your Fog of World history or tap Record' }),
+  );
   const recordBtn = el('button', { class: 'record', type: 'button' }, el('span', { class: 'dot' }), 'Record');
   const floatRow = el('div', { class: 'float' }, statChip, recordBtn);
   const sheetHost = el('div', { class: 'sheet-host' });
@@ -98,17 +103,20 @@ export function createShell(mount: HTMLElement): Shell {
   const tabButtons = {} as Record<Tab, HTMLButtonElement>;
   const tabs = el('nav', { class: 'tabs', role: 'tablist' });
   for (const [id, label, icon] of tabDefs) {
-    const b = el('button', { class: 'tab', type: 'button', role: 'tab', 'data-tab': id, 'aria-selected': 'false' }, svg(icon), el('span', { text: label }));
+    // The map tab has no panel element of its own (the map is the page); the others control a screen.
+    const b = el(
+      'button',
+      { class: 'tab', type: 'button', role: 'tab', id: `tab-${id}`, 'data-tab': id, 'aria-selected': 'false', 'aria-controls': id === 'map' ? undefined : `screen-${id}` },
+      svg(icon),
+      el('span', { text: label }),
+    );
     tabButtons[id] = b;
     tabs.appendChild(b);
   }
   const bottom = el('div', { class: 'bottom' }, hint, floatRow, sheetHost, tabs);
 
-  const screens = {
-    stats: el('section', { class: 'screen', id: 'screen-stats', hidden: true }),
-    data: el('section', { class: 'screen', id: 'screen-data', hidden: true }),
-    help: el('section', { class: 'screen', id: 'screen-help', hidden: true }),
-  };
+  const screen = (id: Exclude<Tab, 'map'>) => el('section', { class: 'screen', id: `screen-${id}`, role: 'tabpanel', 'aria-labelledby': `tab-${id}`, hidden: true });
+  const screens = { stats: screen('stats'), data: screen('data'), help: screen('help') };
 
   const root = el('div', { class: 'app' }, mapEl, top, screens.stats, screens.data, screens.help, bottom);
   mount.replaceChildren(root);
@@ -150,7 +158,10 @@ export function createShell(mount: HTMLElement): Shell {
     },
     onTab(cb) { tabCb = cb; },
     setLayer(layer) {
-      for (const [id, b] of Object.entries(segButtons)) b.classList.toggle('on', id === layer);
+      for (const [id, b] of Object.entries(segButtons)) {
+        b.classList.toggle('on', id === layer);
+        b.setAttribute('aria-pressed', String(id === layer));
+      }
       legend.hidden = layer !== 'heat';
     },
     onLayer(cb) { layerCb = cb; },

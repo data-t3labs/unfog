@@ -246,4 +246,93 @@ test.describe('Unfog smoke (mock engines)', () => {
     await page.getByRole('button', { name: 'Done' }).click();
     await expect(page.locator('.record-summary')).toBeHidden();
   });
+
+  // ux-1 review (first-run UX + accessibility): touch targets, state for assistive tech, a visible
+  // selection in the light-theme segmented controls, Dynamic-Type-ready type scale, reduced motion.
+  test('accessibility: 44 px targets, aria state, light-theme settings contrast, rem type scale', async ({ page }) => {
+    await boot(page, { installCard: true });
+    // Overlay toggle and tabs expose their state; the map tab controls no panel, the others do.
+    await expect(page.locator('.seg button[aria-pressed="true"]')).toHaveText('Fog');
+    await page.getByRole('button', { name: 'Heat' }).click();
+    await expect(page.locator('.seg button[aria-pressed="true"]')).toHaveText('Heat');
+    await page.getByRole('button', { name: 'Fog' }).click();
+    await expect(page.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-controls', 'screen-data');
+    await expect(page.locator('#screen-data')).toHaveAttribute('role', 'tabpanel');
+    // Every visible control is at least 44 px tall to the finger: the small pills extend their hit box with a
+    // pseudo-element, so probe with elementFromPoint 20 px above/below the visual centre instead of the box.
+    const probe = (sel: string) =>
+      page.locator(sel).evaluateAll((els) =>
+        els
+          .filter((el) => el.getClientRects().length > 0 && !el.closest('[hidden]'))
+          .map((el) => {
+            const b = el.getBoundingClientRect();
+            const cx = b.left + b.width / 2, cy = b.top + b.height / 2;
+            const at = (y: number) => document.elementFromPoint(cx, y);
+            const hit = (y: number) => { const t = at(y); return Boolean(t && (t === el || el.contains(t))); };
+            const desc = (t: Element | null) => (t ? `${t.tagName.toLowerCase()}.${t.className.toString().slice(0, 20)}` : 'nothing');
+            return {
+              name: (el.getAttribute('aria-label') || el.textContent || '').trim().slice(0, 24),
+              ok: hit(cy - 21) && hit(cy + 21),
+              why: `box ${Math.round(b.top)}–${Math.round(b.bottom)}, above → ${desc(at(cy - 21))}, below → ${desc(at(cy + 21))}`,
+            };
+          }),
+      );
+    for (const sel of ['.seg button', '.fab', '.record', '.search', '.tab', '.install-card .card-close', '.install-card .btn']) {
+      const r = await probe(sel);
+      expect(r.length, sel).toBeGreaterThan(0);
+      for (const x of r) expect(x.ok, `${sel} "${x.name}" is ≥ 44 px tall to the finger (${x.why})`).toBe(true);
+    }
+    await page.locator('.install-card .card-close').click();
+    await page.evaluate(() => (window as UnfogWindow).__unfog?.openRoute?.({ name: 'Domino Park', locality: 'Williamsburg, Brooklyn', lonlat: [-73.9678, 40.7142] }));
+    const sheet = page.locator('.sheet.route');
+    await expect(sheet.locator('.cand').first()).toBeVisible({ timeout: 30_000 });
+    for (const sel of ['.sheet.route .modes button', '.sheet.route .sheet-close', '.sheet.route .cand', '.sheet.route .go', '.sheet.route .range']) {
+      for (const x of await probe(sel)) expect(x.ok, `${sel} "${x.name}" is ≥ 44 px tall to the finger (${x.why})`).toBe(true);
+    }
+    await expect(sheet.locator('.modes button[aria-pressed="true"]')).toHaveText('Walk');
+    await expect(sheet.locator('.cand[aria-pressed="true"] .name')).toHaveText('Most new');
+    await sheet.locator('.cand').last().click();
+    await expect(sheet.locator('.cand[aria-pressed="true"] .name')).toHaveText('Direct');
+    await sheet.getByRole('button', { name: 'Go' }).click();
+    for (const x of await probe('.follow-bar .btn')) expect(x.ok, `End "${x.name}" is ≥ 44 px tall to the finger (${x.why})`).toBe(true);
+    await page.locator('.follow-bar').getByRole('button', { name: 'End' }).click();
+
+    // Light theme (the default): the chosen option in Help → Settings must be visible — dark pill, light text,
+    // ≥ 4.5:1 against its own background and distinct from the unselected option.
+    await page.getByRole('tab', { name: 'Help' }).click();
+    await page.locator('#help-settings summary').click();
+    const contrast = await page.locator('#help-settings .seg.inline').first().evaluate((seg) => {
+      const rgb = (s: string) => (s.match(/\d+(\.\d+)?/g) ?? []).slice(0, 3).map(Number);
+      const lum = ([r, g, b]: number[]) => { const f = (c: number) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+      const ratio = (a: number[], b: number[]) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+      const on = seg.querySelector('button.on') as HTMLElement;
+      const off = seg.querySelector('button:not(.on)') as HTMLElement;
+      const so = getComputedStyle(on), sf = getComputedStyle(off);
+      return { selected: ratio(rgb(so.color), rgb(so.backgroundColor)), bgDiffers: so.backgroundColor !== sf.backgroundColor, pressed: on.getAttribute('aria-pressed') };
+    });
+    expect(contrast.selected, 'selected option text vs its pill').toBeGreaterThanOrEqual(4.5);
+    expect(contrast.bgDiffers, 'selected pill differs from the unselected one').toBe(true);
+    expect(contrast.pressed).toBe('true');
+    for (const x of await probe('#help-settings .seg.inline button')) expect(x.ok, `setting "${x.name}" is ≥ 44 px tall to the finger (${x.why})`).toBe(true);
+    for (const x of await probe('#help-settings .range')) expect(x.ok, `slider "${x.name}" is ≥ 44 px tall to the finger (${x.why})`).toBe(true);
+
+    // Type scale: rem on a 17 px root (Dynamic Type on iOS), no px font sizes on body copy; 11 px tab labels.
+    const type = await page.evaluate(() => ({
+      root: getComputedStyle(document.documentElement).fontSize,
+      body: getComputedStyle(document.body).fontSize,
+      tab: getComputedStyle(document.querySelector('.tab')!).fontSize,
+      pxRules: [...document.styleSheets]
+        .filter((s) => (s.href ?? '').includes('style.css') || !s.href)
+        .flatMap((s) => { try { return [...s.cssRules]; } catch { return []; } })
+        // The 17 px root is the rem base itself; MapLibre's chrome and the pre-bundle boot text are not app copy.
+        .filter((r): r is CSSStyleRule => r instanceof CSSStyleRule && /^\d+px$/.test(r.style.fontSize) && !/^html$|maplibregl|boot|attrib/.test(r.selectorText))
+        .map((r) => `${r.selectorText}: ${r.style.fontSize}`),
+      reducedMotion: [...document.styleSheets].flatMap((s) => { try { return [...s.cssRules]; } catch { return []; } }).some((r) => r instanceof CSSMediaRule && /reduced-motion/.test(r.media.mediaText) && /\.spinner|\.rec-main/.test(r.cssText)),
+    }));
+    expect(type.root).toBe('17px');
+    expect(parseFloat(type.body)).toBeGreaterThanOrEqual(14.9);
+    expect(parseFloat(type.tab)).toBeGreaterThanOrEqual(10.9);
+    expect(type.pxRules, 'no fixed-px font sizes on app text').toEqual([]);
+    expect(type.reducedMotion, 'reduced-motion rule for the pulse/spinner').toBe(true);
+  });
 });

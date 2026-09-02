@@ -42,9 +42,15 @@ export async function shareOrDownload(name: string, content: BlobPart, type: str
   return 'downloaded';
 }
 
+/** "1 GPS point" / "9 GPS points" — the user-facing word for a location fix. */
+export const fmtPoints = (n: number): string => `${n} GPS point${n === 1 ? '' : 's'}`;
+
+/** The recorder drops fixes worse than this (src/record/session.ts MAX_ACCURACY_M); the banner says so. */
+const POOR_ACCURACY_M = 50;
+
 export async function exportTrackGpx(track: Track): Promise<void> {
   if (track.points.length < 2) {
-    toast('Nothing to export — this walk has fewer than 2 fixes.');
+    toast('Nothing to export — this walk has fewer than 2 GPS points.');
     return;
   }
   const r = await shareOrDownload(gpxFileName(track), trackToGpx(track), 'application/gpx+xml');
@@ -75,6 +81,15 @@ export function createRecordUI(ctx: AppContext, hooks: RecorderEvents): RecordUI
     fresh.textContent = `+${fmtInt(s.newCells)} new`;
   }
 
+  // The banner hint carries two independent warnings: the wake lock could not be held, and the GPS
+  // is too coarse for points to count (they are dropped silently otherwise — checklist A6).
+  let wakeNote = '';
+  let gpsNote = '';
+  const renderHint = () => {
+    const text = [gpsNote, wakeNote].filter(Boolean).join(' ');
+    hint.textContent = text;
+    hint.hidden = !text;
+  };
   hooks.onUpdate = (s, status) => {
     if (status === 'recording' || status === 'stopping') {
       banner.hidden = false;
@@ -83,12 +98,19 @@ export function createRecordUI(ctx: AppContext, hooks: RecorderEvents): RecordUI
     } else {
       banner.hidden = true;
       shell.root.classList.remove('recording');
+      gpsNote = '';
+      renderHint();
     }
   };
   hooks.onWakeLock = (ok, reason) => {
-    hint.hidden = ok;
-    hint.textContent = ok ? '' : reason ?? '';
+    wakeNote = ok ? '' : reason ?? '';
+    renderHint();
   };
+  ctx.location.onFix((fix) => {
+    if (recorder.status !== 'recording') return;
+    gpsNote = fix.accuracy > POOR_ACCURACY_M ? `GPS accuracy is ±${fmtInt(fix.accuracy)} m — points are skipped until it improves. Try near a window or outside.` : '';
+    renderHint();
+  });
 
   async function showSummary(state: SessionState, track: Track): Promise<void> {
     const lat = track.points[0]?.[1] ?? 0;
@@ -99,7 +121,7 @@ export function createRecordUI(ctx: AppContext, hooks: RecorderEvents): RecordUI
       'div',
       { class: 'record-summary' },
       el('h2', { text: track.points.length >= 2 ? 'Walk recorded' : 'Nothing recorded' }),
-      el('p', { class: 'muted', text: `${fmtDateTime(state.startMs)} · ${track.points.length} fixes${state.dropped ? ` · ${state.dropped} dropped` : ''}` }),
+      el('p', { class: 'muted', text: `${fmtDateTime(state.startMs)} · ${fmtPoints(track.points.length)}${state.dropped ? ` · ${state.dropped} skipped (poor GPS accuracy)` : ''}` }),
       el(
         'div',
         { class: 'stat-grid' },
@@ -145,7 +167,7 @@ export function createRecordUI(ctx: AppContext, hooks: RecorderEvents): RecordUI
         'div',
         {},
         el('h2', { text: 'Unfinished recording' }),
-        el('p', { class: 'muted', text: `Started ${fmtDateTime(s.startMs)} · ${fmtDistance(s.distanceM, units())} · ${s.points.length} fixes. The app was closed while recording.` }),
+        el('p', { class: 'muted', text: `Started ${fmtDateTime(s.startMs)} · ${fmtDistance(s.distanceM, units())} · ${fmtPoints(s.points.length)}. The app was closed while recording.` }),
         el(
           'div',
           { class: 'btn-col' },

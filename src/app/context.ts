@@ -15,6 +15,9 @@ export interface Destination {
   origin?: LonLat;
 }
 
+/** The collapsible sections of the Help screen (src/app/help.ts). */
+export type HelpSection = 'export' | 'install' | 'location' | 'routes' | 'settings';
+
 export interface AppContext {
   engines: Engines;
   map: UnfogMap;
@@ -31,4 +34,6 @@ export interface AppContext {
   openRoute(dest: Destination): void;
   /** Loop mode ("Explore from here"): round trips from the user's position, else the map centre. */
   openLoop(from?: LonLat): void;
+  /** Switch to Help with one section expanded and scrolled into view. */
+  openHelp(section: HelpSection): void;
 }

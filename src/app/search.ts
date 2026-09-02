@@ -49,16 +49,18 @@ export function createSearch(ctx: AppContext): SearchPanel {
           api.close();
           ctx.openRoute({ name: 'Current location', lonlat: [fix.lon, fix.lat], origin: ctx.map.center() });
         } catch {
-          toast('No GPS fix yet — try again in a moment.');
+          toast('No GPS position yet — try again in a moment.');
         }
       }),
       row(svg(icons.loop), 'Explore a loop from here', 'A round trip through streets you have never walked', () => {
         api.close();
         ctx.openLoop();
       }),
-      row(svg(icons.pin), 'Drop a pin', 'Long-press anywhere on the map', () => {
+      // A visible way in: drops the pin at the map centre (pan first), and names the hidden gesture.
+      row(svg(icons.pin), 'Drop a pin at the map centre', 'Or touch and hold anywhere on the map', () => {
+        const c = ctx.map.center();
         api.close();
-        toast('Long-press the map to set a destination', { duration: 2500 });
+        ctx.openRoute({ name: 'Dropped pin', locality: `${c[1].toFixed(5)}, ${c[0].toFixed(5)}`, lonlat: c });
       }),
     );
   }
