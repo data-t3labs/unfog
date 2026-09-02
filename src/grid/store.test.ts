@@ -1,8 +1,9 @@
 import 'fake-indexeddb/auto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { cellAreaM2, cellToTile, lonLatToCell, TILE_SIZE } from './cell';
+import { levelKeyRange, openGridDb } from './db';
 import { CellStore, TILE_CELLS } from './store';
-import type { Track } from './types';
+import type { Level, Track } from './types';
 
 let n = 0;
 const open: CellStore[] = [];
@@ -30,6 +31,52 @@ function mask(cells: Array<[ix: number, iy: number, v?: number]>): Uint8Array {
 
 async function tileOrEmpty(s: CellStore, level: 14 | 10 | 6 | 2, tx: number, ty: number): Promise<Uint8Array> {
   return (await s.getTile(level, tx, ty)) ?? new Uint8Array(TILE_CELLS);
+}
+
+
+/**
+ * Recompute every overview tile (levels 10/6/2) from the base tiles and compare with what the
+ * store serves; also fails on an overview tile in the database that no base tile explains.
+ */
+async function expectPyramidExact(s: CellStore, dbName: string): Promise<number> {
+  const exp = new Map<string, Uint8Array>();
+  const at = (level: number, tx: number, ty: number): Uint8Array => {
+    const k = `${level}/${tx}/${ty}`;
+    let a = exp.get(k);
+    if (!a) { a = new Uint8Array(TILE_CELLS); exp.set(k, a); }
+    return a;
+  };
+  for (const [tx, ty] of await s.listBaseTiles()) {
+    const counts = await s.getTile(14, tx, ty);
+    expect(counts, `base ${tx}/${ty}`).not.toBeNull();
+    const l10 = at(10, tx >> 4, ty >> 4), l6 = at(6, tx >> 8, ty >> 8), l2 = at(2, tx >> 12, ty >> 12);
+    let tileMax = 0;
+    for (let i = 0; i < TILE_CELLS; i++) {
+      const v = (counts as Uint8Array)[i];
+      if (!v) continue;
+      const o10 = (((ty & 15) << 4) + (i >> 12)) * TILE_SIZE + ((tx & 15) << 4) + ((i & 255) >> 4);
+      if (v > l10[o10]) l10[o10] = v;
+      if (v > tileMax) tileMax = v;
+    }
+    expect(tileMax, `base ${tx}/${ty} stored empty`).toBeGreaterThan(0);
+    const o6 = (ty & 255) * TILE_SIZE + (tx & 255);
+    if (tileMax > l6[o6]) l6[o6] = tileMax;
+    const o2 = ((ty >> 4) & 255) * TILE_SIZE + ((tx >> 4) & 255);
+    if (tileMax > l2[o2]) l2[o2] = tileMax;
+  }
+  const db = await openGridDb(dbName);
+  try {
+    for (const level of [10, 6, 2]) for (const k of await db.getAllKeys('tiles', levelKeyRange(level))) expect(exp.has(k), `orphan overview tile ${k}`).toBe(true);
+  } finally { db.close(); }
+  for (const [k, e] of exp) {
+    const [level, tx, ty] = k.split('/').map(Number);
+    const got = await s.getTile(level as Level, tx, ty);
+    expect(got, k).not.toBeNull();
+    let diff = 0;
+    for (let i = 0; i < TILE_CELLS; i++) if ((got as Uint8Array)[i] !== e[i]) diff++;
+    expect(diff, `${k}: cells differing from the max of the children`).toBe(0);
+  }
+  return exp.size;
 }
 
 describe('CellStore', () => {
@@ -252,5 +299,72 @@ describe('CellStore', () => {
     const t = await tileOrEmpty(s, 14, ATX, ATY);
     expect(t[(ACY & 255) * TILE_SIZE + (ACX & 255)]).toBe(2);
     expect(t[9 * TILE_SIZE + 9]).toBe(1);
+  });
+
+  it('overview pyramid stays exact across many tiles, tracks, re-imports, a tiny LRU, a backup import and a wipe', async () => {
+    const name = `unfog-pyr-${Date.now()}`;
+    const s = store(name, { cacheTiles: 16, flushEvery: 3 });
+    const cellTiles = [];
+    for (let i = 0; i < 70; i++) cellTiles.push({ tx: ATX - 20 + ((i * 7) % 45), ty: ATY - 9 + ((i * 3) % 19), counts: mask([[(i * 37) % 256, (i * 91) % 256, 1 + (i % 9)], [255, 255, 2]]) });
+    await s.applyPayload({ cellTiles, meta: { source: 'fow', items: 70 } });
+    expect(await expectPyramidExact(s, name)).toBeGreaterThanOrEqual(6); // ≥ 4 level-10 + 1 level-6 + 1 level-2
+    await s.markTrack(track('t1', [A, B]));
+    await s.markTrack(track('t2', [A, [-73.9568, 40.7276]])); // ~1.1 km north: crosses base tiles
+    await s.applyPayload({ cellTiles: cellTiles.slice(0, 10).map((t) => ({ ...t, counts: mask([[0, 0, 200]]) })), meta: { source: 'fow', items: 10 } });
+    await expectPyramidExact(s, name);
+    const bytes = await s.exportBackup();
+    const other = store(undefined, { cacheTiles: 16, flushEvery: 5 });
+    await other.markTrack(track('o1', [B, A]));
+    await other.importBackup(bytes);
+    await expectPyramidExact(other, (other as unknown as { dbName: string }).dbName);
+    await s.deleteAll();
+    expect(await expectPyramidExact(s, name)).toBe(0);
+  });
+
+  it('a flush whose transaction fails keeps the tiles, tracks and stats pending so the next flush lands them', async () => {
+    const name = `unfog-flushfail-${Date.now()}`;
+    const s = store(name);
+    await s.init();
+    // Fail the next transaction after its puts were issued (what a QuotaExceededError at commit does).
+    const raw = (s as unknown as { db: { transaction: unknown } }).db as unknown as IDBDatabase;
+    const original = IDBDatabase.prototype.transaction;
+    let failNext = true;
+    Object.defineProperty(raw, 'transaction', { configurable: true, value: function (this: IDBDatabase, ...args: unknown[]) {
+      const tx = (original as unknown as (...a: unknown[]) => IDBTransaction).apply(this, args);
+      if (failNext && args[1] === 'readwrite') { failNext = false; queueMicrotask(() => tx.abort()); }
+      return tx;
+    } });
+    await expect(s.markTrack(track('t1', [A, B]))).rejects.toThrow();
+    const r = await s.markTrack(track('t2', [A, B]));
+    expect(r.stats.version).toBe(2);
+    await s.close();
+    const s2 = store(name);
+    const stats = await s2.init();
+    expect(stats.version).toBe(2);
+    expect(stats.visitedCells).toBe(r.stats.visitedCells);
+    expect((await s2.listTracks()).map((t) => t.id).sort()).toEqual(['t1', 't2']);
+    const t = await tileOrEmpty(s2, 14, ATX, ATY);
+    expect(t[(ACY & 255) * TILE_SIZE + (ACX & 255)]).toBe(2);
+    expect(await s2.getTile(10, ATX >> 4, ATY >> 4)).not.toBeNull();
+  });
+
+  it('chunks of one archive ("part k" notes) fold into a single provenance row; other imports keep their own', async () => {
+    const name = `unfog-prov-${Date.now()}`;
+    const s = store(name);
+    const tile = (i: number) => ({ tx: ATX + i, ty: ATY, counts: mask([[i, i, 1]]) });
+    await s.applyPayload({ cellTiles: [tile(0)], meta: { source: 'fow', fileName: 'Sync.zip', items: 5, note: 'part 1' } });
+    await s.applyPayload({ cellTiles: [tile(1)], meta: { source: 'fow', fileName: 'Sync.zip', items: 4, note: 'part 2' } });
+    await s.applyPayload({ tracks: [track('g1', [A, B])], meta: { source: 'gpx', fileName: 'walk.gpx', items: 1 } });
+    await s.applyPayload({ cellTiles: [tile(2)], meta: { source: 'fow', fileName: 'Sync.zip', items: 3, note: 'part 3 of 3' } });
+    await s.applyPayload({ cellTiles: [tile(3)], meta: { source: 'fow', fileName: 'Sync.zip', items: 2 } }); // a fresh import of the same file
+    await s.close();
+    const db = await openGridDb(name);
+    const rows = (await db.getAll('imports')).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+    db.close();
+    expect(rows.map((r) => [r.source, r.fileName, r.items, r.note])).toEqual([
+      ['fow', 'Sync.zip', 12, 'part 3 of 3'],
+      ['gpx', 'walk.gpx', 1, undefined],
+      ['fow', 'Sync.zip', 2, undefined],
+    ]);
   });
 });

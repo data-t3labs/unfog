@@ -12,7 +12,9 @@ import {
   encodeFowFilenameCore,
   fowTileXY,
   importFowArchive,
+  importFowArchiveChunked,
   importFowFiles,
+  importFowFilesChunked,
   isFowTileName,
   parseFowTile,
 } from './fow';
@@ -338,6 +340,35 @@ describe('importFowArchive', () => {
     expect(r.meta).toEqual({ source: 'fow', fileName: 'Sync.zip', items: 3 });
     expect(countVisited(r)).toBe(3757 + 33226 + 2);
     expect(progress.length).toBeGreaterThan(0);
+  });
+
+  it('streams big archives as disjoint payload chunks whose union is the merged payload', () => {
+    // three Sync tiles (distinct z9 tiles), each with one pixel in every one of its 4×4 blocks → 16 base tiles per file
+    const blocks = (): SynthBlock[] => { const b: SynthBlock[] = []; for (let by = 0; by < 16; by += 4) for (let bx = 0; bx < 16; bx += 4) b.push({ bx, by, pixels: [[bx, by]] }); return b; };
+    const ids = [VAN_ID, VAN_ID + 1, VAN_ID + 2];
+    const files: Record<string, Uint8Array> = {};
+    for (const id of ids) files[`Sync/4af3${encodeFowFilenameCore(id)}`] = writeFowTile(blocks());
+    const zip = zipSync(files);
+    const merged = importFowArchive('Sync.zip', zip);
+    expect(merged.cellTiles).toHaveLength(48);
+    expect(merged.meta.note).toBeUndefined();
+    const chunks = [...importFowArchiveChunked('Sync.zip', zip, undefined, 20)];
+    expect(chunks.map((c) => c.cellTiles.length)).toEqual([32, 16]); // the budget is checked after each file
+    expect(chunks.map((c) => c.meta.note)).toEqual(['part 1', 'part 2 of 2']);
+    expect(chunks.map((c) => c.meta.items)).toEqual([2, 1]);
+    expect(chunks.map((c) => c.meta.fileName)).toEqual(['Sync.zip', 'Sync.zip']);
+    const keys = chunks.flatMap((c) => c.cellTiles.map((t) => `${t.tx}/${t.ty}`));
+    expect(new Set(keys).size).toBe(48);
+    expect(keys.sort()).toEqual(merged.cellTiles.map((t) => `${t.tx}/${t.ty}`).sort());
+    expect(chunks.reduce((n, c) => n + countVisited(c), 0)).toBe(countVisited(merged));
+    // a budget that never fills → one chunk, identical to the merged import (no "part" note)
+    const one = [...importFowFilesChunked(Object.entries(files).map(([name, bytes]) => ({ name, bytes })), undefined, 'Sync.zip', 1000)];
+    expect(one).toHaveLength(1);
+    expect(one[0].meta).toEqual(merged.meta);
+    // an empty archive still yields exactly one (empty) chunk carrying the warning
+    const empty = [...importFowArchiveChunked('empty.zip', zipSync({ 'README.txt': strToU8('x') }))];
+    expect(empty).toHaveLength(1);
+    expect(empty[0].meta.note).toContain('no Fog of World tile files');
   });
 
   it('imports only Model/*/ from a .fwss snapshot', () => {

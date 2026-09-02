@@ -108,6 +108,11 @@ const MODEL_JUNK_RE = /(^|[\\/])Model[\\/][#~][\\/]/;
 const MODEL_TILE_RE = /(^|[\\/])Model[\\/]\*[\\/]/;
 const IMPORT_DIR_RE = /(^|[\\/])Import[\\/]/;
 
+/** Path inside Fog of World's `Import/` folder: GPX the app has already merged into its tiles. */
+export function isFowImportPath(path: string): boolean {
+  return IMPORT_DIR_RE.test(path);
+}
+
 /** Names that show up next to tiles but are never tiles (skipped silently by every importer). */
 export function isFowJunkName(base: string): boolean {
   return base.length === 0 || base[0] === '.' || base[0] === '_' || base === 'FoW-Sync-Lock' || base === 'Thumbs.db';
@@ -254,24 +259,55 @@ export interface FowImportResult extends ImportPayload {
 }
 
 const MAX_WARNINGS = 25;
+/**
+ * Chunk budget for the streaming importers: a payload is emitted once this many base tiles have
+ * accumulated (≈ 16 MB of counts; one Sync tile file can add up to 1 024 base tiles = 64 MB more
+ * before the check runs). A real multi-year Sync folder (213 files) expands to ~10 000 base tiles
+ * = 640 MB of Uint8Arrays if merged into one payload — hence the chunks.
+ */
+export const DEFAULT_MAX_BASE_TILES = 256;
 
 /**
- * Import any number of bare Sync tile files (e.g. the user multi-selected the Sync folder's
- * contents). Non-tile names are ignored, corrupt tiles skipped with a warning, all cells
- * merged into one payload (`count = 1` per visited cell, only tiles that received a pixel).
+ * Streaming form of {@link importFowFiles}: parses the tile files in order and yields a payload
+ * whenever `maxBaseTiles` base tiles have accumulated, then once more at the end. Chunks never
+ * share a base tile (each Sync file owns a disjoint 32×32 block of them), so applying them one
+ * after another equals applying the merged payload. When more than one chunk is produced every
+ * chunk's `meta.note` starts with "part k" — the store folds such chunks into one provenance row.
  */
-export function importFowFiles(files: InputFile[], onProgress?: ProgressFn, fileName?: string): FowImportResult {
-  const cells = new Map<number, CellCounts>();
-  const warnings: string[] = [];
+export function* importFowFilesChunked(files: InputFile[], onProgress?: ProgressFn, fileName?: string, maxBaseTiles = DEFAULT_MAX_BASE_TILES): Generator<FowImportResult> {
+  let cells = new Map<number, CellCounts>();
+  let warnings: string[] = [];
   let tilesParsed = 0;
   let visited = 0;
   let checksumErrors = 0;
   let skipped = 0;
   let dropped = 0;
+  let part = 0;
 
   const warn = (msg: string) => {
     if (warnings.length < MAX_WARNINGS) warnings.push(msg);
     else dropped++;
+  };
+  const emit = (last: boolean): FowImportResult => {
+    part++;
+    if (dropped > 0) warnings.push(`…and ${dropped} more warning(s)`);
+    const cellTiles: FowImportResult['cellTiles'] = [];
+    for (const [key, counts] of cells) {
+      const { tx, ty } = parseTileKey(key);
+      cellTiles.push({ tx, ty, counts });
+    }
+    const noteParts: string[] = [];
+    if (part > 1 || !last) noteParts.push(`part ${part}${last ? ` of ${part}` : ''}`);
+    if (skipped > 0) noteParts.push(`${skipped} non-tile file(s) ignored`);
+    if (warnings.length > 0) noteParts.push(...warnings);
+    const meta: ImportPayload['meta'] = { source: 'fow', items: tilesParsed };
+    if (fileName !== undefined) meta.fileName = fileName;
+    if (noteParts.length > 0) meta.note = noteParts.join('; ');
+    const out: FowImportResult = { cellTiles, meta, tilesParsed, visited, checksumErrors, skipped, warnings };
+    cells = new Map();
+    warnings = [];
+    tilesParsed = 0; visited = 0; checksumErrors = 0; skipped = 0; dropped = 0;
+    return out;
   };
 
   for (let i = 0; i < files.length; i++) {
@@ -291,33 +327,26 @@ export function importFowFiles(files: InputFile[], onProgress?: ProgressFn, file
     } catch (e) {
       warn(`${base}: skipped — ${(e as Error).message}`);
     }
+    if (cells.size >= maxBaseTiles && i + 1 < files.length) yield emit(false);
   }
-  if (dropped > 0) warnings.push(`…and ${dropped} more warning(s)`);
   onProgress?.('Assembling cells', files.length, files.length);
-
-  const cellTiles: FowImportResult['cellTiles'] = [];
-  for (const [key, counts] of cells) {
-    const { tx, ty } = parseTileKey(key);
-    cellTiles.push({ tx, ty, counts });
-  }
-
-  const noteParts: string[] = [];
-  if (skipped > 0) noteParts.push(`${skipped} non-tile file(s) ignored`);
-  if (warnings.length > 0) noteParts.push(...warnings);
-  const meta: ImportPayload['meta'] = { source: 'fow', items: tilesParsed };
-  if (fileName !== undefined) meta.fileName = fileName;
-  if (noteParts.length > 0) meta.note = noteParts.join('; ');
-
-  return { cellTiles, meta, tilesParsed, visited, checksumErrors, skipped, warnings };
+  yield emit(true);
 }
 
 /**
- * Import a `.zip` of the Sync folder (any nesting, macOS/iOS junk tolerated, `Import/` GPX
- * ignored) or a `.fwss` snapshot (`Model/*\/` entries only). Only tile entries are inflated.
- * Snapshots nested inside a zip are not parsed (each is a whole database copy) — a warning
- * asks the user to import them separately.
+ * Import any number of bare Sync tile files (e.g. the user multi-selected the Sync folder's
+ * contents) into ONE payload. Non-tile names are ignored, corrupt tiles skipped with a warning,
+ * all cells merged (`count = 1` per visited cell, only tiles that received a pixel). Holds every
+ * touched base tile in memory: prefer {@link importFowFilesChunked} for anything but a few files.
  */
-export function importFowArchive(name: string, bytes: Uint8Array, onProgress?: ProgressFn): FowImportResult {
+export function importFowFiles(files: InputFile[], onProgress?: ProgressFn, fileName?: string): FowImportResult {
+  let out: FowImportResult | undefined;
+  for (const chunk of importFowFilesChunked(files, onProgress, fileName, Infinity)) out = chunk;
+  return out as FowImportResult;
+}
+
+/** Inflate the tile entries of a Sync zip / .fwss (only those), sorted by path; counts snapshots seen. */
+function openFowArchive(name: string, bytes: Uint8Array, onProgress?: ProgressFn): { files: InputFile[]; snapshots: number } {
   let snapshots = 0;
   let entries: Record<string, Uint8Array>;
   onProgress?.(`Opening ${name}`, 0, 1);
@@ -335,8 +364,24 @@ export function importFowArchive(name: string, bytes: Uint8Array, onProgress?: P
   const files: InputFile[] = [];
   for (const path in entries) files.push({ name: path, bytes: entries[path] });
   files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return { files, snapshots };
+}
 
-  const result = importFowFiles(files, onProgress, name);
+/**
+ * Streaming import of a `.zip` of the Sync folder (any nesting, macOS/iOS junk tolerated,
+ * `Import/` GPX ignored) or a `.fwss` snapshot (`Model/*\/` entries only): yields payload chunks
+ * of ≈ `maxBaseTiles` base tiles (see {@link importFowFilesChunked}). Only tile entries are
+ * inflated. Snapshots nested inside a zip are not parsed (each is a whole database copy) — the
+ * last chunk carries a warning asking the user to import them separately.
+ */
+export function* importFowArchiveChunked(name: string, bytes: Uint8Array, onProgress?: ProgressFn, maxBaseTiles = DEFAULT_MAX_BASE_TILES): Generator<FowImportResult> {
+  const { files, snapshots } = openFowArchive(name, bytes, onProgress);
+  let held: FowImportResult | undefined;
+  for (const chunk of importFowFilesChunked(files, onProgress, name, maxBaseTiles)) {
+    if (held) yield held;
+    held = chunk;
+  }
+  const result = held as FowImportResult;
   if (snapshots > 0) {
     const w = `${snapshots} .fwss snapshot(s) inside the archive were not imported — import them separately`;
     result.warnings.push(w);
@@ -347,7 +392,14 @@ export function importFowArchive(name: string, bytes: Uint8Array, onProgress?: P
     result.warnings.push(w);
     result.meta.note = result.meta.note ? `${result.meta.note}; ${w}` : w;
   }
-  return result;
+  yield result;
+}
+
+/** {@link importFowArchiveChunked} merged into ONE payload (memory: every base tile at once). */
+export function importFowArchive(name: string, bytes: Uint8Array, onProgress?: ProgressFn): FowImportResult {
+  let out: FowImportResult | undefined;
+  for (const chunk of importFowArchiveChunked(name, bytes, onProgress, Infinity)) out = chunk;
+  return out as FowImportResult;
 }
 
 /** True when a list of zip entry paths contains at least one Fog of World tile. */

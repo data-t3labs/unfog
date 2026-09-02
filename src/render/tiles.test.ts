@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { MemoryProvider, syntheticCity } from '../../tests/fixtures/grid/synthetic';
+import { MemoryProvider, syntheticCity, syntheticRegion } from '../../tests/fixtures/grid/synthetic';
 import { DEFAULT_RENDER_SETTINGS, type RenderSettings } from '../grid/api';
+import { crc32 } from '../grid/backup';
 import { lonLatToCell } from '../grid/cell';
 import { levelForZoom } from '../grid/types';
 import { blurSupportRadius } from './blur';
 import { heatRampLut, renderOverlayRegion, renderOverlayTile, tileGeometry } from './tiles';
 
 const S: RenderSettings = { ...DEFAULT_RENDER_SETTINGS };
+/** crc32 of the RGBA of the synthetic-city home tile with the defaults — the approved z ≥ 14 look. */
+const APPROVED_HASHES: Record<string, number> = { 'z14-fog': 4177300252, 'z15-fog': 2487118329, 'z16-fog': 4131091800, 'z17-fog': 1576555743, 'z15-heat': 4164253060 };
 const HOME: [number, number] = [-73.9568, 40.7176];
 const [HCX, HCY] = lonLatToCell(HOME[0], HOME[1]);
 
@@ -132,17 +135,18 @@ describe('fog tile', () => {
     expect(hDiff).toBeLessThanOrEqual(2);
   });
 
-  it('low zoom (cellPx < 1) and overview levels render without the narrow pass', async () => {
-    const { provider } = syntheticCity();
-    const t12 = tileAt(12, HCX, HCY);
-    const img12 = await renderOverlayTile({ z: 12, ...t12, mode: 'fog' }, S, provider);
-    const { px, py } = pixelOf(12, t12.x, t12.y, HCX, HCY);
-    expect(rgba(img12, 512, px, py)[3]).toBeLessThan(150); // explored neighbourhood is lifted
-    expect(rgba(img12, 512, 2, 2)[3]).toBe(204); // corner of the tile: nothing there
-    const t10 = tileAt(10, HCX, HCY); // level 10 overview, cellPx 2
-    const img10 = await renderOverlayTile({ z: 10, ...t10, mode: 'fog' }, S, provider);
-    const c10 = pixelOf(10, t10.x, t10.y, HCX, HCY);
-    expect(rgba(img10, 512, c10.px, c10.py)[3]).toBeLessThan(204);
+  it('coreRadius 0 still clears the street (σ_narrow follows the 1-cell ribbon) with a narrower core', async () => {
+    for (const z of [15, 16]) {
+      const t = tileAt(z, SX, SY);
+      const { px, py } = pixelOf(z, t.x, t.y, SX, SY);
+      const thin = await renderOverlayTile({ z, ...t, mode: 'fog' }, { ...S, coreRadius: 0 }, p);
+      const full = await renderOverlayTile({ z, ...t, mode: 'fog' }, S, p);
+      expect(rgba(thin, 512, px, py)[3]).toBeLessThanOrEqual(3);
+      // count cleared px (alpha ≤ 10) along the column through the street: thinner than the 3-cell core
+      const cleared = (img: Uint8ClampedArray): number => { let n = 0; for (let y = 0; y < 512; y++) if (rgba(img, 512, px, y)[3] <= 10) n++; return n; };
+      expect(cleared(thin)).toBeGreaterThanOrEqual(4);
+      expect(cleared(thin)).toBeLessThan(cleared(full));
+    }
   });
 
   it('high zoom uses the work scale and still clears the street crisply', async () => {
@@ -160,6 +164,103 @@ describe('fog tile', () => {
 
   it('margin covers the blur support', () => {
     for (const sigma of [0.75, 1, 3.6, 14, 16]) expect(Math.ceil(3 * sigma)).toBeGreaterThanOrEqual(blurSupportRadius(sigma));
+  });
+
+  it('out-of-range zooms (z > 22, z < 0) render a tile instead of throwing', async () => {
+    const hi = await renderOverlayTile({ z: 23, x: SX * 2, y: SY * 2, mode: 'fog' }, S, p);
+    expect(hi.length).toBe(512 * 512 * 4);
+    expect(rgba(hi, 512, 256, 256)[3]).toBeLessThanOrEqual(3); // the street cell fills the tile
+    const lo = await renderOverlayTile({ z: -1, x: 0, y: 0, mode: 'heat' }, S, p);
+    expect(lo.length).toBe(512 * 512 * 4);
+  });
+});
+
+/** Max |Δalpha| between horizontally / vertically adjacent pixels, plus the alpha range. */
+function edgeStats(img: Uint8ClampedArray, size: number): { maxD: number; min: number; max: number } {
+  let maxD = 0, min = 255, max = 0;
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const a = img[(y * size + x) * 4 + 3];
+    if (a < min) min = a;
+    if (a > max) max = a;
+    if (x + 1 < size) maxD = Math.max(maxD, Math.abs(img[(y * size + x + 1) * 4 + 3] - a));
+    if (y + 1 < size) maxD = Math.max(maxD, Math.abs(img[((y + 1) * size + x) * 4 + 3] - a));
+  }
+  return { maxD, min, max };
+}
+
+describe('pixel floor (z ≤ 13: ribbons ≥ 10 px, σ_narrow 3 px)', () => {
+  const region = syntheticRegion();
+  /** Fog edges never steeper than this per pixel (the z14 look is 90; z16 is 30). */
+  const SOFT = 75;
+
+  it('fog edges are soft at every zoom from z6 to z13, with fully cleared and fully fogged pixels in the home tile', async () => {
+    for (const z of [6, 8, 9, 10, 11, 12, 13]) {
+      const t = tileAt(z, region.cx, region.cy);
+      const img = await renderOverlayTile({ z, ...t, mode: 'fog' }, S, region.provider);
+      const { maxD, min, max } = edgeStats(img, 512);
+      expect(maxD, `z${z} max |Δalpha|`).toBeLessThanOrEqual(SOFT);
+      expect(min, `z${z} cleared`).toBeLessThanOrEqual(3);
+      expect(max, `z${z} fogged`).toBe(204);
+    }
+  });
+
+  it('a single walked street is a soft cleared line ≥ 8 px wide at z12 (0.5-px cells) and z9 (1-px level-10 cells)', async () => {
+    for (const z of [12, 9]) {
+      const q = new MemoryProvider();
+      const cellsPerTile = 2 ** (22 - z);
+      const t = tileAt(z, HCX, HCY);
+      const sy = t.y * cellsPerTile + (cellsPerTile >> 1); // base-cell row through the tile's middle
+      q.line(t.x * cellsPerTile - 500, sy, (t.x + 1) * cellsPerTile + 500, sy, 1);
+      const img = await renderOverlayTile({ z, ...t, mode: 'fog' }, S, q);
+      let cleared = 0, half = 0, maxD = 0, last = -1;
+      for (let y = 0; y < 512; y++) {
+        const a = rgba(img, 512, 256, y)[3];
+        if (a <= 10) cleared++;
+        if (a <= 102) half++;
+        if (last >= 0) maxD = Math.max(maxD, Math.abs(a - last));
+        last = a;
+      }
+      expect(cleared, `z${z} fully cleared px across the street`).toBeGreaterThanOrEqual(4);
+      expect(half, `z${z} half-lifted px across the street`).toBeGreaterThanOrEqual(8);
+      expect(half, `z${z} half-lifted px across the street`).toBeLessThanOrEqual(24);
+      expect(maxD, `z${z} max |Δalpha| across the street`).toBeLessThanOrEqual(SOFT);
+      expect(rgba(img, 512, 256, 40)[3]).toBe(204); // 216 px away: untouched fog
+    }
+  });
+
+  it('adjacent 512-px renders agree along their shared edge at z12 and z10 (margin covers dilation + floored blur)', async () => {
+    for (const z of [12, 10]) {
+      const g = tileGeometry(z, 512);
+      const per512 = 512 / g.cellPx; // level cells per 512 px
+      // a seam through the home neighbourhood: left edge one tile west of the centre
+      const f = 2 ** (14 - g.level);
+      const cx0 = Math.floor(region.cx / f) - per512, cy0 = Math.floor(region.cy / f) - per512 / 2;
+      const left = await renderOverlayRegion({ level: g.level, cx0, cy0, cellPx: g.cellPx, width: 512, height: 512, mode: 'fog' }, S, region.provider);
+      const right = await renderOverlayRegion({ level: g.level, cx0: cx0 + per512, cy0, cellPx: g.cellPx, width: 512, height: 512, mode: 'fog' }, S, region.provider);
+      const both = await renderOverlayRegion({ level: g.level, cx0, cy0, cellPx: g.cellPx, width: 1024, height: 512, mode: 'fog' }, S, region.provider);
+      let maxDiff = 0, lifted = 0;
+      for (let py = 0; py < 512; py++) for (let px = 0; px < 1024; px++) {
+        const tile = px < 512 ? left : right;
+        const a = tile[(py * 512 + (px & 511)) * 4 + 3], b = both[(py * 1024 + px) * 4 + 3];
+        maxDiff = Math.max(maxDiff, Math.abs(a - b));
+        if ((px === 511 || px === 512) && a < 200) lifted++;
+      }
+      expect(maxDiff, `z${z} seam`).toBeLessThanOrEqual(2);
+      expect(lifted, `z${z} seam crosses data`).toBeGreaterThan(0);
+    }
+  });
+
+  it('the approved look at z ≥ 14 is unchanged (crc32 snapshot of the synthetic-city tile)', async () => {
+    // Regenerate these on an INTENDED look change only: run with PRINT_RENDER_HASHES=1 and paste.
+    const { provider } = syntheticCity();
+    const hashes: Record<string, number> = {};
+    for (const [z, mode] of [[14, 'fog'], [15, 'fog'], [16, 'fog'], [17, 'fog'], [15, 'heat']] as Array<[number, 'fog' | 'heat']>) {
+      const t = tileAt(z, HCX, HCY);
+      const img = await renderOverlayTile({ z, ...t, mode }, S, provider);
+      hashes[`z${z}-${mode}`] = crc32(new Uint8Array(img.buffer, img.byteOffset, img.byteLength));
+    }
+    if (process.env.PRINT_RENDER_HASHES) console.log(JSON.stringify(hashes)); // eslint-disable-line no-console
+    expect(hashes).toEqual(APPROVED_HASHES);
   });
 });
 
@@ -209,7 +310,8 @@ describe('render performance', () => {
     const { provider } = syntheticCity();
     const results: Record<string, number> = {};
     const cases: Array<[number, 'fog' | 'heat', RenderSettings, string]> = [
-      [12, 'fog', S, 'z12-fog'], [15, 'fog', S, 'z15-fog'], [17, 'fog', S, 'z17-fog'], [15, 'heat', S, 'z15-heat'],
+      [8, 'fog', S, 'z8-fog'], [10, 'fog', S, 'z10-fog'], [12, 'fog', S, 'z12-fog'], [13, 'fog', S, 'z13-fog'],
+      [15, 'fog', S, 'z15-fog'], [17, 'fog', S, 'z17-fog'], [15, 'heat', S, 'z15-heat'], [12, 'heat', S, 'z12-heat'],
       [15, 'fog', { ...S, feather: 6, halo: 0.8 }, 'z15-fog-feather6'],
     ];
     for (const [z, mode, settings, label] of cases) {
@@ -228,6 +330,10 @@ describe('render performance', () => {
     console.log('render timings (median of 5, ms):', JSON.stringify(results));
     expect(results['z15-fog']).toBeLessThan(50);
     expect(results['z12-fog']).toBeLessThan(100);
+    expect(results['z13-fog']).toBeLessThan(100);
+    expect(results['z10-fog']).toBeLessThan(100);
+    expect(results['z8-fog']).toBeLessThan(100);
+    expect(results['z12-heat']).toBeLessThan(100);
     expect(results['z17-fog']).toBeLessThan(50);
     expect(results['z15-heat']).toBeLessThan(50);
     expect(results['z15-fog-feather6']).toBeLessThan(50);

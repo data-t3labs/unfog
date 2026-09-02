@@ -115,6 +115,8 @@ export class CellStore implements CellTileProvider {
   private readonly loading = new Map<string, Promise<Entry>>();
   private pendingTracks: TrackRecord[] = [];
   private pendingImports: ImportRecord[] = [];
+  /** Last provenance row per source|fileName (chunked archives fold into it). */
+  private readonly lastImport = new Map<string, ImportRecord>();
   private statsDirty = false;
   /** Bumped by deleteAll so in-flight tile loads from before the wipe are not cached. */
   private epoch = 0;
@@ -238,6 +240,7 @@ export class CellStore implements CellTileProvider {
       this.dirty.clear();
       this.pendingTracks = [];
       this.pendingImports = [];
+      this.lastImport.clear();
       const tx = db.transaction(['tiles', 'tracks', 'imports', 'meta'], 'readwrite');
       tx.objectStore('tiles').clear();
       tx.objectStore('tracks').clear();
@@ -350,16 +353,29 @@ export class CellStore implements CellTileProvider {
     this.pendingTracks = [];
     this.pendingImports = [];
     this.dirty.clear();
-    const tx = db.transaction(['tiles', 'tracks', 'imports', 'meta'], 'readwrite');
-    const tilesStore = tx.objectStore('tiles');
-    for (const rec of puts) tilesStore.put(rec);
-    for (const id of dels) tilesStore.delete(id);
-    const trackStore = tx.objectStore('tracks');
-    for (const rec of tracks) trackStore.put(rec);
-    const importStore = tx.objectStore('imports');
-    for (const rec of imports) importStore.put(rec);
-    tx.objectStore('meta').put(this.stats, 'stats');
-    await tx.done;
+    try {
+      const tx = db.transaction(['tiles', 'tracks', 'imports', 'meta'], 'readwrite');
+      const reqs: Promise<unknown>[] = [];
+      const tilesStore = tx.objectStore('tiles');
+      for (const rec of puts) reqs.push(tilesStore.put(rec));
+      for (const id of dels) reqs.push(tilesStore.delete(id));
+      const trackStore = tx.objectStore('tracks');
+      for (const rec of tracks) reqs.push(trackStore.put(rec));
+      const importStore = tx.objectStore('imports');
+      for (const rec of imports) reqs.push(importStore.put(rec));
+      reqs.push(tx.objectStore('meta').put(this.stats, 'stats'));
+      // every request promise is awaited so an aborted transaction never leaves unhandled rejections
+      await Promise.all([...reqs, tx.done]);
+    } catch (e) {
+      // The transaction did not commit (quota, abort, closed database): memory is now ahead of
+      // disk. Put everything back on the dirty lists so the next flush retries it, then rethrow.
+      for (const rec of puts) this.redirty(rec.id);
+      for (const id of dels) this.redirty(id);
+      this.pendingTracks = tracks.concat(this.pendingTracks);
+      this.pendingImports = imports.concat(this.pendingImports);
+      this.statsDirty = true;
+      throw e;
+    }
     this.statsDirty = false;
     this.evict();
   }
@@ -383,16 +399,34 @@ export class CellStore implements CellTileProvider {
     this.statsDirty = true;
   }
 
+  /**
+   * One provenance row per applyPayload — except for the chunks of one big archive (the FoW
+   * importer streams a 10 000-base-tile Sync folder as payloads whose `meta.note` starts with
+   * "part "): those fold into the row of the previous chunk of the same source + fileName, so
+   * the Data screen shows one import, with `items` summed and the last chunk's note.
+   */
   private logImport(meta: ImportPayload['meta']): void {
+    const now = Date.now();
+    const key = `${meta.source}|${meta.fileName ?? ''}`;
+    const prev = this.lastImport.get(key);
+    if (prev && meta.note?.startsWith('part ') && now - prev.at < 10 * 60_000) {
+      const rec: ImportRecord = { ...prev, items: prev.items + meta.items, note: meta.note };
+      this.lastImport.set(key, rec);
+      const i = this.pendingImports.findIndex((r) => r.id === rec.id);
+      if (i >= 0) this.pendingImports[i] = rec; else this.pendingImports.push(rec); // put replaces by id
+      return;
+    }
     const rec: ImportRecord = {
-      id: `imp-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`,
-      at: Date.now(),
+      id: `imp-${now.toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`,
+      at: now,
       source: meta.source,
       items: meta.items,
     };
     if (meta.fileName !== undefined) rec.fileName = meta.fileName;
     if (meta.note !== undefined) rec.note = meta.note;
     this.pendingImports.push(rec);
+    if (this.lastImport.size > 64) this.lastImport.clear();
+    this.lastImport.set(key, rec);
   }
 
   private areasForRow(ty: number): Float64Array {
@@ -448,6 +482,12 @@ export class CellStore implements CellTileProvider {
       e.dirty = true;
       this.dirty.add(tileId(e.level, e.tx, e.ty));
     }
+  }
+
+  /** Re-mark a cached tile dirty after a failed flush (entries are pinned while dirty, so it is still cached). */
+  private redirty(id: string): void {
+    const e = this.cache.get(id);
+    if (e) { e.dirty = true; this.dirty.add(id); }
   }
 
   /** Evict clean entries beyond the cache size (oldest first; dirty entries are pinned). */

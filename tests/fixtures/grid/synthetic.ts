@@ -76,27 +76,62 @@ export const HOME: [number, number] = [-73.9568, 40.7176];
  */
 export function syntheticCity(opts: { centre?: [number, number]; spanCells?: number; blockCells?: number; seed?: number } = {}): { provider: MemoryProvider; cx: number; cy: number } {
   const centre = opts.centre ?? HOME;
-  const span = opts.spanCells ?? 700;
-  const block = opts.blockCells ?? 12;
-  let s = (opts.seed ?? 7) >>> 0;
-  const rnd = (): number => { s += 0x6d2b79f5; let t = Math.imul(s ^ (s >>> 15), 1 | s); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
   const [cx, cy] = lonLatToCell(centre[0], centre[1]);
   const provider = new MemoryProvider();
+  drawStreetGrid(provider, cx, cy, opts.spanCells ?? 700, opts.blockCells ?? 12, opts.seed ?? 7);
+  return { provider, cx, cy };
+}
+
+/** Deterministic PRNG (mulberry32). */
+function rng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => { s += 0x6d2b79f5; let t = Math.imul(s ^ (s >>> 15), 1 | s); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+/**
+ * Draw a street grid of visited cells into `provider`: streets every `block` cells over a square
+ * of `span`, with the probability of a segment being walked and its visit count decaying from
+ * the centre (`decay` cells), like the mockup's neighbourhood.
+ */
+export function drawStreetGrid(provider: MemoryProvider, cx: number, cy: number, span: number, block: number, seed: number, decay = 220, floor = 0.07): void {
+  const rnd = rng(seed);
   const half = span >> 1;
   for (let a = -half; a <= half; a += block) {
     // one horizontal + one vertical street per block line, each split into block-length segments
     for (let b = -half; b < half; b += block) {
       const d = Math.hypot(a, b + block / 2);
-      const p = 0.92 * Math.exp(-d / 220) + 0.07;
+      const p = 0.92 * Math.exp(-d / decay) + floor;
       if (rnd() < p) {
-        const count = 1 + Math.floor(Math.pow(rnd(), 1.4) * 8 * Math.exp(-d / 200));
+        const count = 1 + Math.floor(Math.pow(rnd(), 1.4) * 8 * Math.exp(-d / (decay * 0.9)));
         provider.line(cx + b, cy + a, cx + b + block, cy + a, count);
       }
       if (rnd() < p) {
-        const count = 1 + Math.floor(Math.pow(rnd(), 1.4) * 8 * Math.exp(-d / 200));
+        const count = 1 + Math.floor(Math.pow(rnd(), 1.4) * 8 * Math.exp(-d / (decay * 0.9)));
         provider.line(cx + a, cy + b, cx + a, cy + b + block, count);
       }
     }
   }
+}
+
+/**
+ * A multi-scale "where I've been" dataset for overview-zoom tests (z 6–13): the home
+ * neighbourhood (dense grid), a second neighbourhood ~3 km away, a town ~40 km away, and
+ * single-cell tracks between them (commutes, a long drive), all around `centre`. Distances are
+ * in cells (≈7.2 m each at the default NYC latitude).
+ */
+export function syntheticRegion(opts: { centre?: [number, number] } = {}): { provider: MemoryProvider; cx: number; cy: number } {
+  const centre = opts.centre ?? HOME;
+  const [cx, cy] = lonLatToCell(centre[0], centre[1]);
+  const provider = new MemoryProvider();
+  drawStreetGrid(provider, cx, cy, 700, 12, 7); // home: dense, 5 km
+  drawStreetGrid(provider, cx + 420, cy - 300, 400, 16, 11, 150); // 3 km NE: sparser
+  drawStreetGrid(provider, cx - 5200, cy + 2400, 300, 20, 23, 120, 0.03); // 40 km SW: a town
+  drawStreetGrid(provider, cx + 2600, cy + 900, 160, 24, 5, 60, 0.02); // 20 km E: a few streets
+  // commutes: home → NE neighbourhood (walked often), home → east (a few times)
+  provider.line(cx + 100, cy - 60, cx + 420, cy - 300, 4);
+  provider.line(cx + 300, cy + 200, cx + 2600, cy + 900, 2);
+  // one long drive south-west to the town and a day trip north (single-cell tracks, count 1)
+  provider.line(cx - 200, cy + 300, cx - 5200, cy + 2400, 1);
+  provider.line(cx, cy - 350, cx + 900, cy - 9000, 1);
   return { provider, cx, cy };
 }

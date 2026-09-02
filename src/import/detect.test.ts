@@ -50,6 +50,27 @@ describe('importFiles — bare files', () => {
     expect(p.cellTiles?.length).toBeGreaterThan(0);
   });
 
+  it('onOutcome receives each outcome as it is produced and the returned payloads are released; a small chunk budget splits FoW archives', async () => {
+    const zip = zipSync({ 'Sync/23e4lltkkoke': fowFixture('23e4lltkkoke'), 'Sync/cd36lltksiwo': fowFixture('cd36lltksiwo'), 'Sync/Import/walk.gpx': gpxFixture('minimal.gpx') });
+    const order: string[] = [];
+    const out = await importFiles([{ name: 'Sync.zip', bytes: zip }, { name: 'walk.gpx', bytes: gpxFixture('minimal.gpx') }], undefined, {
+      maxBaseTiles: 1,
+      onOutcome: async (o) => {
+        await new Promise((r) => setTimeout(r, 1));
+        if (o.kind !== 'payload') throw new Error(o.kind);
+        order.push(`${o.payload.meta.source}:${o.payload.meta.items}:${o.payload.cellTiles?.length ?? 0}c${o.payload.tracks?.length ?? 0}t:${o.payload.meta.note ?? ''}`);
+      },
+    });
+    // two FoW chunks (one per tile file), then the GPX file; every delivered payload had its data
+    expect(order).toEqual([
+      expect.stringMatching(/^fow:1:\d+c0t:part 1$/),
+      expect.stringMatching(/^fow:1:\d+c0t:part 2 of 2$/),
+      'gpx:1:0c1t:',
+    ]);
+    expect(out).toHaveLength(3);
+    for (const o of out) { const p = payloadOf(o); expect(p.cellTiles).toEqual([]); expect(p.tracks).toEqual([]); expect(p.meta.items).toBe(1); }
+  });
+
   it('a lone tile file names the payload after the file', async () => {
     const out = await importFiles([{ name: 'Sync/23e4lltkkoke', bytes: fowFixture('23e4lltkkoke') }]);
     expect(payloadOf(out[0]).meta).toEqual({ source: 'fow', fileName: '23e4lltkkoke', items: 1 });
@@ -147,14 +168,19 @@ describe('importFiles — archives', () => {
     expect(out[1].kind === 'error' && out[1].message).toMatch(/no Fog of World/);
   });
 
-  it('a mixed archive yields one outcome per kind', async () => {
+  it('a mixed archive yields one outcome per kind; GPX under Fog of World\'s Import/ is not re-imported (already in the tiles)', async () => {
     const zip = zipSync({
       'Fog of World/Sync/23e4lltkkoke': fowFixture('23e4lltkkoke'),
       'Fog of World/Import/walk.gpx': gpxFixture('minimal.gpx'),
+      'strava/run.gpx': gpxFixture('minimal.gpx'),
       'Records.json': timelineFixture('records.json'),
     });
     const out = await importFiles([{ name: 'everything.zip', bytes: zip }]);
     expect(out.map((o) => (o.kind === 'payload' ? o.payload.meta.source : o.kind))).toEqual(['fow', 'gpx', 'timeline']);
+    expect(payloadOf(out[1]).meta.note).toBe('1 GPX file(s)');
+    // without Fog of World tiles beside it, an Import/ folder is just a folder of GPX
+    const gpxOnly = await importFiles([{ name: 'import.zip', bytes: zipSync({ 'Fog of World/Import/walk.gpx': gpxFixture('minimal.gpx') }) }]);
+    expect(gpxOnly.map((o) => (o.kind === 'payload' ? o.payload.meta.source : o.kind))).toEqual(['gpx']);
   });
 
   it('listZipEntries enumerates without inflating; describeZipEntry classifies', () => {
