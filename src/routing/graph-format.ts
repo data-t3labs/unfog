@@ -40,8 +40,13 @@ export const ArcFlag = {
   DISMOUNT: 1 << 4,
   /** Traverse the shared shape backwards. */
   REVERSED: 1 << 5,
+  /**
+   * Connector that routes but never counts: sidewalk / crossing / traffic-island footways kept
+   * only so pedestrian ways reach the street grid. Cost = plain length (no novelty term), 0 new
+   * metres. (Bit was reserved "R6" before the builder emitted it.)
+   */
+  GLUE: 1 << 6,
   /** Reserved. */
-  R6: 1 << 6,
   R7: 1 << 7,
 } as const;
 
