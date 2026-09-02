@@ -16,7 +16,7 @@ import { findLoops } from './loop';
 import { NoveltyScorer } from './novelty';
 import { Searcher } from './search';
 import { SpatialIndex } from './spatial';
-import { TileSource, type TileSourceOptions } from './tiles-source';
+import { TileSource, type TileSourceOptions, type TileSourcePerf } from './tiles-source';
 
 const DEG = Math.PI / 180;
 export const MAX_AREA_RADIUS_KM = 8;
@@ -62,12 +62,37 @@ export function circleBBox(center: LonLat, radiusKm: number): BBox {
   return padBBox([center[0], center[1], center[0], center[1]], radiusKm * 1000);
 }
 
+/** Phase timings of the last route()/loop() call (diagnostics: `await remote.perf` from the page). */
+export interface RoutePerf {
+  /** Fetch/inflate/decode of the request's tiles (0 when every tile came from memory). */
+  tilesMs: number;
+  /** Graph merge; 0 on a graph-cache hit. */
+  mergeMs: number;
+  /** Spatial index build; 0 on a graph-cache hit. */
+  spatialMs: number;
+  graphHit: boolean;
+  /** IdbCellLookup.prepare over the merged graph's bbox. */
+  prepareMs: number;
+  preparedTiles: number;
+  /** snap + λ sweep + candidate assembly. */
+  searchMs: number;
+  totalMs: number;
+  tiles: number;
+  nodes: number;
+  arcs: number;
+  /** Arcs novelty-scored so far on this graph (cumulative over its cached life). */
+  scored: number;
+  source: TileSourcePerf;
+}
+
 export class RouteEngine implements RouteApi {
   readonly tiles: TileSource;
   readonly cells: CellLookup & { prepare?(bbox: BBox): Promise<number>; invalidate?(): void };
   private readonly graphs: CachedGraph[] = [];
   private readonly graphCacheSize: number;
   cellVersion = 0;
+  perf: RoutePerf | null = null;
+  private lastGraphPhase = { tilesMs: 0, mergeMs: 0, spatialMs: 0, hit: false };
 
   constructor(opts: EngineOptions = {}) {
     this.tiles = new TileSource(opts.tiles);
@@ -119,20 +144,26 @@ export class RouteEngine implements RouteApi {
 
   /** Merged graph for a bbox (cached by tile set). Throws when no tile has data. */
   async graphFor(bbox: BBox): Promise<CachedGraph> {
+    const tStart = now();
     const { tiles, keys, missing } = await this.tiles.tilesFor(bbox);
+    const tilesMs = now() - tStart;
     if (tiles.length === 0) throw new NoCoverageError(missing.length);
     const key = keys.join(',');
     const i = this.graphs.findIndex((c) => c.key === key);
     if (i >= 0) {
       const c = this.graphs.splice(i, 1)[0];
       this.graphs.push(c);
+      this.lastGraphPhase = { tilesMs, mergeMs: 0, spatialMs: 0, hit: true };
       return c;
     }
     const t0 = now();
     const graph = new Graph(tiles);
+    const t1 = now();
     const spatial = new SpatialIndex(graph);
+    const t2 = now();
     const scorer = new NoveltyScorer(graph, this.cells);
     const searcher = new Searcher(graph, scorer);
+    this.lastGraphPhase = { tilesMs, mergeMs: t1 - t0, spatialMs: t2 - t1, hit: false };
     const c: CachedGraph = { key, graph, spatial, scorer, searcher, mergeMs: now() - t0 };
     this.graphs.push(c);
     while (this.graphs.length > this.graphCacheSize) this.graphs.shift();
@@ -153,9 +184,12 @@ export class RouteEngine implements RouteApi {
     const t0 = now();
     const bbox = routeBBox(req.from, req.to);
     const c = await this.graphFor(bbox);
-    await this.prepareCells(c);
+    const t1 = now();
+    const prepared = (await this.prepareCells(c)) ?? 0;
+    const t2 = now();
     const res = findCandidates(c.graph, this.cells, req, { spatial: c.spatial, scorer: c.scorer, searcher: c.searcher, graphTiles: c.graph.tileKeys.length });
     res.ms = Math.round(now() - t0);
+    this.recordPerf(c, t2 - t1, prepared, now() - t2, res.ms);
     return res;
   }
 
@@ -163,10 +197,32 @@ export class RouteEngine implements RouteApi {
     const t0 = now();
     const bbox = padBBox([req.from[0], req.from[1], req.from[0], req.from[1]], Math.max(1000, req.targetKm * 500));
     const c = await this.graphFor(bbox);
-    await this.prepareCells(c);
+    const t1 = now();
+    const prepared = (await this.prepareCells(c)) ?? 0;
+    const t2 = now();
     const res = findLoops(c.graph, this.cells, req, { spatial: c.spatial, scorer: c.scorer, searcher: c.searcher, graphTiles: c.graph.tileKeys.length });
     res.ms = Math.round(now() - t0);
+    this.recordPerf(c, t2 - t1, prepared, now() - t2, res.ms);
     return res;
+  }
+
+  private recordPerf(c: CachedGraph, prepareMs: number, preparedTiles: number, searchMs: number, totalMs: number): void {
+    const g = this.lastGraphPhase;
+    this.perf = {
+      tilesMs: Math.round(g.tilesMs * 10) / 10,
+      mergeMs: Math.round(g.mergeMs * 10) / 10,
+      spatialMs: Math.round(g.spatialMs * 10) / 10,
+      graphHit: g.hit,
+      prepareMs: Math.round(prepareMs * 10) / 10,
+      preparedTiles,
+      searchMs: Math.round(searchMs * 10) / 10,
+      totalMs: Math.round(totalMs * 10) / 10,
+      tiles: c.graph.tileKeys.length,
+      nodes: c.graph.nodeCount,
+      arcs: c.graph.arcCount,
+      scored: c.scorer.scoredCount,
+      source: { ...this.tiles.perf },
+    };
   }
 
   async invalidateCells(version: number): Promise<void> {

@@ -88,19 +88,36 @@ export function boxBlurH(src: Float32Array, dst: Float32Array, w: number, h: num
   }
 }
 
-/** Vertical counterpart of boxBlurH (column running sums; strided access, same clamping). */
+/** Per-column running sums for boxBlurV (doubles, like the scalar accumulator they replace). */
+let colSums = new Float64Array(0);
+
+/**
+ * Vertical counterpart of boxBlurH: the same per-column running sum with the same clamping, but
+ * walked row by row so memory access is contiguous (the column-wise form was 2–3× slower on a
+ * 600² field). Every column's accumulator sees exactly the operations, in exactly the order, of
+ * the scalar version — `val += add − sub` with the identical operands — so the output is
+ * bit-for-bit identical (the z ≥ 14 crc32 snapshot in tiles.test.ts guards this).
+ */
 export function boxBlurV(src: Float32Array, dst: Float32Array, w: number, h: number, r: number): void {
   if (r <= 0) { dst.set(src.subarray(0, w * h)); return; }
   const iarr = 1 / (2 * r + 1);
-  for (let x = 0; x < w; x++) {
-    const fv = src[x], lv = src[(h - 1) * w + x];
-    let val = (r + 1) * fv;
-    for (let j = 0; j < r; j++) val += src[Math.min(j, h - 1) * w + x];
-    for (let y = 0; y < h; y++) {
-      const add = y + r < h ? src[(y + r) * w + x] : lv;
-      const sub = y - r - 1 >= 0 ? src[(y - r - 1) * w + x] : fv;
-      val += add - sub;
-      dst[y * w + x] = val * iarr;
+  if (colSums.length < w) colSums = new Float64Array(w);
+  const val = colSums;
+  const lastRow = (h - 1) * w;
+  for (let x = 0; x < w; x++) val[x] = (r + 1) * src[x];
+  for (let j = 0; j < r; j++) {
+    const row = Math.min(j, h - 1) * w;
+    for (let x = 0; x < w; x++) val[x] += src[row + x];
+  }
+  for (let y = 0; y < h; y++) {
+    // Beyond the bottom the window reads the last row (lv); before the top it subtracts the first row (fv).
+    const addRow = y + r < h ? (y + r) * w : lastRow;
+    const subRow = y - r - 1 >= 0 ? (y - r - 1) * w : 0;
+    const o = y * w;
+    for (let x = 0; x < w; x++) {
+      const v = val[x] + (src[addRow + x] - src[subRow + x]);
+      val[x] = v;
+      dst[o + x] = v * iarr;
     }
   }
 }

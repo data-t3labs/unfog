@@ -18,11 +18,22 @@ import { createStatsScreen } from './app/stats';
 import { el, toast } from './app/ui';
 import { LocationManager, describeLocationError } from './map/location';
 import { DEFAULT_CENTER, UnfogMap, savedCenter } from './map/map';
+import { overlayPerf } from './map/overlay';
 import { Recorder, type RecorderEvents } from './record/session';
 
 declare global {
   interface Window {
-    __unfog?: { ready: boolean; mock: boolean; openRoute?: (d: Destination) => void; openLoop?: (from?: [number, number]) => void; ctx?: AppContext };
+    __unfog?: {
+      ready: boolean;
+      mock: boolean;
+      openRoute?: (d: Destination) => void;
+      openLoop?: (from?: [number, number]) => void;
+      ctx?: AppContext;
+      /** performance.now() when the map first went idle (time to interactive). */
+      readyAt?: number;
+      /** Overlay tile pipeline counters (src/map/overlay.ts). */
+      perf?: typeof overlayPerf;
+    };
   }
 }
 
@@ -184,7 +195,7 @@ async function boot(): Promise<void> {
     showInstallCardIfNeeded(ctx);
     window.setTimeout(() => dataScreen.maybeNag(), 4000);
     map.map.once('idle', () => {
-      window.__unfog = { ready: true, mock: engines.gridMock || engines.routeMock, openRoute: (d) => ctx.openRoute(d), openLoop: (from) => ctx.openLoop(from), ctx };
+      window.__unfog = { ready: true, mock: engines.gridMock || engines.routeMock, openRoute: (d) => ctx.openRoute(d), openLoop: (from) => ctx.openLoop(from), ctx, readyAt: performance.now(), perf: overlayPerf };
     });
   });
   if (engines.gridMock || engines.routeMock) {

@@ -309,18 +309,25 @@ function fillEmpty(out: Uint8ClampedArray, mode: OverlayMode, settings: RenderSe
 interface FetchedTile { tx: number; ty: number; counts: CellCounts }
 
 /**
- * Fetch every provider tile overlapping the window [wcx0,wcx1)×[wcy0,wcy1) (level cells), in
- * parallel and each at most once; tiles outside the world or without data are dropped. This is
- * the only await of a render.
+ * Fetch every provider tile overlapping the window [wcx0,wcx1)×[wcy0,wcy1) (level cells), each
+ * at most once — in one batched call when the provider offers `getTiles` (one IndexedDB
+ * transaction for the whole render instead of one per tile), else in parallel; tiles outside
+ * the world or without data are dropped. This is the only await of a render.
  */
 async function fetchTiles(wcx0: number, wcy0: number, wcx1: number, wcy1: number, level: Level, provider: CellTileProvider): Promise<FetchedTile[]> {
   const tilesPerAxis = Math.pow(2, level);
   const tx0 = Math.max(0, Math.floor(wcx0 / TILE_SIZE)), tx1 = Math.min(tilesPerAxis - 1, Math.floor((wcx1 - 1) / TILE_SIZE));
   const ty0 = Math.max(0, Math.floor(wcy0 / TILE_SIZE)), ty1 = Math.min(tilesPerAxis - 1, Math.floor((wcy1 - 1) / TILE_SIZE));
-  const jobs: Array<Promise<{ tx: number; ty: number; counts: CellCounts | null }>> = [];
-  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) jobs.push(provider.getTile(level, tx, ty).then((counts) => ({ tx, ty, counts })));
+  const refs: Array<{ level: Level; tx: number; ty: number }> = [];
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) refs.push({ level, tx, ty });
+  const counts = provider.getTiles
+    ? await provider.getTiles(refs)
+    : await Promise.all(refs.map((r) => provider.getTile(r.level, r.tx, r.ty)));
   const out: FetchedTile[] = [];
-  for (const t of await Promise.all(jobs)) if (t.counts) out.push(t as FetchedTile);
+  for (let i = 0; i < refs.length; i++) {
+    const c = counts[i];
+    if (c) out.push({ tx: refs[i].tx, ty: refs[i].ty, counts: c });
+  }
   return out;
 }
 
@@ -368,24 +375,78 @@ function dilate3(win: Uint8Array, cw: number, ch: number): void {
 /**
  * In-place separable max filter of radius r (window 2r+1) on a W×H field — the pixel-space
  * ribbon floor. Edges clamp (the margin absorbs it). `tmp` is scratch of the field's size.
+ *
+ * van Herk / Gil–Werman: with the row cut into blocks of k = 2r+1, the window [x−r, x+r]
+ * (length k) either is one block or straddles exactly one block boundary, so its max is
+ * max(suffixMax[x−r], prefixMax[x+r]) — three reads per pixel instead of 2r+1. The result is
+ * the exact window max (a max, not an approximation), so it is identical to the direct form.
+ * The first/last r pixels of each line take the direct loop (windows there are truncated).
  */
 export function dilateMax(f: Float32Array, W: number, H: number, r: number, tmp: Float32Array): void {
+  if (r <= 0) return;
+  maxFilterRows(f, tmp, W, H, r);
+  maxFilterCols(tmp, f, W, H, r);
+}
+
+/** Horizontal window max, src → dst. */
+function maxFilterRows(src: Float32Array, dst: Float32Array, W: number, H: number, r: number): void {
+  const k = 2 * r + 1;
+  const g = f32('vhRowG', W), s = f32('vhRowS', W);
   for (let y = 0; y < H; y++) {
     const row = y * W;
     for (let x = 0; x < W; x++) {
-      let v = f[row + x];
-      const x0 = x - r < 0 ? 0 : x - r, x1 = x + r >= W ? W - 1 : x + r;
-      for (let u = x0; u <= x1; u++) if (f[row + u] > v) v = f[row + u];
-      tmp[row + x] = v;
+      const v = src[row + x];
+      g[x] = x % k === 0 || g[x - 1] < v ? v : g[x - 1];
+    }
+    for (let x = W - 1; x >= 0; x--) {
+      const v = src[row + x];
+      s[x] = x === W - 1 || x % k === k - 1 || s[x + 1] < v ? v : s[x + 1];
+    }
+    for (let x = 0; x < W; x++) {
+      const lo = x - r, hi = x + r;
+      let v: number;
+      if (lo < 0 || hi >= W) {
+        const x0 = lo < 0 ? 0 : lo, x1 = hi >= W ? W - 1 : hi;
+        v = src[row + x0];
+        for (let u = x0 + 1; u <= x1; u++) if (src[row + u] > v) v = src[row + u];
+      } else {
+        v = s[lo] > g[hi] ? s[lo] : g[hi];
+      }
+      dst[row + x] = v;
     }
   }
+}
+
+/** Vertical window max, src → dst, walked row by row (contiguous access) with full-field prefix/suffix maxima. */
+function maxFilterCols(src: Float32Array, dst: Float32Array, W: number, H: number, r: number): void {
+  const k = 2 * r + 1;
+  const n = W * H;
+  const g = f32('vhColG', n), s = f32('vhColS', n);
   for (let y = 0; y < H; y++) {
-    const y0 = y - r < 0 ? 0 : y - r, y1 = y + r >= H ? H - 1 : y + r;
-    const row = y * W;
-    for (let x = 0; x < W; x++) {
-      let v = tmp[row + x];
-      for (let u = y0; u <= y1; u++) if (tmp[u * W + x] > v) v = tmp[u * W + x];
-      f[row + x] = v;
+    const o = y * W;
+    if (y % k === 0) { g.set(src.subarray(o, o + W), o); continue; }
+    const p = o - W;
+    for (let x = 0; x < W; x++) { const a = g[p + x], b = src[o + x]; g[o + x] = a > b ? a : b; }
+  }
+  for (let y = H - 1; y >= 0; y--) {
+    const o = y * W;
+    if (y === H - 1 || y % k === k - 1) { s.set(src.subarray(o, o + W), o); continue; }
+    const p = o + W;
+    for (let x = 0; x < W; x++) { const a = s[p + x], b = src[o + x]; s[o + x] = a > b ? a : b; }
+  }
+  for (let y = 0; y < H; y++) {
+    const lo = y - r, hi = y + r;
+    const o = y * W;
+    if (lo < 0 || hi >= H) {
+      const y0 = lo < 0 ? 0 : lo, y1 = hi >= H ? H - 1 : hi;
+      for (let x = 0; x < W; x++) {
+        let v = src[y0 * W + x];
+        for (let u = y0 + 1; u <= y1; u++) if (src[u * W + x] > v) v = src[u * W + x];
+        dst[o + x] = v;
+      }
+    } else {
+      const a = lo * W, b = hi * W;
+      for (let x = 0; x < W; x++) { const p = s[a + x], q = g[b + x]; dst[o + x] = p > q ? p : q; }
     }
   }
 }

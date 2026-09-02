@@ -41,6 +41,8 @@ interface GraphDb extends DBSchema {
 
 export const tileKeyOf = (x: number, y: number): string => `${x}/${y}`;
 
+const now = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
 /** z12 tile keys intersecting a bbox (row-major). */
 export function graphTilesFor(bbox: BBox): Array<[x: number, y: number]> {
   const [x0, y0] = lonLatToGraphTile(bbox[0], bbox[3]);
@@ -56,8 +58,22 @@ export interface TileSourceOptions {
   fetch?: typeof fetch;
 }
 
+/** Cumulative tile-loading costs (diagnostics; read through RouteEngine.perf). */
+export interface TileSourcePerf {
+  memoryHits: number;
+  fetched: number;
+  fetchBytes: number;
+  /** Network / cache round trip incl. reading the body. */
+  fetchMs: number;
+  /** inflate + decode of fetched or IDB tiles. */
+  unpackMs: number;
+  idbHits: number;
+  idbMs: number;
+}
+
 export class TileSource {
   baseUrl = '/';
+  readonly perf: TileSourcePerf = { memoryHits: 0, fetched: 0, fetchBytes: 0, fetchMs: 0, unpackMs: 0, idbHits: 0, idbMs: 0 };
   private regions: RegionManifest[] = [];
   private readonly prebuilt = new Map<string, { region: string; bytes: number }>();
   private readonly memory = new Map<string, GraphTile>();
@@ -173,22 +189,37 @@ export class TileSource {
   async getTile(x: number, y: number): Promise<GraphTile | null> {
     const k = tileKeyOf(x, y);
     const cached = this.memory.get(k);
-    if (cached) { this.memory.delete(k); this.memory.set(k, cached); return cached; }
+    if (cached) { this.memory.delete(k); this.memory.set(k, cached); this.perf.memoryHits++; return cached; }
     let tile: GraphTile | null = null;
     const p = this.prebuilt.get(k);
+    const perf = this.perf;
     if (p && this.fetchFn) {
       try {
+        const t0 = now();
         const res = await this.fetchFn(this.tileUrl(p.region, x, y));
-        if (res.ok) tile = unpackGraphTile(new Uint8Array(await res.arrayBuffer()));
+        const bytes = res.ok ? new Uint8Array(await res.arrayBuffer()) : null;
+        const t1 = now();
+        perf.fetchMs += t1 - t0;
+        if (bytes) {
+          perf.fetched++;
+          perf.fetchBytes += bytes.length;
+          tile = unpackGraphTile(bytes);
+          perf.unpackMs += now() - t1;
+        }
       } catch {
         tile = null;
       }
     }
     if (!tile) {
+      const t0 = now();
       const db = await this.openDb();
       const rec = db ? await db.get('tiles', k) : undefined;
+      const t1 = now();
+      perf.idbMs += t1 - t0;
       if (rec) {
+        perf.idbHits++;
         try { tile = unpackGraphTile(rec.bytes); } catch { tile = null; }
+        perf.unpackMs += now() - t1;
       }
     }
     if (tile) this.remember(k, tile);

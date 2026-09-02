@@ -14,6 +14,14 @@ interface Provider {
 let provider: Provider | null = null;
 let registered = false;
 
+/**
+ * Pipeline counters (main-thread view: request → worker render → bitmap back), exposed as
+ * `window.__unfog.perf` for the perf scripts / e2e. `ms` is the sum of round-trip latencies of
+ * completed tiles, so during a pan `ms / done` is the average wait per tile including queueing.
+ */
+export const overlayPerf = { requested: 0, done: 0, aborted: 0, cancelled: 0, errors: 0, ms: 0, maxMs: 0 };
+let nextRenderId = 1;
+
 export function registerOverlayProtocols(grid: GridApi, settings: () => RenderSettings): void {
   provider = { grid, settings };
   if (registered) return;
@@ -35,11 +43,35 @@ async function load(mode: OverlayMode, params: RequestParameters, abort: AbortCo
   if (!m || !provider) throw new Error(`Bad overlay tile URL: ${params.url}`);
   if (abort.signal.aborted) throw abortError();
   const z = Number(m[1]), x = Number(m[2]), y = Number(m[3]);
-  const result = await provider.grid.renderTile({ z, x, y, mode, size: 512 }, provider.settings());
+  const grid = provider.grid;
+  const id = nextRenderId++;
+  overlayPerf.requested++;
+  // MapLibre aborts a tile that scrolled away: tell the worker so a render still queued is dropped.
+  const onAbort = () => { void grid.cancelRender?.(id)?.catch(() => undefined); };
+  abort.signal.addEventListener('abort', onAbort, { once: true });
+  const t0 = performance.now();
+  let result: ImageBitmap | Uint8ClampedArray;
+  try {
+    result = await grid.renderTile({ z, x, y, mode, size: 512, id }, provider.settings());
+  } catch (e) {
+    if (abort.signal.aborted) {
+      overlayPerf.cancelled++; // dropped before it rendered
+      throw abortError();
+    }
+    overlayPerf.errors++;
+    throw e;
+  } finally {
+    abort.signal.removeEventListener('abort', onAbort);
+  }
   if (abort.signal.aborted) {
+    overlayPerf.aborted++; // rendered, but no longer wanted
     if (result instanceof ImageBitmap) result.close();
     throw abortError();
   }
+  const dt = performance.now() - t0;
+  overlayPerf.done++;
+  overlayPerf.ms += dt;
+  if (dt > overlayPerf.maxMs) overlayPerf.maxMs = dt;
   if (result instanceof ImageBitmap) return { data: result };
   const bytes = result as Uint8ClampedArray<ArrayBuffer>;
   const data = await createImageBitmap(new ImageData(bytes, 512, 512));

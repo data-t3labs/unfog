@@ -30,6 +30,8 @@ export interface CellTileRef { level: Level; tx: number; ty: number }
  */
 export interface CellTileProvider {
   getTile(level: Level, tx: number, ty: number): Promise<CellCounts | null>;
+  /** Several tiles at once (same semantics, aligned with `refs`); lets the store batch its reads. */
+  getTiles?(refs: readonly CellTileRef[]): Promise<Array<CellCounts | null>>;
 }
 
 /** Aggregate statistics kept by the store (updated on every write). */

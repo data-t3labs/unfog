@@ -39,6 +39,8 @@ export interface RenderTileRequest {
   mode: OverlayMode;
   /** Output pixels per side. Default 512. */
   size?: 256 | 512;
+  /** Caller-chosen id so a render still waiting in the worker's queue can be dropped (`cancelRender`). */
+  id?: number;
 }
 
 export interface TrackSummary {
@@ -71,6 +73,11 @@ export interface GridApi {
    * to wrap. Either is transferred, not copied.
    */
   renderTile(req: RenderTileRequest, settings: RenderSettings): Promise<ImageBitmap | Uint8ClampedArray>;
+  /**
+   * The map no longer needs the render queued under `RenderTileRequest.id` (it scrolled away):
+   * drop it if it has not started; its `renderTile` promise then rejects. No-op otherwise.
+   */
+  cancelRender?(id: number): Promise<void>;
   /** Raw counts for one tile (any level) or null if empty. Used by stats views and tests. */
   getTileCounts(level: Level, tx: number, ty: number): Promise<CellCounts | null>;
   /** Base-level tiles with data, as [tx, ty] pairs — for "where is my data" bounds. */

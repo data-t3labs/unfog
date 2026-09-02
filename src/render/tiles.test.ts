@@ -5,7 +5,7 @@ import { crc32 } from '../grid/backup';
 import { lonLatToCell } from '../grid/cell';
 import { levelForZoom } from '../grid/types';
 import { blurSupportRadius } from './blur';
-import { heatRampLut, renderOverlayRegion, renderOverlayTile, tileGeometry } from './tiles';
+import { dilateMax, heatRampLut, renderOverlayRegion, renderOverlayTile, tileGeometry } from './tiles';
 
 const S: RenderSettings = { ...DEFAULT_RENDER_SETTINGS };
 /** crc32 of the RGBA of the synthetic-city home tile with the defaults — the approved z ≥ 14 look. */
@@ -247,6 +247,24 @@ describe('pixel floor (z ≤ 13: ribbons ≥ 10 px, σ_narrow 3 px)', () => {
       }
       expect(maxDiff, `z${z} seam`).toBeLessThanOrEqual(2);
       expect(lifted, `z${z} seam crosses data`).toBeGreaterThan(0);
+    }
+  });
+
+  it('dilateMax (van Herk) equals the direct window max, edges included', () => {
+    let seed = 777;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    for (const [W, H, r] of [[13, 7, 1], [40, 33, 3], [64, 20, 5], [9, 64, 4], [23, 23, 11]]) {
+      const f = new Float32Array(W * H);
+      for (let i = 0; i < f.length; i++) f[i] = rnd() < 0.5 ? 0 : Math.round(rnd() * 8) / 8;
+      const want = new Float32Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        let v = -1;
+        for (let v2 = Math.max(0, y - r); v2 <= Math.min(H - 1, y + r); v2++) for (let u = Math.max(0, x - r); u <= Math.min(W - 1, x + r); u++) if (f[v2 * W + u] > v) v = f[v2 * W + u];
+        want[y * W + x] = v;
+      }
+      const got = f.slice();
+      dilateMax(got, W, H, r, new Float32Array(W * H));
+      expect(Array.from(got), `${W}×${H} r=${r}`).toEqual(Array.from(want));
     }
   });
 

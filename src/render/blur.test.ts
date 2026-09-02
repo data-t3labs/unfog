@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { blurSupportRadius, boxesForGauss, gaussianBlur } from './blur';
+import { blurSupportRadius, boxBlurV, boxesForGauss, gaussianBlur } from './blur';
 
 function field(w: number, h: number, fill: (x: number, y: number) => number): Float32Array {
   const f = new Float32Array(w * h);
@@ -18,6 +18,34 @@ describe('gaussianBlur', () => {
       // σ=1.5 → 3,3,3 → 1.41)
       expect(Math.abs(Math.sqrt(variance) - sigma) / sigma).toBeLessThan(0.1);
       expect(blurSupportRadius(sigma)).toBeLessThan(3 * sigma);
+    }
+  });
+
+  it('the row-major vertical pass is bit-identical to the column-wise running sum it replaced', () => {
+    // Reference: the original column-by-column form (perf-1 rewrote boxBlurV to walk rows).
+    const ref = (src: Float32Array, w: number, h: number, r: number): Float32Array => {
+      const dst = new Float32Array(w * h);
+      const iarr = 1 / (2 * r + 1);
+      for (let x = 0; x < w; x++) {
+        const fv = src[x], lv = src[(h - 1) * w + x];
+        let val = (r + 1) * fv;
+        for (let j = 0; j < r; j++) val += src[Math.min(j, h - 1) * w + x];
+        for (let y = 0; y < h; y++) {
+          const add = y + r < h ? src[(y + r) * w + x] : lv;
+          const sub = y - r - 1 >= 0 ? src[(y - r - 1) * w + x] : fv;
+          val += add - sub;
+          dst[y * w + x] = val * iarr;
+        }
+      }
+      return dst;
+    };
+    let seed = 12345;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    for (const [w, h, r] of [[37, 23, 1], [64, 64, 5], [100, 9, 12], [7, 50, 3]]) {
+      const f = field(w, h, () => (rnd() < 0.3 ? 0 : rnd()));
+      const dst = new Float32Array(w * h);
+      boxBlurV(f, dst, w, h, r);
+      expect(Array.from(dst), `${w}×${h} r=${r}`).toEqual(Array.from(ref(f, w, h, r)));
     }
   });
 

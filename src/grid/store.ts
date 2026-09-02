@@ -29,11 +29,31 @@ import type { ApplyResult, TrackSummary } from './api';
 import { cellAreaM2, distanceM, parseTileKey, tileId, tileKey, TILE_SIZE } from './cell';
 import { levelKeyRange, openGridDb, type GridDb, type ImportRecord, type TileRecord, type TrackRecord } from './db';
 import { DEFAULT_RASTER, rasterizeTrack, subtractRaster } from './raster';
-import type { CellCounts, CellTileProvider, GridStats, ImportPayload, Level, Track } from './types';
+import type { CellCounts, CellTileProvider, CellTileRef, GridStats, ImportPayload, Level, Track } from './types';
 import { decodeBackup, encodeBackup, type BackupTile } from './backup';
 
 export const TILE_CELLS = TILE_SIZE * TILE_SIZE; // 65 536
-const DEFLATE_LEVEL = 6;
+/**
+ * fflate level for the stored tiles. Measured on 1,500 real Sync-import base tiles (perf-1):
+ * level 6 = 0.52 ms/tile → 334 B, levels 1–4 = 0.32–0.34 ms/tile → 335–345 B, level 9 = 1.03 ms
+ * → 275 B. Deflate was 70 % of a 10 000-tile import at level 6; level 2 keeps the size within
+ * 1–3 % and is format-compatible (inflate reads any level).
+ */
+const DEFLATE_LEVEL = 2;
+/**
+ * Overview tiles (levels 10/6/2) kept beyond the LRU budget: every low-zoom render reads the same
+ * few, and re-reading + inflating one costs a millisecond or more, so base-tile churn must not
+ * evict them. 64 tiles = 4 MB.
+ */
+const PINNED_OVERVIEW = 64;
+/**
+ * Base tiles of a payload pre-read per batch (one IndexedDB transaction) before merging. Sized so
+ * that pinned dirty tiles (≤ flushEvery = 128) + pinned overviews + the batch fit the default
+ * 256-tile LRU: a preloaded tile evicted before its merge is simply read again one by one (a
+ * 128-tile batch measured 18,516 loads for 10,292 tiles; 64 keeps the batch resident).
+ */
+const PRELOAD_BATCH = 64;
+const perfNow = (): number => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 export interface CellStoreOptions {
   /** Database name; tests pass a unique one. Default 'unfog'. */
@@ -123,6 +143,8 @@ export class CellStore implements CellTileProvider {
   /** Per-row cell areas (m²) by base tile row ty — Σ area over visited cells needs one per row. */
   private readonly rowAreas = new Map<number, Float64Array>();
   private chain: Promise<unknown> = Promise.resolve();
+  /** Cumulative costs (diagnostics; the worker exposes them as `perf()`). */
+  readonly perf = { loads: 0, loadMs: 0, batches: 0, inflateMs: 0, mergeTiles: 0, mergeMs: 0, overviewMs: 0, flushes: 0, deflateMs: 0, flushIdbMs: 0, flushPuts: 0 };
 
   constructor(opts: CellStoreOptions = {}) {
     this.dbName = opts.dbName ?? 'unfog';
@@ -171,6 +193,17 @@ export class CellStore implements CellTileProvider {
     return e.counts;
   }
 
+  /**
+   * CellTileProvider batch form: cache hits answer directly, every miss is read in ONE readonly
+   * transaction (a render at z13 touches up to 16 base tiles; one transaction per tile queued
+   * badly behind each other on a pan). Same read-only / null semantics as getTile.
+   */
+  async getTiles(refs: readonly CellTileRef[]): Promise<Array<CellCounts | null>> {
+    await this.init();
+    const entries = await this.loadMany(refs);
+    return entries.map((e) => e.counts);
+  }
+
   async listBaseTiles(): Promise<Array<[number, number]>> {
     const db = await this.ready();
     const keys = await db.getAllKeys('tiles', levelKeyRange(14));
@@ -200,9 +233,17 @@ export class CellStore implements CellTileProvider {
     return this.serialized(async () => {
       await this.init();
       const touched = new Map<number, { tx: number; ty: number }>();
-      for (const ct of payload.cellTiles ?? []) {
+      const cellTiles = payload.cellTiles ?? [];
+      for (const ct of cellTiles) {
         if (ct.counts.length !== TILE_CELLS) throw new Error(`cell tile ${ct.tx}/${ct.ty}: expected ${TILE_CELLS} counts, got ${ct.counts.length}`);
-        await this.mergeBase(ct.tx, ct.ty, ct.counts, touched);
+      }
+      const preload = Math.max(1, Math.min(PRELOAD_BATCH, this.cacheTiles >> 2));
+      for (let i = 0; i < cellTiles.length; i += preload) {
+        const batch = cellTiles.slice(i, i + preload);
+        // One read transaction for the batch's existing tiles instead of one per tile (an import
+        // is ~10 000 of them; iOS charges each transaction several milliseconds).
+        await this.loadMany(batch.map((ct) => ({ level: 14 as Level, tx: ct.tx, ty: ct.ty })));
+        for (const ct of batch) await this.mergeBase(ct.tx, ct.ty, ct.counts, touched);
       }
       for (const track of payload.tracks ?? []) await this.markTrackInternal(track, touched);
       this.logImport(payload.meta);
@@ -337,6 +378,8 @@ export class CellStore implements CellTileProvider {
     const db = await this.ready();
     if (!this.dirty.size && !this.pendingTracks.length && !this.pendingImports.length && !this.statsDirty) return;
     const now = Date.now();
+    const perf = this.perf;
+    const tDeflate = perfNow();
     // Compress outside the transaction: IDB auto-commits if we yield, and deflate is sync anyway.
     const puts: TileRecord[] = [];
     const dels: string[] = [];
@@ -353,6 +396,10 @@ export class CellStore implements CellTileProvider {
     this.pendingTracks = [];
     this.pendingImports = [];
     this.dirty.clear();
+    perf.deflateMs += perfNow() - tDeflate;
+    perf.flushes++;
+    perf.flushPuts += puts.length;
+    const tIdb = perfNow();
     try {
       const tx = db.transaction(['tiles', 'tracks', 'imports', 'meta'], 'readwrite');
       const reqs: Promise<unknown>[] = [];
@@ -366,6 +413,7 @@ export class CellStore implements CellTileProvider {
       reqs.push(tx.objectStore('meta').put(this.stats, 'stats'));
       // every request promise is awaited so an aborted transaction never leaves unhandled rejections
       await Promise.all([...reqs, tx.done]);
+      perf.flushIdbMs += perfNow() - tIdb;
     } catch (e) {
       // The transaction did not commit (quota, abort, closed database): memory is now ahead of
       // disk. Put everything back on the dirty lists so the next flush retries it, then rethrow.
@@ -455,19 +503,79 @@ export class CellStore implements CellTileProvider {
     const epoch = this.epoch;
     const p = (async () => {
       const db = this.db as GridDb;
+      const t0 = perfNow();
       const rec = await db.get('tiles', id);
-      // A mutation may have created the entry while we awaited — never clobber it.
-      const raced = this.cache.get(id);
-      if (raced) return raced;
-      // deleteAll ran meanwhile: what we read is stale — hand it back but do not cache it.
-      const stale = epoch !== this.epoch;
-      const e: Entry = { level, tx, ty, counts: rec && rec.n > 0 && !stale ? inflateSync(rec.data) : null, dirty: false };
-      if (!stale) { this.cache.set(id, e); this.evict(); }
-      return e;
+      this.perf.loads++;
+      this.perf.loadMs += perfNow() - t0;
+      return this.admit(level, tx, ty, id, rec, epoch);
     })();
     this.loading.set(id, p);
     p.finally(() => this.loading.delete(id)).catch(() => undefined);
     return p;
+  }
+
+  /**
+   * Batch form of load: cached / in-flight entries are reused, the rest are fetched in one
+   * readonly transaction. Result aligned with `refs`.
+   */
+  private loadMany(refs: readonly CellTileRef[]): Promise<Entry[]> {
+    const results: Array<Promise<Entry> | Entry> = new Array(refs.length);
+    const batch: Array<{ i: number; id: string; level: Level; tx: number; ty: number }> = [];
+    const seen = new Set<string>();
+    refs.forEach((r, i) => {
+      const id = tileId(r.level, r.tx, r.ty);
+      const hit = this.cache.get(id);
+      if (hit) { this.touch(id, hit); results[i] = hit; return; }
+      const inflight = this.loading.get(id);
+      if (inflight) { results[i] = inflight; return; }
+      if (seen.has(id)) { results[i] = null as unknown as Entry; return; } // duplicate ref: filled from the batch below
+      seen.add(id);
+      batch.push({ i, id, level: r.level, tx: r.tx, ty: r.ty });
+    });
+    if (batch.length) {
+      const epoch = this.epoch;
+      const db = this.db as GridDb;
+      const all = (async () => {
+        const t0 = perfNow();
+        const tx = db.transaction('tiles', 'readonly');
+        const store = tx.objectStore('tiles');
+        const recs = await Promise.all(batch.map((b) => store.get(b.id)));
+        await tx.done;
+        this.perf.loads += batch.length;
+        this.perf.batches++;
+        this.perf.loadMs += perfNow() - t0;
+        return batch.map((b, j) => this.admit(b.level, b.tx, b.ty, b.id, recs[j], epoch));
+      })();
+      batch.forEach((b, j) => {
+        const p = all.then((entries) => entries[j]);
+        this.loading.set(b.id, p);
+        p.finally(() => this.loading.delete(b.id)).catch(() => undefined);
+        results[b.i] = p;
+      });
+      // duplicate refs share the batch entry
+      refs.forEach((r, i) => {
+        if (results[i] !== null) return;
+        const id = tileId(r.level, r.tx, r.ty);
+        results[i] = this.loading.get(id) ?? (this.cache.get(id) as Entry);
+      });
+    }
+    return Promise.all(results);
+  }
+
+  /**
+   * Turn a record read from IndexedDB into the cache entry for it (shared by load / loadMany).
+   * A mutation may have created the entry while we awaited — never clobber it. After a deleteAll
+   * (epoch bump) what was read is stale: hand it back but do not cache it.
+   */
+  private admit(level: Level, tx: number, ty: number, id: string, rec: TileRecord | undefined, epoch: number): Entry {
+    const raced = this.cache.get(id);
+    if (raced) return raced;
+    const stale = epoch !== this.epoch;
+    const t0 = perfNow();
+    const e: Entry = { level, tx, ty, counts: rec && rec.n > 0 && !stale ? inflateSync(rec.data) : null, dirty: false };
+    if (e.counts) this.perf.inflateMs += perfNow() - t0;
+    if (!stale) { this.cache.set(id, e); this.evict(); }
+    return e;
   }
 
   /** Like load, but guarantees `counts` is allocated (a zero tile if the tile was empty). */
@@ -477,11 +585,17 @@ export class CellStore implements CellTileProvider {
     return e as Entry & { counts: Uint8Array };
   }
 
+  /**
+   * Pin an entry until the next flush. Must run before any await between a change and its flush:
+   * every load may evict clean entries, and a change on an evicted entry would never be written.
+   * If that invariant is ever broken the entry is put back so the data still lands on disk.
+   */
   private markDirty(e: Entry): void {
-    if (!e.dirty) {
-      e.dirty = true;
-      this.dirty.add(tileId(e.level, e.tx, e.ty));
-    }
+    if (e.dirty) return;
+    const id = tileId(e.level, e.tx, e.ty);
+    if (this.cache.get(id) !== e) this.cache.set(id, e);
+    e.dirty = true;
+    this.dirty.add(id);
   }
 
   /** Re-mark a cached tile dirty after a failed flush (entries are pinned while dirty, so it is still cached). */
@@ -490,13 +604,30 @@ export class CellStore implements CellTileProvider {
     if (e) { e.dirty = true; this.dirty.add(id); }
   }
 
-  /** Evict clean entries beyond the cache size (oldest first; dirty entries are pinned). */
+  /**
+   * Evict clean entries beyond the cache size (oldest first; dirty entries are pinned). Base
+   * tiles go first; overview tiles are kept until the cache is over budget by more than
+   * PINNED_OVERVIEW even without any evictable base tile.
+   */
   private evict(): void {
     if (this.cache.size <= this.cacheTiles) return;
+    // Overview tiles first, but only down to PINNED_OVERVIEW of them: a world-spanning import
+    // touches hundreds of level-10 tiles, and letting them fill the budget would evict every
+    // base tile the batch preload just read.
+    let overviews = 0;
+    for (const e of this.cache.values()) if (e.level !== 14) overviews++;
+    if (overviews > PINNED_OVERVIEW) {
+      for (const [id, e] of this.cache) {
+        if (e.dirty || e.level === 14) continue;
+        this.cache.delete(id);
+        if (--overviews <= PINNED_OVERVIEW || this.cache.size <= this.cacheTiles) break;
+      }
+      if (this.cache.size <= this.cacheTiles) return;
+    }
     for (const [id, e] of this.cache) {
-      if (e.dirty) continue;
+      if (e.dirty || e.level !== 14) continue;
       this.cache.delete(id);
-      if (this.cache.size <= this.cacheTiles) break;
+      if (this.cache.size <= this.cacheTiles) return;
     }
   }
 
@@ -507,6 +638,7 @@ export class CellStore implements CellTileProvider {
   /** Merge `src` into base tile (tx, ty) with max; updates stats, overviews, touched. */
   private async mergeBase(tx: number, ty: number, src: Uint8Array, touched: Map<number, { tx: number; ty: number }>): Promise<boolean> {
     const e = await this.ensure(14, tx, ty);
+    const t0 = perfNow();
     const dst = e.counts;
     const areas = this.areasForRow(ty);
     let changed = false, newly = 0, area = 0;
@@ -519,6 +651,8 @@ export class CellStore implements CellTileProvider {
         changed = true;
       }
     }
+    this.perf.mergeTiles++;
+    this.perf.mergeMs += perfNow() - t0;
     if (changed) await this.commitBaseChange(e, newly, area, touched);
     return changed;
   }
@@ -559,13 +693,16 @@ export class CellStore implements CellTileProvider {
 
   /** Bookkeeping after a base tile changed: stats, dirty, overview pyramid, auto-flush. */
   private async commitBaseChange(e: Entry & { counts: Uint8Array }, newly: number, area: number, touched: Map<number, { tx: number; ty: number }>): Promise<void> {
+    // Pin first: the overview loads below may evict clean entries, this one included.
+    this.markDirty(e);
+    touched.set(tileKey(14, e.tx, e.ty), { tx: e.tx, ty: e.ty });
     if (newly > 0 && !(await this.baseTileHadData(e))) this.stats.tiles++;
     this.stats.visitedCells += newly;
     this.stats.areaM2 += area;
     this.statsDirty = true;
-    this.markDirty(e);
-    touched.set(tileKey(14, e.tx, e.ty), { tx: e.tx, ty: e.ty });
+    const t0 = perfNow();
     await this.updateOverviews(e.tx, e.ty, e.counts);
+    this.perf.overviewMs += perfNow() - t0;
     await this.maybeFlush();
   }
 

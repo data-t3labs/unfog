@@ -249,8 +249,12 @@ describe('CellStore', () => {
     expect(t[(ACY & 255) * TILE_SIZE + (ACX & 255)]).toBe(1);
   });
 
-  it('bounded cache: many tiles with a tiny LRU + frequent flushes still merge correctly', async () => {
-    const s = store(undefined, { cacheTiles: 16, flushEvery: 4 });
+  // flushEvery 4: the dirty set stays small. flushEvery 64 (> cacheTiles): the pinned dirty tiles
+  // alone exceed the LRU budget, so every clean entry is evicted the moment anything else loads —
+  // a base tile must be pinned before any await between its merge and its flush, or it is lost
+  // on disk while the stats still count it (perf-1 regression: batched preloads exposed it).
+  it.each([[4], [64]])('bounded cache: many tiles with a tiny LRU + flushEvery %i still merge correctly and all land on disk', async (flushEvery) => {
+    const s = store(undefined, { cacheTiles: 16, flushEvery });
     const cellTiles = [];
     for (let i = 0; i < 40; i++) cellTiles.push({ tx: ATX + (i % 8), ty: ATY + (i >> 3), counts: mask([[i, i, 1 + (i % 5)]]) });
     const r = await s.applyPayload({ cellTiles, meta: { source: 'fow', items: 40 } });
@@ -259,9 +263,9 @@ describe('CellStore', () => {
     expect(r.touched).toHaveLength(40);
     for (let i = 0; i < 40; i++) {
       const t = await tileOrEmpty(s, 14, ATX + (i % 8), ATY + (i >> 3));
-      expect(t[i * TILE_SIZE + i]).toBe(1 + (i % 5));
+      expect(t[i * TILE_SIZE + i], `tile ${i}`).toBe(1 + (i % 5));
     }
-    expect((await s.listBaseTiles()).length).toBe(40);
+    expect((await s.listBaseTiles()).length).toBe(40); // straight from the database
     expect((await s.rebuildStats()).visitedCells).toBe(40);
   });
 

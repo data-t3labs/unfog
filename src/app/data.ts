@@ -3,6 +3,7 @@
  * backup-age nag, prebuilt regions + downloaded areas, recorded sessions (GPX export / delete),
  * delete everything.
  */
+import * as Comlink from 'comlink';
 import type { TrackSummary } from '../grid/api';
 import type { ImportPayload } from '../grid/types';
 import type { RegionManifest } from '../routing/graph-format';
@@ -120,7 +121,12 @@ export function createDataScreen(ctx: AppContext): DataScreen {
     const p = o.payload;
     status.textContent = `Applying ${p.meta.fileName ?? p.meta.source}…`;
     try {
-      await engines.grid.applyPayload(p);
+      // The cell tiles arrived here transferred from the import worker; hand them on to the grid
+      // worker the same way. A structured clone of a 40 MB chunk is ~30 ms and leaves a third copy
+      // for the GC (perf-1: renderer RSS +400 MB after a 10 000-tile import). Harmless for the
+      // in-page mock (no message boundary, nothing is detached).
+      const buffers = (p.cellTiles ?? []).map((t) => t.counts.buffer as ArrayBuffer);
+      await engines.grid.applyPayload(buffers.length ? Comlink.transfer(p, buffers) : p);
       return { ok: true, line: describePayload(p) };
     } catch (e) {
       return { ok: false, line: `${p.meta.fileName ?? p.meta.source}: ${String((e as Error)?.message ?? e)}` };
