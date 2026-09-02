@@ -18,7 +18,12 @@ export interface Engines {
   gridMock: boolean;
   routeMock: boolean;
   forceMock: boolean;
-  importFiles(files: ImportFile[], onProgress?: ImportProgressCb): Promise<ImportOutcome[]>;
+  /**
+   * Run the importers off the main thread. With `onOutcome`, each outcome is delivered (and
+   * awaited) as soon as it is produced so large archives stream instead of accumulating; the
+   * returned list then carries payloads with empty cellTiles/tracks. Mock mode ignores `onOutcome`.
+   */
+  importFiles(files: ImportFile[], onProgress?: ImportProgressCb, onOutcome?: (o: ImportOutcome) => Promise<void>): Promise<ImportOutcome[]>;
   /** Wrap a callback so it can cross a worker boundary (Comlink.proxy). Safe for in-page mocks too. */
   proxy<T extends object>(cb: T): T;
 }
@@ -93,11 +98,16 @@ export async function loadEngines(opts: { forceMock: boolean; center: LonLat; ba
     routeMock,
     forceMock: opts.forceMock,
     proxy: (cb) => Comlink.proxy(cb),
-    async importFiles(files, onProgress) {
+    async importFiles(files, onProgress, onOutcome) {
       const w = getImportWorker();
       const buffers = files.map((f) => f.bytes.buffer as ArrayBuffer);
       const payload = Comlink.transfer(files, buffers);
-      return w.importFiles(payload, onProgress ? Comlink.proxy(onProgress) : undefined, opts.forceMock);
+      return w.importFiles(
+        payload,
+        onProgress ? Comlink.proxy(onProgress) : undefined,
+        opts.forceMock,
+        onOutcome ? Comlink.proxy(onOutcome) : undefined,
+      );
     },
   };
 }

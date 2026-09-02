@@ -62,15 +62,28 @@ export function createDataScreen(ctx: AppContext): DataScreen {
         importStatus.textContent = p.total ? `${label} (${p.done ?? 0}/${p.total})` : label;
         if (p.total) bar.style.width = `${Math.max(2, Math.min(60, Math.round((60 * (p.done ?? 0)) / p.total)))}%`;
       };
-      const outcomes = await engines.importFiles(inputs, onProgress);
       const before = await engines.grid.getStats();
-      let i = 0;
-      for (const o of outcomes) {
-        i++;
-        bar.style.width = `${60 + Math.round((40 * i) / outcomes.length)}%`;
+      // Streamed path: the import worker hands each outcome over as soon as it is produced and
+      // waits for us to apply it, so a big Sync.zip is folded into the store chunk by chunk.
+      let applied = 0;
+      const onOutcome = async (o: ImportOutcome): Promise<void> => {
+        applied++;
+        bar.style.width = `${Math.min(98, 60 + Math.round((40 * applied) / (applied + 2)))}%`;
         const r = await applyOutcome(o, importStatus);
         lines.push(r.line);
         if (r.ok) anyOk = true;
+      };
+      const outcomes = await engines.importFiles(inputs, onProgress, onOutcome);
+      if (applied === 0) {
+        // Importer without streaming support (mock mode): apply the returned list instead.
+        let i = 0;
+        for (const o of outcomes) {
+          i++;
+          bar.style.width = `${60 + Math.round((40 * i) / outcomes.length)}%`;
+          const r = await applyOutcome(o, importStatus);
+          lines.push(r.line);
+          if (r.ok) anyOk = true;
+        }
       }
       const after = await engines.grid.getStats();
       addedCells = Math.max(0, after.visitedCells - before.visitedCells);
