@@ -13,9 +13,9 @@ export interface RenderSettings {
   fogAlpha: number;
   /** Fog colour RGB. Default [16, 20, 30]. */
   fogColor: [number, number, number];
-  /** Wide-feather sigma in cells (the deep halo). Default 3.5, range 2..5. */
+  /** Wide-feather sigma in cells (the deep halo). Default 4.5, range 2..6. */
   feather: number;
-  /** How much of the fog the halo lifts, 0..0.7. Default 0.5. */
+  /** How much of the fog the halo lifts, 0..0.8. Default 0.65. */
   halo: number;
   /** Cleared core: 1 = cell + 8 neighbours (~3 cells ≈ 20 m, default), 0 = the cell only (~7 m). */
   coreRadius: 0 | 1;
@@ -26,8 +26,8 @@ export interface RenderSettings {
 export const DEFAULT_RENDER_SETTINGS: RenderSettings = {
   fogAlpha: 0.8,
   fogColor: [16, 20, 30],
-  feather: 3.5,
-  halo: 0.5,
+  feather: 4.5,
+  halo: 0.65,
   coreRadius: 1,
   heatDim: 0.68,
 };

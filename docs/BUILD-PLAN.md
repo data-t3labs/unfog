@@ -54,9 +54,9 @@ Comlink for both.
 Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rendered in the grid worker from the cell tiles at
 `levelForZoom(z)`, with a margin of neighbouring cells so blur is seamless across tile edges.
 - **Fog**: coverage field = cells (count>0) drawn as a 3-cell-wide core (the cell + 8 neighbours), rendered at the tile's pixel
-  scale, then two blurs: narrow σ≈0.9 cell → `core = smoothstep(0.30, 0.85, narrow)`, wide σ≈3.5 cells →
-  `halo = 0.5 · smoothstep(0.03, 0.5, wide)`; `clear = max(core, halo)`; fog RGBA = (16,20,30, 0.80·(1−clear)).
-  Settings expose feather (wide σ 2…5 cells) and halo strength (0…0.7). Below z≈12 skip the narrow pass (cells < 1 px).
+  scale, then two blurs: narrow σ≈0.9 cell → `core = smoothstep(0.30, 0.85, narrow)`, wide σ≈4.5 cells →
+  `halo = 0.65 · smoothstep(0.03, 0.5, wide)`; `clear = max(core, halo)`; fog RGBA = (16,20,30, 0.80·(1−clear)).
+  Settings expose feather (wide σ 2…6 cells) and halo strength (0…0.8). Defaults 4.5 / 0.65 = docs/mockups/fog.jpg (data's pick, 2026-09-02). Below z≈12 skip the narrow pass (cells < 1 px).
 - **Heat**: intensity = 0.22 + 0.78·(count−1)/7 (cap 1) per cell, blurred σ≈1 cell, ramp
   0.08→(255,214,120,.55) 0.3→(255,168,70,.85) 0.55→(255,104,56,.92) 0.8→(255,56,70,.96) 1→(255,40,120,1), composited over a dim
   layer (12,15,24, 0.68). Legend: 1 · 2–3 · 4–6 · 7+.
