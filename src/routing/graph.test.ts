@@ -145,6 +145,55 @@ describe('Graph (single tile)', () => {
     expect(along.shortestM).toBe(16);
   });
 
+  // Route-quality sweep (NYC, 2026-09-02): a pin inside Green-Wood Cemetery snapped bike and drive
+  // onto the cemetery's own roads — a multi-arc island the one-hop check accepts — and the request
+  // ended in NoRouteError although a connected street lay within 300 m. No existing test has an
+  // island of more than one arc.
+  it('when the nearest road is an island, the pin snaps into the component of the other end instead (Green-Wood case)', () => {
+    // Island: a two-arc walkway E—F—G 20 m north of A—B, connected to nothing; every arc has a
+    // neighbour, so canEnterArc / canLeaveArc are true.
+    const E = [A[0] + DLON * 0.3, A[1] + 20 / 110_574], F = [A[0] + DLON * 0.5, A[1] + 20 / 110_574], G = [A[0] + DLON * 0.7, A[1] + 20 / 110_574];
+    const island = {
+      ...square,
+      nodeId: [...square.nodeId, 5, 6, 7],
+      nodeLon: [...square.nodeLon, e7(E[0]), e7(F[0]), e7(G[0])],
+      nodeLat: [...square.nodeLat, e7(E[1]), e7(F[1]), e7(G[1])],
+      nodeFlags: [...square.nodeFlags, 0, 0, 0],
+      // E: E→F | F: F→E, F→G | G: G→F
+      arcStart: [...square.arcStart, 9, 11, 12],
+      arcTo: [...square.arcTo, 5, 4, 6, 5],
+      arcLen: [...square.arcLen, 20, 20, 20, 20],
+      arcFlags: [...square.arcFlags, ALL, ALL | ArcFlag.REVERSED, ALL, ALL | ArcFlag.REVERSED],
+      arcWay: [...square.arcWay, 50, 50, 51, 51],
+      arcShapeStart: [...square.arcShapeStart, 1, 1, 1, 1],
+      arcShapeEnd: [...square.arcShapeEnd, 1, 1, 1, 1],
+    };
+    const EF = 8, FG = 10;
+    const graph = new Graph([decodeGraphTile(encodeGraphTile(island))]);
+    const spatial = new SpatialIndex(graph);
+    expect(canLeaveArc(graph, EF, ArcFlag.WALK)).toBe(true);
+    expect(canEnterArc(graph, EF, ArcFlag.WALK)).toBe(true);
+    // 5 m south of F, 15 m north of A—B: on its own the pin snaps to the island…
+    const p: [number, number] = [A[0] + DLON / 2, A[1] + 15 / 110_574];
+    expect([EF, FG]).toContain(graph.segmentId(snapPoint(spatial, p, 'walk', 'destination').arc));
+    // …but as the destination of a trip from D—A it lands on A—B, and the trip routes, in every mode.
+    const from: [number, number] = [D[0], D[1] + DLAT / 2];
+    for (const mode of ['walk', 'bike', 'drive'] as const) {
+      const res = findCandidates(graph, new MapCellLookup(), { from, to: p, mode, detour: 0.25 });
+      const direct = res.candidates[res.candidates.length - 1];
+      expect(direct.name).toBe('Direct');
+      const end = direct.coords[direct.coords.length - 1];
+      expect(end[1]).toBeCloseTo(A[1], 7); // on A—B
+      expect(res.shortestM).toBe(100); // 50 m up D—A, 50 m along A—B
+    }
+    // Symmetric: the origin near the island moves too.
+    const back = findCandidates(graph, new MapCellLookup(), { from: p, to: from, mode: 'walk', detour: 0.25 });
+    expect(back.shortestM).toBe(100);
+    // Both ends on the island: same component, nothing moves, the trip runs along it.
+    const along = findCandidates(graph, new MapCellLookup(), { from: [E[0] + DLON * 0.02, E[1]], to: [G[0] - DLON * 0.02, G[1]], mode: 'walk', detour: 0.25 });
+    expect(along.shortestM).toBe(36);
+  });
+
   it('no route at all rejects with NoRouteError naming the mode, never an empty candidate list', () => {
     const { graph, lookup } = build();
     // A→B is oneway and C↔D is a stair: a car near B's end of A—B cannot reach A's end.
@@ -161,7 +210,7 @@ describe('Graph (single tile)', () => {
     expect(() => findCandidates(g2, lookup, { from, to, mode: 'bike', detour: 0.25 })).toThrow(/^No cycling route found between these points\. Try walk or drive, or move the pin\.$/);
   });
 
-  it('walk ignores the oneway, drive and bike respect it, dismount costs ×1.5 but not in length', () => {
+  it('walk ignores the oneway, drive and bike respect it, dismount costs ×3 but not in length, and the ETA walks it', () => {
     const { graph, searcher } = build();
     const o = snapOn(graph, AB, 0.9), d = snapOn(graph, AB, 0.1);
     const walk = searcher.run(o, d, { lambda: 0, mode: 'walk' })!;
@@ -174,8 +223,11 @@ describe('Graph (single tile)', () => {
     const bike = searcher.run(o, d, { lambda: 0, mode: 'bike' })!;
     expect(Array.from(bike.arcs)).toEqual([AB, BC, CD, DA, AB]);
     expect(bike.lengthM).toBeCloseTo(10 + 101 + 100 + 100 + 10, 6);
-    expect(bike.cost).toBeCloseTo(10 + 101 + 150 + 100 + 10, 6);
+    expect(bike.cost).toBeCloseTo(10 + 101 + 300 + 100 + 10, 6);
     expect(hasImmediateUTurn(graph, bike.arcs)).toBe(false);
+    // ETA: 221 m ridden at 15 km/h + the 100 m stair pushed at 4.8 km/h = 2.1 min, not 321 m at 15 km/h = 1.3.
+    const ride = findCandidates(graph, new MapCellLookup(), { from: o.point, to: d.point, mode: 'bike', detour: 0.25 });
+    expect(ride.candidates[ride.candidates.length - 1].etaMin).toBe(2);
     // Forward on the same arc: everyone goes direct.
     const fwd = searcher.run(d, o, { lambda: 0, mode: 'drive' })!;
     expect(Array.from(fwd.arcs)).toEqual([AB]);

@@ -5,7 +5,7 @@
  * with "Direct" (the shortest) always last.
  */
 import type { LonLat, RouteCandidate, RouteRequest, RouteResult } from './api';
-import { MODE_BIT, type Mode } from './graph-format';
+import { ArcFlag, MODE_BIT, type Mode } from './graph-format';
 import type { Graph } from './graph';
 import { NoveltyScorer } from './novelty';
 import type { CellLookup } from './cells';
@@ -55,14 +55,42 @@ export interface ScoredPath extends PathResult {
  * Nearest arc for the mode that the search can actually leave (origin) or arrive on (destination);
  * the nearest usable arc may be an island (an unconnected staircase) that strands the search. When
  * no connected arc lies within SNAP_MAX_M the plain nearest usable arc is taken — a trip along that
- * one arc still routes, anything else ends in NoRouteError.
+ * one arc still routes, anything else ends in NoRouteError. With `component` (a label from
+ * `Graph.components`) only arcs of that component qualify, and nothing else is tried.
  */
-export function snapPoint(spatial: SpatialIndex, p: LonLat, mode: Mode, which: 'origin' | 'destination'): Snap {
+export function snapPoint(spatial: SpatialIndex, p: LonLat, mode: Mode, which: 'origin' | 'destination', component?: number): Snap {
   const mask = MODE_BIT[mode], graph = spatial.graph;
   const connected = which === 'origin' ? (a: number) => canLeaveArc(graph, a, mask) : (a: number) => canEnterArc(graph, a, mask);
+  if (component !== undefined) {
+    const comp = graph.components(mask);
+    const s = spatial.nearestArc(p[0], p[1], mask, SNAP_MAX_M, (a) => comp[graph.arcFrom[a]] === component && connected(a));
+    if (!s) throw new SnapError(which, p);
+    return s;
+  }
   const s = spatial.nearestArc(p[0], p[1], mask, SNAP_MAX_M, connected) ?? spatial.nearestArc(p[0], p[1], mask, SNAP_MAX_M);
   if (!s) throw new SnapError(which, p);
   return s;
+}
+
+/**
+ * Snap both ends of a trip. When they land in different components of the mode's network — one
+ * pin inside a cemetery, a park or on a pier whose roads do not join the street grid — the end
+ * whose re-snap into the other's component moves it the least is moved (within SNAP_MAX_M). If
+ * neither can move the snaps stand and the search reports NoRouteError.
+ */
+export function snapPair(spatial: SpatialIndex, from: LonLat, to: LonLat, mode: Mode): [origin: Snap, dest: Snap] {
+  let origin = snapPoint(spatial, from, mode, 'origin');
+  let dest = snapPoint(spatial, to, mode, 'destination');
+  const graph = spatial.graph, comp = graph.components(MODE_BIT[mode]);
+  const co = comp[graph.arcFrom[origin.arc]], cd = comp[graph.arcFrom[dest.arc]];
+  if (co === cd) return [origin, dest];
+  const tryIn = (p: LonLat, which: 'origin' | 'destination', c: number): Snap | null => {
+    try { return snapPoint(spatial, p, mode, which, c); } catch { return null; }
+  };
+  const dest2 = tryIn(to, 'destination', co), origin2 = tryIn(from, 'origin', cd);
+  if (dest2 && (!origin2 || dest2.distM <= origin2.distM)) dest = dest2;
+  else if (origin2) origin = origin2;
+  return [origin, dest];
 }
 
 /** Set of undirected segment ids along a path. */
@@ -126,8 +154,23 @@ export function trimGeometry(geom: LonLat[], from: number, to: number): LonLat[]
   return from <= to ? out : out.reverse();
 }
 
-export function etaMinutes(lengthM: number, mode: Mode): number {
-  return Math.round((lengthM / 1000 / SPEED_KMH[mode]) * 60);
+/** Minutes at the mode's speed; `dismountM` (bike on DISMOUNT arcs) is walked at walking speed. */
+export function etaMinutes(lengthM: number, mode: Mode, dismountM = 0): number {
+  const walked = mode === 'bike' ? Math.min(dismountM, lengthM) : 0;
+  return Math.round(((lengthM - walked) / 1000 / SPEED_KMH[mode] + walked / 1000 / SPEED_KMH.walk) * 60);
+}
+
+/** Metres of DISMOUNT arcs along a path, honouring the partial first/last arcs. */
+export function dismountMetres(graph: Graph, path: PathResult): number {
+  const n = path.arcs.length;
+  let m = 0;
+  for (let i = 0; i < n; i++) {
+    const a = path.arcs[i];
+    if (!(graph.arcFlags[a] & ArcFlag.DISMOUNT)) continue;
+    const frac = n === 1 ? path.endFrac - path.startFrac : i === 0 ? 1 - path.startFrac : i === n - 1 ? path.endFrac : 1;
+    m += graph.arcLen[a] * frac;
+  }
+  return m;
 }
 
 export function toCandidate(graph: Graph, path: ScoredPath, name: RouteCandidate['name'], mode: Mode): RouteCandidate {
@@ -138,7 +181,7 @@ export function toCandidate(graph: Graph, path: ScoredPath, name: RouteCandidate
     newM: Math.round(path.newM),
     pctNew: path.lengthM > 0 ? Math.round((100 * path.newM) / path.lengthM) : 0,
     lambda: path.lambda,
-    etaMin: etaMinutes(path.lengthM, mode),
+    etaMin: etaMinutes(path.lengthM, mode, mode === 'bike' ? dismountMetres(graph, path) : 0),
   };
 }
 
@@ -213,8 +256,7 @@ export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteReque
   const spatial = ctx.spatial ?? new SpatialIndex(graph);
   const scorer = ctx.scorer ?? new NoveltyScorer(graph, lookup);
   const searcher = ctx.searcher ?? new Searcher(graph, scorer);
-  const origin = snapPoint(spatial, req.from, req.mode, 'origin');
-  const dest = snapPoint(spatial, req.to, req.mode, 'destination');
+  const [origin, dest] = snapPair(spatial, req.from, req.to, req.mode);
   const max = Math.max(1, req.maxCandidates ?? 3);
   const sw = sweep(searcher, origin, dest, req.mode, req.detour);
   if (!sw) throw new NoRouteError(req.mode);

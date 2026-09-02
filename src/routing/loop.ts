@@ -8,13 +8,13 @@
 import type { LonLat, LoopRequest, RouteCandidate, RouteResult } from './api';
 import type { CellLookup } from './cells';
 import {
-  etaMinutes, now, pathCoords, pickDistinct, snapPoint, type CandidateContext, type ScoredPath,
+  dismountMetres, etaMinutes, now, pathCoords, pickDistinct, snapPoint, type CandidateContext, type ScoredPath,
 } from './candidates';
 import { MODE_BIT } from './graph-format';
 import type { Graph } from './graph';
 import { NoveltyScorer } from './novelty';
 import { Searcher, type PathResult } from './search';
-import { SpatialIndex, canEnterArc, canLeaveArc, type Snap } from './spatial';
+import { SpatialIndex, canEnterArc, canLeaveArc, isThroughArc, type Snap } from './spatial';
 
 export const LOOP_HEADINGS = 8;
 export const LOOP_LAMBDA = 1.5;
@@ -29,6 +29,21 @@ export const LOOP_LENGTH_WINDOW: [number, number] = [0.75, 1.25];
 export const LOOP_RADIUS_FACTOR = 0.22;
 /** Reject loops that retrace more than this fraction of their length (out-and-back). */
 export const LOOP_MAX_RETRACED = 0.5;
+/**
+ * Leg length budgets as multiples of the straight-line distance, tried in order: a leg that finds
+ * no path inside max(slack·d, d + 400) is retried with the next slack. The first value is the
+ * normal city case; the second rescues legs that leave a park or a peninsula by a winding path
+ * (a 5 km loop from the middle of Prospect Park found no loop at all with 1.6 alone).
+ */
+export const LOOP_LEG_SLACKS: readonly number[] = [1.6, 3];
+/**
+ * Reject loops thinner than this (4πA/L²: 1 = circle, 0.79 = square, 0 = out-and-back). Below
+ * 0.1 a loop is a strip narrower than ~1/12 of its length — there and back on parallel streets.
+ * NYC sweep: drops 11 of 111 routed attempts and costs no request its loops.
+ */
+export const LOOP_MIN_COMPACTNESS = 0.1;
+/** Via re-snaps per heading when a leg had to double back at a via (a dead-end pocket). */
+const LOOP_VIA_RETRIES = 2;
 const DEG = Math.PI / 180;
 
 /** Point at `distM` metres and `bearingDeg` (0 = north, clockwise) from `from`. */
@@ -44,6 +59,10 @@ export interface LoopPath extends ScoredPath {
   heading: number;
   /** Metres travelled on segments the loop had already used (out-and-back stretches). */
   retracedM: number;
+  /** Indices of the vias where the next leg could only leave by doubling back (dead-end pocket). */
+  uturnVias: number[];
+  /** Per entry of `uturnVias`: the nodes the leg reached before giving up — the pocket itself. */
+  uturnPockets: number[][];
 }
 
 function straightM(a: LonLat, b: LonLat): number {
@@ -52,16 +71,34 @@ function straightM(a: LonLat, b: LonLat): number {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-/** Route one loop through the via snaps; null if any leg fails. */
-export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: LoopRequest['mode'], heading: number): LoopPath | null {
+/**
+ * Route one loop through the via snaps; null if any leg fails. A leg never starts along the
+ * reverse of the arc the previous leg arrived by (no doubling back at the via) unless that is the
+ * only way out; a leg that finds nothing inside its length budget is retried with each further
+ * slack in `slacks`.
+ */
+export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: LoopRequest['mode'], heading: number, slacks: readonly number[] = LOOP_LEG_SLACKS): LoopPath | null {
   const graph = searcher.graph;
   const avoid = new Uint8Array(graph.arcCount);
   const stops = [origin, ...vias, origin];
   const legs: PathResult[] = [];
+  const uturnVias: number[] = [], uturnPockets: number[][] = [];
   for (let i = 1; i < stops.length; i++) {
     const a = stops[i - 1], b = stops[i];
     const d = straightM(a.point, b.point);
-    const leg = searcher.run(a, b, { lambda: LOOP_LAMBDA, mode, budget: Math.max(1.6 * d, d + 400), avoid, avoidFactor: LOOP_AVOID_FACTOR });
+    const prev = legs[legs.length - 1];
+    const arrived = prev ? prev.arcs[prev.arcs.length - 1] : -1;
+    const forbid = arrived >= 0 ? graph.arcReverse[arrived] : -1;
+    let leg: PathResult | null = null;
+    let pocket: number[] | null = null;
+    for (const forbidStartArc of forbid >= 0 ? [forbid, -1] : [-1]) {
+      for (const slack of slacks) {
+        leg = searcher.run(a, b, { lambda: LOOP_LAMBDA, mode, budget: Math.max(slack * d, d + 400), avoid, avoidFactor: LOOP_AVOID_FACTOR, forbidStartArc });
+        if (leg) break;
+      }
+      if (leg) { if (forbidStartArc < 0 && forbid >= 0) { uturnVias.push(i - 2); uturnPockets.push(pocket ?? []); } break; }
+      pocket = Array.from(searcher.lastSettled()); // everything the leg could reach without turning round
+    }
     if (!leg) return null;
     legs.push(leg);
     for (let k = 0; k < leg.arcs.length; k++) {
@@ -94,8 +131,23 @@ export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: 
     arcs: Uint32Array.from(all), lengthM, newM, cost, retracedM,
     startFrac: legs[0].startFrac, endFrac: legs[legs.length - 1].endFrac,
     settled: legs.reduce((s, l) => s + l.settled, 0),
-    lambda: LOOP_LAMBDA, segments, legs, heading,
+    lambda: LOOP_LAMBDA, segments, legs, heading, uturnVias, uturnPockets,
   };
+}
+
+/** 4πA/L² of a closed polyline (1 = circle, 0.79 = square, 0 = out-and-back). */
+export function compactness(coords: LonLat[]): number {
+  if (coords.length < 3) return 0;
+  const kx = 111_320 * Math.cos(coords[0][1] * DEG), ky = 110_574;
+  let area = 0, len = 0;
+  for (let i = 0; i < coords.length; i++) {
+    const p = coords[i], q = coords[(i + 1) % coords.length];
+    const x1 = (p[0] - coords[0][0]) * kx, y1 = (p[1] - coords[0][1]) * ky;
+    const x2 = (q[0] - coords[0][0]) * kx, y2 = (q[1] - coords[0][1]) * ky;
+    area += x1 * y2 - x2 * y1;
+    if (i < coords.length - 1) len += Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+  }
+  return len > 0 ? (4 * Math.PI * Math.abs(area) / 2) / (len * len) : 0;
 }
 
 export function loopCoords(graph: Graph, loop: LoopPath): LonLat[] {
@@ -120,17 +172,37 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
   const max = Math.max(1, req.maxCandidates ?? 3);
   const loops: LoopPath[] = [];
   const modeMask = MODE_BIT[req.mode];
-  // A via is arrived on and then left: skip island arcs that would sink a leg.
-  const viaOk = (a: number) => canEnterArc(graph, a, modeMask) && canLeaveArc(graph, a, modeMask);
+  // A via is arrived on and then left: skip island arcs that would sink a leg, anything the
+  // origin's component cannot reach at all (a cemetery's or a park's own roads), and dead-end
+  // segments (a stub path, the last block of a cul-de-sac) that force a walk-in-and-turn-round.
+  const comp = graph.components(modeMask), originComp = comp[graph.arcFrom[origin.arc]];
+  const viaOk = (a: number) => comp[graph.arcFrom[a]] === originComp && isThroughArc(graph, a, modeMask) && canEnterArc(graph, a, modeMask) && canLeaveArc(graph, a, modeMask);
   const inWindow = (l: LoopPath) => l.lengthM >= LOOP_LENGTH_WINDOW[0] * targetM && l.lengthM <= LOOP_LENGTH_WINDOW[1] * targetM;
+  // A via whose only way on is back (a dead-end pocket the one-hop check cannot see: a pier, a
+  // plaza's paths, an estate's walkways) is re-snapped outside the pocket the leg explored; the
+  // doubling-back loop is kept only if nothing better comes.
   const attempt = (heading: number, radius: number): LoopPath | null => {
     const p1 = offsetPoint(origin.point, radius, heading - 45);
     const p2 = offsetPoint(origin.point, radius, heading + 45);
-    const s1 = spatial.nearestArc(p1[0], p1[1], modeMask, radius / 2, viaOk);
-    const s2 = spatial.nearestArc(p2[0], p2[1], modeMask, radius / 2, viaOk);
-    if (!s1 || !s2 || s1.arc === s2.arc) return null;
-    return routeLoop(searcher, origin, [s1, s2], req.mode, heading);
+    const excludeArcs = new Set<number>(), excludeNodes = new Set<number>();
+    let fallback: LoopPath | null = null;
+    for (let tries = 0; tries <= LOOP_VIA_RETRIES; tries++) {
+      const ok = (a: number) => !excludeArcs.has(a) && !excludeNodes.has(graph.arcFrom[a]) && !excludeNodes.has(graph.arcTo[a]) && viaOk(a);
+      const s1 = spatial.nearestArc(p1[0], p1[1], modeMask, radius / 2, ok);
+      const s2 = spatial.nearestArc(p2[0], p2[1], modeMask, radius / 2, ok);
+      if (!s1 || !s2 || s1.arc === s2.arc) break;
+      const loop = routeLoop(searcher, origin, [s1, s2], req.mode, heading);
+      if (!loop) break;
+      if (loop.uturnVias.length === 0) return loop;
+      fallback ??= loop;
+      loop.uturnVias.forEach((v, k) => {
+        excludeArcs.add([s1, s2][v].arc);
+        for (const n of loop.uturnPockets[k]) excludeNodes.add(n);
+      });
+    }
+    return fallback;
   };
+  const coordsOf = new Map<LoopPath, LonLat[]>();
   for (let k = 0; k < LOOP_HEADINGS; k++) {
     const heading = (360 / LOOP_HEADINGS) * k;
     const radius = targetM * LOOP_RADIUS_FACTOR;
@@ -138,6 +210,9 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
     if (!loop) loop = attempt(heading, radius * 0.6); // via point in water / off the network: pull it in
     if (loop && !inWindow(loop)) loop = attempt(heading, radius * Math.min(2, Math.max(0.5, targetM / loop.lengthM)));
     if (!loop || !inWindow(loop) || loop.retracedM > LOOP_MAX_RETRACED * loop.lengthM) continue;
+    const coords = loopCoords(graph, loop);
+    if (compactness(coords) < LOOP_MIN_COMPACTNESS) continue;
+    coordsOf.set(loop, coords);
     loops.push(loop);
   }
   loops.sort((a, b) => b.newM - a.newM || Math.abs(a.lengthM - targetM) - Math.abs(b.lengthM - targetM) || a.heading - b.heading);
@@ -145,12 +220,12 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
   const names: RouteCandidate['name'][] = ['Most new', 'Balanced', 'Direct'];
   const candidates = picked.map((l, i) => ({
     name: names[Math.min(i, names.length - 1)],
-    coords: loopCoords(graph, l),
+    coords: coordsOf.get(l)!,
     lengthM: Math.round(l.lengthM),
     newM: Math.round(l.newM),
     pctNew: l.lengthM > 0 ? Math.round((100 * l.newM) / l.lengthM) : 0,
     lambda: l.lambda,
-    etaMin: etaMinutes(l.lengthM, req.mode),
+    etaMin: etaMinutes(l.lengthM, req.mode, req.mode === 'bike' ? l.legs.reduce((m, leg) => m + dismountMetres(graph, leg), 0) : 0),
   }));
   return {
     candidates,

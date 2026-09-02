@@ -15,6 +15,8 @@ export interface LatticeOptions {
   origin?: [number, number];
   /** Rows that are oneway west→east for vehicles (walk still both ways). */
   onewayRows?: number[];
+  /** Extra ways built into the same tiles (node ids ≥ 100000 are free; lattice node (c, r) is `id(c, r)`). */
+  extraWays?: TestWay[];
 }
 
 export interface Lattice {
@@ -51,5 +53,6 @@ export function makeLattice(opts: LatticeOptions = {}): Lattice {
     for (let r = 0; r < size; r++) { refs.push(id(c, r)); coords.push(at(c, r)); }
     ways.push({ id: wid++, refs, coords, fwd: ALL_MODES, rev: ALL_MODES });
   }
+  for (const w of opts.extraWays ?? []) ways.push({ ...w, id: w.id || wid++ });
   return { size, spacingM, tiles: buildTestTiles(ways), at, id };
 }

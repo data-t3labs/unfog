@@ -1,14 +1,15 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cellsAlong } from '../grid/cell';
-import { makeLattice, type Lattice } from '../../tests/fixtures/routing/lattice';
-import { encodeGraphTile, decodeGraphTile, type GraphTile } from './graph-format';
+import { ALL_MODES, makeLattice, type Lattice } from '../../tests/fixtures/routing/lattice';
+import { buildTestTiles, type TestWay } from '../../tests/fixtures/routing/tile-builder';
+import { ArcFlag, encodeGraphTile, decodeGraphTile, type GraphTile } from './graph-format';
 import { Graph } from './graph';
 import { MapCellLookup } from './cells';
 import { NoveltyScorer } from './novelty';
 import { Searcher, hasImmediateUTurn } from './search';
 import { LAMBDA_SWEEP, findCandidates, selectAlternatives, snapPoint, sweep, type ScoredPath } from './candidates';
 import { SpatialIndex } from './spatial';
-import { findLoops } from './loop';
+import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, findLoops, loopCoords, offsetPoint, routeLoop } from './loop';
 
 let lattice: Lattice;
 let tiles: GraphTile[];
@@ -149,7 +150,136 @@ describe('loop mode', () => {
       expect(c.coords[c.coords.length - 1][0]).toBeCloseTo(from[0], 5);
       expect(c.coords[c.coords.length - 1][1]).toBeCloseTo(from[1], 5);
       expect(c.pctNew).toBeGreaterThan(50);
+      expect(compactness(c.coords)).toBeGreaterThanOrEqual(LOOP_MIN_COMPACTNESS);
     }
     expect(res.candidates[0].name).toBe('Most new');
+    // The shape measure behind LOOP_MIN_COMPACTNESS: a 400 m square 0.79, a 10 × 400 m strip 0.08.
+    const sq = 400 / 110_574, x = (m: number) => m / (111_320 * Math.cos(from[1] * Math.PI / 180));
+    expect(compactness([[from[0], from[1]], [from[0] + x(400), from[1]], [from[0] + x(400), from[1] - sq], [from[0], from[1] - sq], [from[0], from[1]]])).toBeCloseTo(Math.PI / 4, 2);
+    expect(compactness([[from[0], from[1]], [from[0] + x(400), from[1]], [from[0] + x(400), from[1] - sq / 40], [from[0], from[1] - sq / 40], [from[0], from[1]]])).toBeLessThan(LOOP_MIN_COMPACTNESS);
+  });
+
+  // Route-quality sweep (NYC, 2026-09-02): 7 of 15 loops doubled back at a via point — the next leg
+  // left along the reverse of the arc the previous leg arrived by (a→b→a in the coordinates). No
+  // existing test looks at how legs join.
+  it('a leg never doubles back on the street the previous leg arrived by, unless that is the only way out', () => {
+    const hasABA = (coords: Array<[number, number]>) => {
+      for (let i = 2; i < coords.length; i++) if (coords[i][0] === coords[i - 2][0] && coords[i][1] === coords[i - 2][1]) return true;
+      return false;
+    };
+    // Lattice: via 1 sits 15 m past the (12,10) intersection on the block towards (13,10); via 2 is
+    // south-west of it, so the cheapest second leg turns straight round and walks the 15 m back.
+    const origin = snapPoint(spatial, lattice.at(10, 10), 'walk', 'origin');
+    const n1210 = lattice.at(12, 10), n1310 = lattice.at(13, 10);
+    const p1: [number, number] = [n1210[0] + (n1310[0] - n1210[0]) * 0.15, n1210[1]];
+    const via1 = spatial.nearestArc(p1[0], p1[1], ArcFlag.WALK)!;
+    const via2 = spatial.nearestArc(lattice.at(11, 12)[0], lattice.at(11, 12)[1], ArcFlag.WALK)!;
+    const loop = routeLoop(searcher, origin, [via1, via2], 'walk', 0)!;
+    expect(loop).not.toBeNull();
+    const last1 = loop.legs[0].arcs[loop.legs[0].arcs.length - 1], first2 = loop.legs[1].arcs[0];
+    expect(graph.arcReverse[last1]).not.toBe(first2);
+    expect(hasABA(loopCoords(graph, loop))).toBe(false);
+    expect(loop.legs[1].lengthM).toBeCloseTo(485, 0); // 85 m on to (13,10), two blocks south, two west
+    // Dead end: a spur B—S off a street A—B—C; via 1 near the end of the spur. Nothing leaves S, so
+    // the second leg may turn round after all (the loop is not lost).
+    const A: [number, number] = [-73.9453125 - 0.002, 40.75], dLon = 100 / (111_320 * Math.cos(40.75 * Math.PI / 180)), dLat = 100 / 110_574;
+    const B: [number, number] = [A[0] + dLon, A[1]], C: [number, number] = [A[0] + 2 * dLon, A[1]], S: [number, number] = [B[0], B[1] - 0.6 * dLat];
+    const g = new Graph([...buildTestTiles([
+      { id: 1, refs: [1, 2, 3], coords: [A, B, C], fwd: ALL_MODES, rev: ALL_MODES },
+      { id: 2, refs: [2, 4], coords: [B, S], fwd: ALL_MODES, rev: ALL_MODES },
+    ]).values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+    const sp = new SpatialIndex(g), se = new Searcher(g, new NoveltyScorer(g, new MapCellLookup()));
+    const o = snapPoint(sp, A, 'walk', 'origin');
+    const nearS: [number, number] = [S[0], S[1] + 0.1 * dLat];
+    const spur = sp.nearestArc(nearS[0], nearS[1], ArcFlag.WALK)!;
+    const c = sp.nearestArc(C[0], C[1], ArcFlag.WALK)!;
+    const deadEnd = routeLoop(se, o, [spur, c], 'walk', 0)!;
+    expect(deadEnd).not.toBeNull();
+    expect(g.arcReverse[deadEnd.legs[0].arcs[deadEnd.legs[0].arcs.length - 1]]).toBe(deadEnd.legs[1].arcs[0]);
+    expect(deadEnd.legs[1].lengthM).toBeCloseTo(150, 0);
+  });
+
+  // Sweep (after the join fix above): the remaining a→b→a joins were all via points that had
+  // snapped onto a dead-end stub — the only way on is back. No test looks at where vias land.
+  it('via points never sit on a dead-end segment (the loop would walk in and turn round)', () => {
+    const hasABA = (coords: Array<[number, number]>) => {
+      for (let i = 2; i < coords.length; i++) if (coords[i][0] === coords[i - 2][0] && coords[i][1] === coords[i - 2][1]) return true;
+      return false;
+    };
+    // 11 × 11 lattice; a 16 m stub leaves node (2,2) towards the exact spot where heading 0's
+    // first via target falls (0.22 × 2 km from the centre at −45°), so it is the nearest road
+    // there. Everything but the stub is visited, so a loop through the stub is the newest one.
+    const centre: [number, number] = [-73.9453125, 40.735];
+    const size = 11, spacingM = 100;
+    const origin: [number, number] = [centre[0] - 5 * (spacingM / (111_320 * Math.cos(centre[1] * Math.PI / 180))), centre[1] + 5 * (spacingM / 110_574)];
+    const viaTarget = offsetPoint(centre, 2000 * LOOP_RADIUS_FACTOR, -45);
+    const plain = makeLattice({ size, spacingM, origin });
+    const n22 = plain.at(2, 2), mid: [number, number] = [(n22[0] + viaTarget[0]) / 2, (n22[1] + viaTarget[1]) / 2];
+    // Two layouts: the stub as one segment (its far end is a dead end — rejected outright), and a
+    // stub that continues past the via target as a 4-segment zig-zag path, every point of which is
+    // nearer the target than any street. Each segment has a neighbour, so only a leg's failure to
+    // go on reveals the pocket — the via is then re-snapped outside everything that leg reached,
+    // not just off the one arc (excluding one arc at a time would land on the next pocket arc).
+    const kx = 111_320 * Math.cos(centre[1] * Math.PI / 180), ky = 110_574;
+    const ux = (mid[0] - n22[0]) * kx, uy = (mid[1] - n22[1]) * ky, un = Math.hypot(ux, uy);
+    const u: [number, number] = [ux / un, uy / un], v: [number, number] = [-u[1], u[0]]; // metres, u = away from the grid node
+    const step = (p: [number, number], d: [number, number], m: number): [number, number] => [p[0] + (d[0] * m) / kx, p[1] + (d[1] * m) / ky];
+    const pa = step(viaTarget, u, 5), pb = step(pa, v, 5), pc = step(pb, u, -5), pd = step(pc, v, 5);
+    const layouts: TestWay[][] = [
+      [{ id: 0, refs: [plain.id(2, 2), 100000], coords: [n22, viaTarget], fwd: ALL_MODES, rev: ALL_MODES }],
+      [
+        { id: 0, refs: [plain.id(2, 2), 100000], coords: [n22, viaTarget], fwd: ALL_MODES, rev: ALL_MODES },
+        { id: 0, refs: [100000, 100001], coords: [viaTarget, pa], fwd: ALL_MODES, rev: ALL_MODES },
+        { id: 0, refs: [100001, 100002], coords: [pa, pb], fwd: ALL_MODES, rev: ALL_MODES },
+        { id: 0, refs: [100002, 100003], coords: [pb, pc], fwd: ALL_MODES, rev: ALL_MODES },
+        { id: 0, refs: [100003, 100004], coords: [pc, pd], fwd: ALL_MODES, rev: ALL_MODES },
+      ],
+    ];
+    for (const extraWays of layouts) {
+      const stub = makeLattice({ size, spacingM, origin, extraWays });
+      const g = new Graph([...stub.tiles.values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+      expect(g.nodeCount).toBe(size * size + extraWays.length);
+      const seen = new MapCellLookup();
+      for (let r = 0; r < size; r++) for (const [cx, cy] of cellsAlong([stub.at(0, r), stub.at(size - 1, r)], { stepM: 3 })) seen.mark(cx, cy, 1, 1);
+      for (let c = 0; c < size; c++) for (const [cx, cy] of cellsAlong([stub.at(c, 0), stub.at(c, size - 1)], { stepM: 3 })) seen.mark(cx, cy, 1, 1);
+      const sp = new SpatialIndex(g), sc = new NoveltyScorer(g, seen), se = new Searcher(g, sc);
+      const stubSnap = sp.nearestArc(viaTarget[0], viaTarget[1], ArcFlag.WALK)!;
+      expect(stubSnap.distM).toBeLessThan(1);
+      // The whole stub is a dead-end tree; the grid (every node on a cycle) is not.
+      const dead = g.deadEnds(ArcFlag.WALK);
+      expect(dead.reduce((a, b) => a + b, 0)).toBe(extraWays.length);
+      expect(dead[g.arcFrom[stubSnap.arc]] + dead[g.arcTo[stubSnap.arc]]).toBeGreaterThan(0);
+      const res = findLoops(g, seen, { from: stub.at(5, 5), mode: 'walk', targetKm: 2 }, { spatial: sp, scorer: sc, searcher: se });
+      expect(res.candidates.length).toBeGreaterThanOrEqual(1);
+      for (const c of res.candidates) {
+        expect(hasABA(c.coords)).toBe(false);
+        for (const p of c.coords) expect(Math.abs(p[0] - viaTarget[0]) + Math.abs(p[1] - viaTarget[1])).toBeGreaterThan(1e-6);
+      }
+    }
+  });
+
+  // Sweep: a 5 km bike loop from the middle of Prospect Park found NO loop — every leg to a via
+  // outside the park needs more than max(1.6·d, d + 400) m of winding path, so all 16 attempts
+  // failed and the user got an empty sheet. No existing test has a leg longer than its ellipse.
+  it('a leg that needs more than the default detour is retried with a looser budget instead of losing the loop', () => {
+    // A U-shaped path O–P1–P2–V in three ways (900 m of path, 300 m as the crow flies; the corners
+    // are graph nodes, so the ellipse test applies) and a 50 m stub at V.
+    const O: [number, number] = [-73.9453125 + 0.003, 40.75], kx = 111_320 * Math.cos(40.75 * Math.PI / 180), ky = 110_574;
+    const P1: [number, number] = [O[0], O[1] - 300 / ky], P2: [number, number] = [O[0] + 300 / kx, O[1] - 300 / ky];
+    const V: [number, number] = [O[0] + 300 / kx, O[1]], W: [number, number] = [V[0] + 50 / kx, V[1]];
+    const g = new Graph([...buildTestTiles([
+      { id: 1, refs: [1, 2], coords: [O, P1], fwd: ALL_MODES, rev: ALL_MODES },
+      { id: 2, refs: [2, 3], coords: [P1, P2], fwd: ALL_MODES, rev: ALL_MODES },
+      { id: 3, refs: [3, 4], coords: [P2, V], fwd: ALL_MODES, rev: ALL_MODES },
+      { id: 4, refs: [4, 5], coords: [V, W], fwd: ALL_MODES, rev: ALL_MODES },
+    ]).values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+    const sp = new SpatialIndex(g), se = new Searcher(g, new NoveltyScorer(g, new MapCellLookup()));
+    const o = snapPoint(sp, O, 'walk', 'origin');
+    const via = sp.nearestArc(V[0] + 25 / kx, V[1], ArcFlag.WALK)!;
+    expect(g.segmentId(via.arc)).not.toBe(g.segmentId(o.arc));
+    expect(routeLoop(se, o, [via], 'walk', 0, [1.6])).toBeNull(); // default slack only: a 925 m leg for 325 m straight is over the ellipse
+    const loop = routeLoop(se, o, [via], 'walk', 0)!;
+    expect(loop).not.toBeNull();
+    expect(loop.lengthM).toBeCloseTo(1850, 0);
   });
 });

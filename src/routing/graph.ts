@@ -6,6 +6,7 @@
  */
 import { ArcFlag, NodeFlag, type GraphTile } from './graph-format';
 import type { LonLat } from './api';
+import { usableFlags } from './spatial';
 
 export class Graph {
   readonly nodeCount: number;
@@ -34,6 +35,8 @@ export class Graph {
   /** Tiles merged (for diagnostics). */
   readonly tileKeys: string[];
   readonly bbox: [west: number, south: number, east: number, north: number];
+  private readonly componentCache = new Map<number, Uint32Array>();
+  private readonly deadEndCache = new Map<number, Uint8Array>();
 
   constructor(tiles: readonly GraphTile[]) {
     // Pass 1: global node indices (dedupe by OSM id) and arc counts per global from-node.
@@ -183,6 +186,68 @@ export class Graph {
     const out: LonLat[] = new Array(count);
     for (let i = 0; i < count; i++) out[i] = this.arcPoint(arc, i, [0, 0]);
     return out;
+  }
+
+  /**
+   * Connected-component label per node for a mode: an arc usable by the mode in either direction
+   * joins its two ends (oneways are ignored, so this is reachability up to one-way traps). Used
+   * to keep snaps off islands — a cemetery's or a park's own roads, a pier — that the one-hop
+   * check cannot see. Union-find over every arc, computed once per mode and cached.
+   */
+  components(modeMask: number): Uint32Array {
+    const cached = this.componentCache.get(modeMask);
+    if (cached) return cached;
+    const n = this.nodeCount;
+    const parent = new Uint32Array(n);
+    for (let i = 0; i < n; i++) parent[i] = i;
+    const find = (x: number): number => {
+      while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+      return x;
+    };
+    for (let a = 0; a < this.arcCount; a++) {
+      if (!usableFlags(this.arcFlags[a], modeMask)) continue;
+      const u = find(this.arcFrom[a]), v = find(this.arcTo[a]);
+      if (u !== v) parent[u] = v;
+    }
+    const label = new Uint32Array(n);
+    for (let i = 0; i < n; i++) label[i] = find(i);
+    this.componentCache.set(modeMask, label);
+    return label;
+  }
+
+  /**
+   * 1 for every node in a dead-end tree of the mode's network — a pier, a stub path, a cul-de-sac,
+   * an estate's walkways with one entrance — found by peeling degree-1 nodes until only the
+   * 2-core (nodes on or between cycles) is left. Undirected, like `components`. Cached per mode.
+   */
+  deadEnds(modeMask: number): Uint8Array {
+    const cached = this.deadEndCache.get(modeMask);
+    if (cached) return cached;
+    const n = this.nodeCount;
+    const deg = new Uint32Array(n);
+    const usable = (a: number): boolean => {
+      const r = this.arcReverse[a];
+      return usableFlags(this.arcFlags[a], modeMask) || (r >= 0 && usableFlags(this.arcFlags[r], modeMask));
+    };
+    for (let a = 0; a < this.arcCount; a++) {
+      if (this.segmentId(a) !== a || !usable(a)) continue;
+      deg[this.arcFrom[a]]++; deg[this.arcTo[a]]++;
+    }
+    const dead = new Uint8Array(n);
+    const stack: number[] = [];
+    for (let i = 0; i < n; i++) if (deg[i] <= 1) stack.push(i);
+    while (stack.length) {
+      const u = stack.pop()!;
+      if (dead[u]) continue;
+      dead[u] = 1;
+      for (let a = this.arcStart[u]; a < this.arcStart[u + 1]; a++) {
+        if (!usable(a)) continue;
+        const v = this.arcTo[a];
+        if (!dead[v] && --deg[v] <= 1) stack.push(v);
+      }
+    }
+    this.deadEndCache.set(modeMask, dead);
+    return dead;
   }
 
   /** Approximate resident size in bytes (diagnostics). */

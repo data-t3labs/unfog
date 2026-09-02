@@ -1,7 +1,7 @@
 /**
  * Penalised A* over a Graph.
  *
- *   cost(arc) = len · (1 + λ · (1 − nov)) · dismount(×1.5, bike on DISMOUNT arcs) · avoid(×k)
+ *   cost(arc) = len · (1 + λ · (1 − nov)) · dismount(×3, bike on DISMOUNT arcs) · avoid(×k)
  *
  * The heuristic is the straight-line distance to the destination snap point, admissible because
  * every multiplier is ≥ 1 so cost ≥ length. Ellipse pruning discards a node when the LENGTH of
@@ -22,7 +22,13 @@ import { usableFlags, type Snap } from './spatial';
 
 const DEG = Math.PI / 180;
 const HEURISTIC_SAFETY = 0.99;
-export const DISMOUNT_FACTOR = 1.5;
+/**
+ * Bike on a DISMOUNT arc (footway, steps): ×3 ≈ walking speed vs riding speed (4.8 vs 15 km/h),
+ * so a pushed metre costs what it takes in time. Was ×1.5 — the NYC sweep then sent "Most new"
+ * rides across Prospect Park on footpaths for a kilometre (p90 647 m, max 1,102 m pushed); ×3
+ * gives p90 116 m at the same budget and the same novelty gain.
+ */
+export const DISMOUNT_FACTOR = 3;
 
 export interface SearchOptions {
   lambda: number;
@@ -35,6 +41,13 @@ export interface SearchOptions {
   avoid?: Uint8Array | null;
   /** Default 5. */
   avoidFactor?: number;
+  /**
+   * Arc (in travel direction) the search may NOT leave the origin along — the reverse of the arc
+   * a loop's previous leg arrived by, so the next leg does not double back on the same street.
+   * The other direction of the origin arc stays available; the caller retries without it when
+   * the origin is a dead end.
+   */
+  forbidStartArc?: number;
 }
 
 export interface PathResult {
@@ -120,6 +133,9 @@ export class Searcher {
   private readonly closed: Uint8Array;
   private readonly heap = new MinHeap(4096);
   private readonly target: number;
+  /** Nodes settled by the last run, in order (diagnostics; loop mode reads a failed leg's pocket). */
+  private readonly settledList: Int32Array;
+  private settledN = 0;
 
   constructor(readonly graph: Graph, readonly scorer: NoveltyScorer) {
     const n = graph.nodeCount + 1; // + virtual target
@@ -129,6 +145,12 @@ export class Searcher {
     this.prevArc = new Int32Array(n);
     this.prevNode = new Int32Array(n);
     this.closed = new Uint8Array(n);
+    this.settledList = new Int32Array(n);
+  }
+
+  /** Graph nodes the last run settled (excluding the virtual target). Valid until the next run. */
+  lastSettled(): Int32Array {
+    return this.settledList.subarray(0, this.settledN);
   }
 
   /**
@@ -152,10 +174,12 @@ export class Searcher {
     const modeMask = MODE_BIT[mode];
     const avoid = opts.avoid ?? null;
     const avoidFactor = opts.avoidFactor ?? 5;
+    const forbidStart = opts.forbidStartArc ?? -1;
     const ellipse = (opts.budget ?? Infinity) * (opts.ellipseFactor ?? 1.05);
     const g = this.g, glen = this.glen, prevArc = this.prevArc, prevNode = this.prevNode, closed = this.closed, heap = this.heap;
     const T = this.target;
     g.fill(Infinity); glen.fill(0); prevArc.fill(-1); prevNode.fill(-1); closed.fill(0); heap.clear();
+    this.settledN = 0;
 
     const [dlon, dlat] = dest.point;
     const kx = 111_320 * Math.cos(dlat * DEG) * HEURISTIC_SAFETY, ky = 110_574 * HEURISTIC_SAFETY;
@@ -176,8 +200,8 @@ export class Searcher {
         heap.push(c + heur(node), node);
       }
     };
-    if (usable(oa)) relaxStart(oa, 1 - ot, graph.arcTo[oa]);
-    if (ora >= 0 && usable(ora)) relaxStart(ora, ot, graph.arcTo[ora]);
+    if (usable(oa) && oa !== forbidStart) relaxStart(oa, 1 - ot, graph.arcTo[oa]);
+    if (ora >= 0 && usable(ora) && ora !== forbidStart) relaxStart(ora, ot, graph.arcTo[ora]);
 
     // --- destination: virtual target reached from either endpoint of its arc ---
     let da = dest.arc, ds = dest.t;
@@ -187,12 +211,12 @@ export class Searcher {
     const dUsable = usable(da), drUsable = dra >= 0 && usable(dra);
     if (da === oa) {
       // Same arc: direct partial traversal (forward if ds ≥ ot, backward via the reverse arc).
-      if (dUsable && ds >= ot) {
+      if (dUsable && ds >= ot && oa !== forbidStart) {
         const f = ds - ot;
         g[T] = cost(oa) * f; glen[T] = graph.arcLen[oa] * f; prevArc[T] = oa; prevNode[T] = -2;
         heap.push(g[T], T);
       }
-      if (ora >= 0 && usable(ora) && ot >= ds) {
+      if (ora >= 0 && usable(ora) && ot >= ds && ora !== forbidStart) {
         const f = ot - ds, c = cost(ora) * f;
         if (c < g[T]) { g[T] = c; glen[T] = graph.arcLen[ora] * f; prevArc[T] = ora; prevNode[T] = -2; heap.push(c, T); }
       }
@@ -205,6 +229,7 @@ export class Searcher {
       closed[n] = 1;
       settled++;
       if (n === T) break;
+      this.settledList[this.settledN++] = n;
       const gn = g[n], ln = glen[n];
       const arrival = prevArc[n];
       const forbid = arrival >= 0 ? graph.arcReverse[arrival] : -1;

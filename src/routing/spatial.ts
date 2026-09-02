@@ -179,6 +179,16 @@ export function canEnterArc(graph: Graph, arc: number, modeMask: number): boolea
   return false;
 }
 
+/**
+ * Whether `arc` lies in the 2-core of the mode's network — neither end is in a dead-end tree
+ * (see `Graph.deadEnds`). A via point on a dead-end segment, however far the stub goes on, makes
+ * the loop walk in to the via and turn round.
+ */
+export function isThroughArc(graph: Graph, arc: number, modeMask: number): boolean {
+  const dead = graph.deadEnds(modeMask);
+  return dead[graph.arcFrom[arc]] === 0 && dead[graph.arcTo[arc]] === 0;
+}
+
 /** Utility for tests/tools: world coords of a bucket's north-west corner. */
 export function bucketOrigin(bx: number, by: number): LonLat {
   return worldToLonLat(Math.min(WORLD, bx << BUCKET_SHIFT), Math.min(WORLD, by << BUCKET_SHIFT));
