@@ -144,7 +144,7 @@ extract / `public/graph/<region>` is absent.
 - Session → GPX (for FoW's Import folder).
 
 ### 2.6 PWA / iOS
-- vite-plugin-pwa autoUpdate; precache app shell; runtime CacheFirst for basemap + graph; "Download region" pre-fills the graph cache.
+- vite-plugin-pwa prompt mode (`registerType: 'prompt'` + workbox `clientsClaim`): a new worker installs and waits; the open page keeps its own worker and precache (lazy chunks still resolve after a deploy) until "Update available — Reload" sends SKIP_WAITING → `controllerchange` → one reload — never on its own, never mid-recording (`src/app/pwa.ts`); precache app shell; runtime CacheFirst for basemap + graph; "Download region" pre-fills the graph cache.
 - `navigator.storage.persist()` on first import; export nag when last backup > 14 days.
 - Not standalone on iOS → install card (Share → Add to Home Screen → Add) with a "continue in Safari" link.
 - Location only from a user gesture; on PERMISSION_DENIED show the Settings path + the iOS 26 "Reset Location & Privacy" tip.

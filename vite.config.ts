@@ -36,7 +36,11 @@ export default defineConfig({
   worker: { format: 'es' },
   plugins: [
     VitePWA({
-      registerType: 'autoUpdate',
+      // Prompt mode: a new worker installs and WAITS. The open page keeps its own worker (and its
+      // precache, so lazy chunks of the running bundle still resolve after a deploy) until the user
+      // taps Reload on the "Update available" toast (src/app/pwa.ts sends SKIP_WAITING) or every
+      // window is closed. autoUpdate would activate at once and drop the old chunks (QA flows-2 F4).
+      registerType: 'prompt',
       includeAssets: ['icons/*.png', 'icons/*.svg'],
       manifest: {
         id: '/unfog/',
@@ -56,6 +60,9 @@ export default defineConfig({
         ],
       },
       workbox: {
+        // skipWaiting stays off (prompt mode); once the waiting worker is told to activate it must
+        // claim the open page so `controllerchange` fires and pwa.ts can reload onto the new build.
+        clientsClaim: true,
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         navigateFallback: '/unfog/index.html',

@@ -54,11 +54,13 @@ export function parseOverpassJson(json: string | unknown): OsmWay[] {
   return ways;
 }
 
-/** Extra knobs beyond the fixed OverpassOptions (tests inject zero delays and a fake fetch). */
+/** Extra knobs beyond the fixed OverpassOptions (tests inject zero delays, a fake fetch, a spy sleep). */
 export interface OverpassFetchOptions extends OverpassOptions {
   alternates?: readonly string[];
   retryDelaysMs?: readonly number[];
   fetch?: typeof fetch;
+  /** The back-off sleep between attempts (default: a signal-aware setTimeout). */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   onAttempt?: (info: { endpoint: string; attempt: number; error?: unknown }) => void;
 }
 
@@ -71,7 +73,8 @@ export class OverpassError extends Error {
 
 /**
  * POST the query, parse ways. Retries 429/502/503/504 and network errors with backoff
- * (3 attempts per endpoint), then falls through to the alternate endpoints. Honours `signal`.
+ * (3 attempts per endpoint), then falls through to the alternate endpoints; the last attempt on
+ * the last endpoint fails at once (no trailing sleep). Honours `signal`.
  */
 export const fetchOverpassWays = async (
   bbox: [west: number, south: number, east: number, north: number],
@@ -80,12 +83,14 @@ export const fetchOverpassWays = async (
   const endpoints = [opts.endpoint ?? DEFAULT_OVERPASS_ENDPOINT, ...(opts.alternates ?? ALTERNATE_OVERPASS_ENDPOINTS)];
   const delays = opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
   const doFetch = opts.fetch ?? globalThis.fetch;
+  const doSleep = opts.sleep ?? sleep;
   const timeoutS = opts.timeoutS ?? 90;
   const body = 'data=' + encodeURIComponent(overpassQuery(bbox, timeoutS));
   const signal = opts.signal;
   let lastError: unknown;
 
-  for (const endpoint of endpoints) {
+  for (let ei = 0; ei < endpoints.length; ei++) {
+    const endpoint = endpoints[ei];
     for (let attempt = 1; attempt <= delays.length; attempt++) {
       throwIfAborted(signal);
       opts.onAttempt?.({ endpoint, attempt });
@@ -93,7 +98,12 @@ export const fetchOverpassWays = async (
         const res = await doFetch(endpoint, {
           method: 'POST',
           body,
-          // text/plain keeps the browser request preflight-free (research §1a). Node ignores User-Agent restrictions.
+          // text/plain keeps the browser request preflight-free (research §1a).
+          // overpass-api.de answers HTTP 406 to a browser User-Agent that arrives without a Referer
+          // (QA flows-2 F5). Browsers send one under the default referrer policy — the page's or the
+          // route worker's origin — so never add `<meta name="referrer" content="no-referrer">` or a
+          // `referrerPolicy` here. Node sends no Referer and must identify itself instead: the
+          // default User-Agent below (what the build-graph CLI uses) gets a 200 without one.
           headers: { 'Content-Type': 'text/plain;charset=UTF-8', ...(isBrowser() ? {} : { 'User-Agent': opts.userAgent ?? DEFAULT_USER_AGENT }) },
           signal,
         });
@@ -107,8 +117,10 @@ export const fetchOverpassWays = async (
         opts.onAttempt?.({ endpoint, attempt, error: err });
         // Non-retryable HTTP status (400 bad query, 404 …): don't hammer the same endpoint again.
         if (err instanceof OverpassError && err.status !== undefined && !RETRYABLE_STATUS.has(err.status)) break;
-        // Retryable: sleep, then retry (the last sleep precedes the switch to the next endpoint).
-        await sleep(delays[attempt - 1] ?? 0, signal);
+        // Retryable: sleep, then retry (the last sleep on an endpoint precedes the switch to the next
+        // one). After the final attempt on the final endpoint there is nothing to wait for: fail now.
+        const finalAttempt = ei === endpoints.length - 1 && attempt === delays.length;
+        if (!finalAttempt) await doSleep(delays[attempt - 1] ?? 0, signal);
       }
     }
   }

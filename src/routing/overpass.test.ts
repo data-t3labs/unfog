@@ -101,6 +101,23 @@ describe('fetchOverpassWays', () => {
     await expect(fetchOverpassWays(bbox, { fetch: fetch as typeof globalThis.fetch, retryDelaysMs: [0, 0, 0], alternates: [] })).rejects.toThrow('network down');
   });
 
+  // QA flows-2 F9: the ladder used to sleep a full 60 s after the last failed attempt before throwing.
+  it('does not sleep after the final attempt on the final endpoint (but does before switching endpoints)', async () => {
+    const slept: number[] = [];
+    const sleep = async (ms: number) => { slept.push(ms); };
+    let n = 0;
+    const fetch = async () => { n++; return new Response('busy', { status: 503 }); };
+    await expect(fetchOverpassWays(bbox, { fetch: fetch as typeof globalThis.fetch, sleep, retryDelaysMs: [1, 2, 3], alternates: ['https://alt.example/api'] })).rejects.toBeInstanceOf(OverpassError);
+    expect(n).toBe(6);
+    expect(slept).toEqual([1, 2, 3, 1, 2]); // the 6th failure throws at once
+
+    slept.length = 0;
+    n = 0;
+    await expect(fetchOverpassWays(bbox, { fetch: fetch as typeof globalThis.fetch, sleep, retryDelaysMs: [1, 2, 3], alternates: [] })).rejects.toBeInstanceOf(OverpassError);
+    expect(n).toBe(3);
+    expect(slept).toEqual([1, 2]);
+  });
+
   it('honours an AbortSignal during the backoff sleep', async () => {
     const ac = new AbortController();
     let n = 0;

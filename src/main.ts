@@ -41,7 +41,7 @@ async function boot(): Promise<void> {
   const mount = document.getElementById('app');
   if (!mount) throw new Error('#app missing');
   mount.replaceChildren(el('div', { class: 'boot' }, el('span', { class: 'spinner' }), 'Loading Unfog…'));
-  initPwa();
+  const pwa = initPwa();
 
   const params = new URLSearchParams(location.search);
   const forceMock = params.get('mock') === '1';
@@ -62,6 +62,7 @@ async function boot(): Promise<void> {
   const locationMgr = new LocationManager();
   const recordHooks: RecorderEvents = { onUpdate() {}, onWakeLock() {} };
   const recorder = new Recorder(engines.grid, locationMgr, recordHooks);
+  pwa.isRecording = () => recorder.status === 'recording'; // an app update is never applied mid-walk
 
   let routeSheet: ReturnType<typeof createRouteSheet>;
   let statsScreen: ReturnType<typeof createStatsScreen>;

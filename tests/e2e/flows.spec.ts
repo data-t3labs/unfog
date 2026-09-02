@@ -8,10 +8,11 @@
  *      for the query the app sends). One extra test goes to the REAL overpass-api.de and skips
  *      itself when the server does not answer (it was returning 504 "too busy" while this was
  *      written).
- *   B. Service-worker update — a v1 build is served by a tiny static server in this file, a v2
- *      build (different `UNFOG_BUILD` stamp, see vite.config.ts) is swapped in, and the update
- *      must show "Update available — Reload" without reloading on its own (a recording in
- *      progress keeps going), then Reload lands on v2 with a clean precache.
+ *   B. Service-worker update (prompt mode) — a v1 build is served by a tiny static server in this
+ *      file, a v2 build (different `UNFOG_BUILD` stamp, see vite.config.ts) is swapped in, and the
+ *      update must show "Update available — Reload" while the new worker WAITS: no reload, no
+ *      takeover (v1's chunks still come from the old worker's precache), a recording in progress
+ *      keeps going and refuses the Reload; then Reload lands on v2, once, with a clean precache.
  *   C. A 5 MB Apple-Health-style GPX set imported while OFFLINE through the Data screen
  *      (production build + service worker on the preview server, like real.spec's offline block).
  *
@@ -689,15 +690,19 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     test.skip(Boolean(process.env.PW_NO_PREVIEW), 'PW_NO_PREVIEW set: production builds skipped');
   });
 
-  test('B1. v2 deploy → "Update available — Reload" toast, no forced reload, a recording keeps going; Reload → v2 with a clean precache', async ({ page, context }) => {
+  test('B1. v2 deploy → "Update available — Reload" toast, the new worker waits (v1 chunks still served), a recording keeps going and refuses Reload; Reload → v2 once, clean precache', async ({ page, context }) => {
     test.setTimeout(240_000);
     test.info().annotations.push({ type: 'builds', description: buildNote });
+    const loads = () => page.evaluate(() => Number(sessionStorage.getItem('qa.loads') ?? 0));
+    const swEvents = () => page.evaluate(() => (window as unknown as UnfogWindow).__swEvents ?? []);
     const b = await boot(page, {
       readyTimeout: 120_000,
       init: () => {
         const w = window as unknown as UnfogWindow;
         w.__swEvents = [];
         navigator.serviceWorker?.addEventListener('controllerchange', () => w.__swEvents!.push('controllerchange'));
+        // One increment per document: proves Reload reloads exactly once (and nothing else does).
+        sessionStorage.setItem('qa.loads', String(Number(sessionStorage.getItem('qa.loads') ?? 0) + 1));
       },
     });
     await page.waitForFunction(() => navigator.serviceWorker?.controller != null, null, { timeout: 60_000 });
@@ -754,21 +759,53 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     await walk(context, page, [-73.9568 - 4 * 0.0002, 40.7176 + 4 * 0.00008], [-0.0002, 0.00008], 4);
     const distAfter = parseDistanceM((await dist.textContent()) ?? '');
     expect(distAfter).toBeGreaterThan(distBefore + 30);
-    expect(await page.evaluate(() => (window as unknown as UnfogWindow).__swEvents), 'the new worker took control without a reload (skipWaiting + clientsClaim)').toContain('controllerchange');
+    // Prompt mode: the new worker is installed and WAITING; the old one still controls the page.
+    expect(await swEvents(), 'no takeover before Reload (registerType prompt, skipWaiting off)').not.toContain('controllerchange');
+    const swStates = await page.evaluate(async () => {
+      const r = await navigator.serviceWorker.getRegistration();
+      return { waiting: r?.waiting?.state ?? null, active: r?.active?.state ?? null, controlled: navigator.serviceWorker.controller != null };
+    });
+    expect(swStates).toEqual({ waiting: 'installed', active: 'activated', controlled: true });
     await shot(page, 'sw-update-toast');
     // The toast stays until acted on (sticky) while a transient toast passes.
     await page.waitForTimeout(4000);
     await expect(swToast).toBeVisible();
 
-    // After activation the OLD bundle's assets are gone from the caches; a lazy v1 chunk would now hit the
-    // network (a Pages deploy no longer has it). Recorded as a fact of autoUpdate mode, see the QA report.
-    const staleFetch = await page.evaluate(async (u) => {
-      const r = await fetch(u, { cache: 'no-store' });
-      const inCache = Boolean(await caches.match(u, { ignoreSearch: true }));
-      return { status: r.status, inCache };
-    }, '/unfog/' + v1Only[0]);
-    test.info().annotations.push({ type: 'stale-v1-asset', description: `${v1Only[0]} → HTTP ${staleFetch.status}, in cache: ${staleFetch.inCache}` });
-    expect(staleFetch.inCache).toBe(false);
+    // The running bundle's chunks still resolve — from the OLD worker's precache, which the waiting
+    // worker has not cleaned up: a chunk the v2 deploy no longer serves (server → 404 now) and the
+    // lazy chunks v1 loads on demand (import worker, Overpass + graph-build inside the route worker).
+    const lazyV1 = v1Assets.filter((f) => /^assets\/(import\.worker|overpass|graph-build)-[^/]+\.js$/.test(f));
+    expect(lazyV1.length, 'v1 has lazy chunks to check').toBeGreaterThanOrEqual(3);
+    const fetched = await page.evaluate(async (urls) => {
+      const out: Record<string, { status: number; inCache: boolean; bytes: number }> = {};
+      for (const u of urls) {
+        const r = await fetch(u, { cache: 'no-store' });
+        out[u] = { status: r.status, inCache: Boolean(await caches.match(u, { ignoreSearch: true })), bytes: (await r.arrayBuffer()).byteLength };
+      }
+      return out;
+    }, [v1Only[0], ...lazyV1].map((f) => '/unfog/' + f));
+    test.info().annotations.push({ type: 'v1-assets-before-reload', description: Object.entries(fetched).map(([u, r]) => `${u.replace('/unfog/assets/', '')} → HTTP ${r.status} (${r.bytes} B, cached ${r.inCache})`).join(' | ') });
+    for (const [u, r] of Object.entries(fetched)) {
+      expect(r.status, `${u} still served`).toBe(200);
+      expect(r.inCache, `${u} still precached`).toBe(true);
+      expect(r.bytes).toBeGreaterThan(100);
+    }
+    // The server itself no longer has the v1-only chunk: the 200 above came from the old worker.
+    const serverHas = await new Promise<number>((resolve) => http.get(`${SW_URL}${v1Only[0]}`, (res) => { res.resume(); resolve(res.statusCode ?? 0); }).on('error', () => resolve(0)));
+    expect(serverHas).toBe(404);
+
+    // Reload while recording: refused — a note, the offer stays, nothing reloads or takes over.
+    const loadsBefore = await loads();
+    await reloadBtn.click();
+    await expect(page.locator('.toast', { hasText: 'Stop the recording first' })).toBeVisible();
+    await expect(swToast).toBeVisible({ timeout: 10_000 }); // the sticky toast comes back after the note
+    await expect(swToast.getByRole('button', { name: 'Reload' })).toBeVisible();
+    await page.waitForTimeout(1500);
+    expect(await page.evaluate(() => (window as unknown as UnfogWindow).__marker)).toBe(1);
+    expect(await loads()).toBe(loadsBefore);
+    expect(await swEvents()).not.toContain('controllerchange');
+    expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting?.state ?? null)).toBe('installed');
+    await expect(banner).toBeVisible();
 
     // Stop the walk: summary as usual, session stored — the update did not touch it.
     await page.getByRole('button', { name: 'Stop recording' }).click();
@@ -781,11 +818,15 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     // The sticky toast is still offered after the modal.
     await expect(swToast).toBeVisible();
 
-    // Reload → v2, controlled by the new worker, data intact.
-    await reloadBtn.click();
+    // Reload → SKIP_WAITING → the new worker activates + claims → controllerchange → one reload → v2, data intact.
+    await swToast.getByRole('button', { name: 'Reload' }).click();
+    await page.waitForFunction((n) => Number(sessionStorage.getItem('qa.loads') ?? 0) > n, loadsBefore, { timeout: 60_000 });
     await waitReady(page, 120_000);
     expect(await page.evaluate(() => (window as unknown as UnfogWindow).__marker)).toBeUndefined();
     expect(await page.evaluate(() => navigator.serviceWorker.controller?.scriptURL)).toBe(`${SW_URL}sw.js`);
+    expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting ?? null), 'nothing left waiting').toBeNull();
+    await page.waitForTimeout(3000);
+    expect(await loads(), 'exactly one reload').toBe(loadsBefore + 1);
     await page.getByRole('tab', { name: 'Help' }).click();
     await expect(buildLine.locator('.build')).toHaveText(V2.stamp);
     await shot(page, 'sw-updated');
