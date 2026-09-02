@@ -14,7 +14,7 @@ import { MODE_BIT } from './graph-format';
 import type { Graph } from './graph';
 import { NoveltyScorer } from './novelty';
 import { Searcher, type PathResult } from './search';
-import { SpatialIndex, type Snap } from './spatial';
+import { SpatialIndex, canEnterArc, canLeaveArc, type Snap } from './spatial';
 
 export const LOOP_HEADINGS = 8;
 export const LOOP_LAMBDA = 1.5;
@@ -120,12 +120,14 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
   const max = Math.max(1, req.maxCandidates ?? 3);
   const loops: LoopPath[] = [];
   const modeMask = MODE_BIT[req.mode];
+  // A via is arrived on and then left: skip island arcs that would sink a leg.
+  const viaOk = (a: number) => canEnterArc(graph, a, modeMask) && canLeaveArc(graph, a, modeMask);
   const inWindow = (l: LoopPath) => l.lengthM >= LOOP_LENGTH_WINDOW[0] * targetM && l.lengthM <= LOOP_LENGTH_WINDOW[1] * targetM;
   const attempt = (heading: number, radius: number): LoopPath | null => {
     const p1 = offsetPoint(origin.point, radius, heading - 45);
     const p2 = offsetPoint(origin.point, radius, heading + 45);
-    const s1 = spatial.nearestArc(p1[0], p1[1], modeMask, radius / 2);
-    const s2 = spatial.nearestArc(p2[0], p2[1], modeMask, radius / 2);
+    const s1 = spatial.nearestArc(p1[0], p1[1], modeMask, radius / 2, viaOk);
+    const s2 = spatial.nearestArc(p2[0], p2[1], modeMask, radius / 2, viaOk);
     if (!s1 || !s2 || s1.arc === s2.arc) return null;
     return routeLoop(searcher, origin, [s1, s2], req.mode, heading);
   };

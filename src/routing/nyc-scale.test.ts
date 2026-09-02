@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { cellsAlong, distanceM } from '../grid/cell';
 import { MapCellLookup } from './cells';
-import { findCandidates, now, pathSegments } from './candidates';
+import { findCandidates, now, pathSegments, snapPoint } from './candidates';
 import { ArcFlag, unpackGraphTile, type GraphTile, type Mode } from './graph-format';
 import { Graph } from './graph';
 import { findLoops } from './loop';
@@ -29,6 +29,13 @@ const TIMES_SQ: [number, number] = [-73.9855, 40.758];
 const PROSPECT: [number, number] = [-73.969, 40.6602];
 /** Grand Army Plaza — the park's north entrance; the park interior has no road cars may use. */
 const GRAND_ARMY: [number, number] = [-73.9701, 40.6738];
+/**
+ * QA no-route case (Jamaica, Queens). The nearest walkable arc to the origin is a 12 m staircase
+ * (way 514538882) whose two endpoints have no other arc — an island. Snapping onto it stranded the
+ * walk and bike searches, which returned an empty candidate list with no error; drive routed fine.
+ */
+const JAMAICA_FROM: [number, number] = [-73.801, 40.702];
+const JAMAICA_TO: [number, number] = [-73.79, 40.71];
 
 let tiles: GraphTile[] = [];
 let graph: Graph;
@@ -122,8 +129,8 @@ describe.skipIf(!HAVE)('NYC prebuilt region at scale', () => {
       expect(Math.abs(poly - c.lengthM) / c.lengthM).toBeLessThan(0.03);
     }
     // Structural: every sweep result is U-turn free and never traverses a segment twice.
-    const o = spatial.nearestArc(from[0], from[1], mode === 'walk' ? 1 : mode === 'bike' ? 2 : 4)!;
-    const d = spatial.nearestArc(to[0], to[1], mode === 'walk' ? 1 : mode === 'bike' ? 2 : 4)!;
+    const o = snapPoint(spatial, from, mode, 'origin');
+    const d = snapPoint(spatial, to, mode, 'destination');
     for (const lambda of [0, 1, 4, 9]) {
       const r = searcher.run(o, d, { lambda, mode, budget: res.budgetM });
       if (!r) continue;
@@ -166,6 +173,21 @@ describe.skipIf(!HAVE)('NYC prebuilt region at scale', () => {
     bench['ts-pp-bike-warm-ms'] = Math.round(now() - t0);
     bench.engineTilesForRoute = graphTilesFor(routeBBox(TIMES_SQ, PROSPECT)).length;
     bench.heapMBEnd = heapMB();
+  });
+
+  it('Jamaica, Queens: walk and bike snap past an isolated staircase and find a sane route (QA no-route regression)', () => {
+    const straight = distanceM(JAMAICA_FROM[0], JAMAICA_FROM[1], JAMAICA_TO[0], JAMAICA_TO[1]);
+    for (const mode of ['walk', 'bike', 'drive'] as Mode[]) {
+      expect(check(JAMAICA_FROM, JAMAICA_TO, mode, `jamaica-${mode}`)).toBeLessThan(4000);
+      const res = findCandidates(graph, lookup, { from: JAMAICA_FROM, to: JAMAICA_TO, mode, detour: 0.25 }, { spatial, scorer, searcher });
+      const direct = res.candidates[res.candidates.length - 1];
+      // Sane length: no shorter than the chord between its own ends, no longer than 3× the pins' straight line.
+      const last = direct.coords[direct.coords.length - 1];
+      const chord = distanceM(direct.coords[0][0], direct.coords[0][1], last[0], last[1]);
+      expect(direct.lengthM).toBeGreaterThanOrEqual(chord - 1);
+      expect(direct.lengthM).toBeGreaterThan(0.8 * straight);
+      expect(direct.lengthM).toBeLessThan(3 * straight);
+    }
   });
 
   it('loop 5 km from Times Square: starts and ends at the origin, no plain out-and-back', () => {

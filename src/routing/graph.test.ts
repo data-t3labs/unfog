@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { cellsAlong } from '../grid/cell';
 import { ArcFlag, decodeGraphTile, encodeGraphTile } from './graph-format';
 import { Graph } from './graph';
-import { SpatialIndex } from './spatial';
+import { SpatialIndex, canEnterArc, canLeaveArc } from './spatial';
 import { MapCellLookup } from './cells';
 import { NoveltyScorer } from './novelty';
 import { Searcher, hasImmediateUTurn, MinHeap } from './search';
-import { pathCoords, trimGeometry } from './candidates';
+import { findCandidates, pathCoords, snapPoint, trimGeometry } from './candidates';
 
 // A 100 m square A—B—C—D—A around home (Bedford Av & N 7th). A→B is a oneway street for
 // vehicles (B→A is WALK only); C↔D is a stair (WALK|BIKE|DISMOUNT); B↔C has a bend shape point.
@@ -90,6 +90,75 @@ describe('Graph (single tile)', () => {
     expect(spatial.nearestArc(A[0] + 20 * DLON, A[1], ArcFlag.WALK)).toBeNull();
     // Only walking can use B→A, but the segment is still snappable for drive (A→B exists).
     expect(spatial.nearestArc(p[0], p[1], ArcFlag.BIKE)).not.toBeNull();
+  });
+
+  it('snapping skips an isolated arc for the nearest one the search can leave/enter (Jamaica no-route)', () => {
+    // Island: a 20 m stair E—F, 20 m north of A—B's midpoint, connected to nothing.
+    const E = [A[0] + DLON * 0.4, A[1] + 20 / 110_574], F = [A[0] + DLON * 0.6, A[1] + 20 / 110_574];
+    const island = {
+      ...square,
+      nodeId: [...square.nodeId, 5, 6],
+      nodeLon: [...square.nodeLon, e7(E[0]), e7(F[0])],
+      nodeLat: [...square.nodeLat, e7(E[1]), e7(F[1])],
+      nodeFlags: [...square.nodeFlags, 0, 0],
+      arcStart: [...square.arcStart, 9, 10],
+      arcTo: [...square.arcTo, 5, 4],
+      arcLen: [...square.arcLen, 20, 20],
+      arcFlags: [...square.arcFlags, STAIR, STAIR | ArcFlag.REVERSED],
+      arcWay: [...square.arcWay, 50, 50],
+      arcShapeStart: [...square.arcShapeStart, 1, 1],
+      arcShapeEnd: [...square.arcShapeEnd, 1, 1],
+    };
+    const EF = 8;
+    const graph = new Graph([decodeGraphTile(encodeGraphTile(island))]);
+    expect(graph.arcReverse[EF]).toBe(EF + 1);
+    const spatial = new SpatialIndex(graph);
+    expect(canLeaveArc(graph, EF, ArcFlag.WALK)).toBe(false);
+    expect(canEnterArc(graph, EF, ArcFlag.WALK)).toBe(false);
+    expect(canLeaveArc(graph, AB, ArcFlag.DRIVE)).toBe(true);
+    expect(canEnterArc(graph, AB, ArcFlag.DRIVE)).toBe(true);
+    // 5 m south of the island, 15 m north of A—B: the island is the nearest walkable arc…
+    const p: [number, number] = [A[0] + DLON / 2, A[1] + 15 / 110_574];
+    expect(spatial.nearestArc(p[0], p[1], ArcFlag.WALK)!.arc).toBe(EF);
+    // …but the snap lands on A—B, the nearest arc with a way on.
+    for (const which of ['origin', 'destination'] as const) {
+      const s = snapPoint(spatial, p, 'walk', which);
+      expect(graph.segmentId(s.arc)).toBe(AB);
+      expect(s.distM).toBeCloseTo(15, 0);
+    }
+    // Bike would dismount onto the stair; drive never saw it. Both land on A—B too.
+    expect(graph.segmentId(snapPoint(spatial, p, 'bike', 'origin').arc)).toBe(AB);
+    expect(graph.segmentId(snapPoint(spatial, p, 'drive', 'origin').arc)).toBe(AB);
+    // End to end: a walk from p to the middle of C—D routes instead of stranding on the island.
+    const res = findCandidates(graph, new MapCellLookup(), { from: p, to: [C[0] - DLON / 2, C[1]], mode: 'walk', detour: 0.25 });
+    expect(res.candidates[res.candidates.length - 1].name).toBe('Direct');
+    expect(res.shortestM).toBeGreaterThanOrEqual(150);
+    // A lone arc with nothing to fall back to is still snapped: a trip along it routes directly.
+    const lone = {
+      ...island, nodeId: [5, 6], nodeLon: [e7(E[0]), e7(F[0])], nodeLat: [e7(E[1]), e7(F[1])], nodeFlags: [0, 0],
+      arcStart: [0, 1, 2], arcTo: [1, 0], arcLen: [20, 20], arcFlags: [STAIR, STAIR | ArcFlag.REVERSED], arcWay: [50, 50],
+      arcShapeStart: [0, 0], arcShapeEnd: [0, 0], shapeLon: [], shapeLat: [],
+    };
+    const loneGraph = new Graph([decodeGraphTile(encodeGraphTile(lone))]);
+    const along = findCandidates(loneGraph, new MapCellLookup(), { from: [E[0] + DLON * 0.02, E[1]], to: [F[0] - DLON * 0.02, F[1]], mode: 'walk', detour: 0.25 });
+    expect(along.candidates.map((c) => c.name)).toEqual(['Direct']);
+    expect(along.shortestM).toBe(16);
+  });
+
+  it('no route at all rejects with NoRouteError naming the mode, never an empty candidate list', () => {
+    const { graph, lookup } = build();
+    // A→B is oneway and C↔D is a stair: a car near B's end of A—B cannot reach A's end.
+    const from: [number, number] = [A[0] + DLON * 0.9, A[1]], to: [number, number] = [A[0] + DLON * 0.1, A[1]];
+    const drive = () => findCandidates(graph, lookup, { from, to, mode: 'drive', detour: 0.25 });
+    expect(drive).toThrow(/^No driving route found between these points\. Try walk or bike, or move the pin\.$/);
+    let err: Error | undefined;
+    try { drive(); } catch (e) { err = e as Error; }
+    expect(err?.name).toBe('NoRouteError');
+    // Walking is fine (B→A allows it); the other modes' messages read the same way.
+    expect(findCandidates(graph, lookup, { from, to, mode: 'walk', detour: 0.25 }).shortestM).toBe(80);
+    const bikeOnly = { ...square, arcFlags: square.arcFlags.map((f, i) => (i === CD || i === DC ? ArcFlag.DRIVE : f)) };
+    const g2 = new Graph([decodeGraphTile(encodeGraphTile(bikeOnly))]);
+    expect(() => findCandidates(g2, lookup, { from, to, mode: 'bike', detour: 0.25 })).toThrow(/^No cycling route found between these points\. Try walk or drive, or move the pin\.$/);
   });
 
   it('walk ignores the oneway, drive and bike respect it, dismount costs ×1.5 but not in length', () => {

@@ -80,6 +80,11 @@ export interface RouteApi {
   /** Downloaded (non-prebuilt) areas kept on device. */
   listDownloads(): Promise<Array<{ id: string; center: LonLat; radiusKm: number; tiles: number; bytes: number; builtAt: string }>>;
   deleteDownload(id: string): Promise<void>;
+  /**
+   * Always resolves with ≥ 1 candidate (Direct last). Rejects, with `name` intact, on
+   * NoCoverageError (no tiles), SnapError (no road for the mode within 300 m of an end) or
+   * NoRouteError (ends snapped but no path between them for the mode).
+   */
   route(req: RouteRequest): Promise<RouteResult>;
   loop(req: LoopRequest): Promise<RouteResult>;
   /** The cell store changed (import / recording): drop cached novelty. */

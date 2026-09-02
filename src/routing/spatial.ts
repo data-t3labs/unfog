@@ -68,10 +68,11 @@ export class SpatialIndex {
   }
 
   /**
-   * Nearest arc usable by `modeMask` (in either direction) within `maxDistM` of a point.
-   * Returns null when nothing qualifies.
+   * Nearest arc usable by `modeMask` (in either direction) within `maxDistM` of a point, optionally
+   * restricted to arcs `accept` allows (evaluated only for an arc that would otherwise win, so a
+   * topology check such as canLeaveArc stays cheap). Returns null when nothing qualifies.
    */
-  nearestArc(lon: number, lat: number, modeMask: number, maxDistM = 300): Snap | null {
+  nearestArc(lon: number, lat: number, modeMask: number, maxDistM = 300, accept?: (arc: number) => boolean): Snap | null {
     const g = this.graph;
     const [wx, wy] = lonLatToWorld(lon, lat);
     const cx = Math.floor(wx) >> BUCKET_SHIFT, cy = Math.floor(wy) >> BUCKET_SHIFT;
@@ -117,6 +118,7 @@ export class SpatialIndex {
               px = qx; py = qy;
             }
             if (segBestD < bestD || (segBestD === bestD && best && a < best.arc)) {
+              if (accept && !accept(a)) continue;
               bestD = segBestD;
               best = {
                 arc: a,
@@ -137,6 +139,43 @@ export class SpatialIndex {
 export function usableFlags(flags: number, modeMask: number): boolean {
   if (flags & modeMask) return true;
   if (modeMask === ArcFlag.BIKE && (flags & ArcFlag.DISMOUNT) && (flags & ArcFlag.WALK)) return true;
+  return false;
+}
+
+/**
+ * Whether a search starting on `arc` (either direction) can go anywhere: an endpoint the mode may
+ * reach along the arc has an onward usable arc other than the immediate U-turn. False for an
+ * island such as an unconnected staircase — snapping onto one strands the search (Jamaica case).
+ */
+export function canLeaveArc(graph: Graph, arc: number, modeMask: number): boolean {
+  const rev = graph.arcReverse[arc];
+  for (const x of [arc, rev]) {
+    if (x < 0 || !usableFlags(graph.arcFlags[x], modeMask)) continue;
+    const n = graph.arcTo[x], forbid = graph.arcReverse[x];
+    for (let b = graph.arcStart[n]; b < graph.arcStart[n + 1]; b++) {
+      if (b !== forbid && usableFlags(graph.arcFlags[b], modeMask)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a search can arrive on `arc` from elsewhere: an endpoint the mode may leave along the arc
+ * has an incoming usable arc other than the immediate U-turn. Incoming arcs are the reverses of the
+ * endpoint's outgoing arcs (the builder emits both directions of every segment; a direction whose
+ * reverse is missing counts as absent).
+ */
+export function canEnterArc(graph: Graph, arc: number, modeMask: number): boolean {
+  const rev = graph.arcReverse[arc];
+  for (const y of [arc, rev]) {
+    if (y < 0 || !usableFlags(graph.arcFlags[y], modeMask)) continue;
+    const m = graph.arcFrom[y];
+    for (let b = graph.arcStart[m]; b < graph.arcStart[m + 1]; b++) {
+      if (b === y) continue;
+      const c = graph.arcReverse[b];
+      if (c >= 0 && usableFlags(graph.arcFlags[c], modeMask)) return true;
+    }
+  }
   return false;
 }
 

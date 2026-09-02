@@ -10,12 +10,15 @@ import type { Graph } from './graph';
 import { NoveltyScorer } from './novelty';
 import type { CellLookup } from './cells';
 import { Searcher, type PathResult } from './search';
-import { SpatialIndex, type Snap } from './spatial';
+import { SpatialIndex, canEnterArc, canLeaveArc, type Snap } from './spatial';
 
 export const LAMBDA_SWEEP = [0.35, 0.7, 1, 1.5, 2, 3, 4, 6, 9] as const;
 export const DEDUPE_SHARED = 0.6;
 export const SPEED_KMH: Record<Mode, number> = { walk: 4.8, bike: 15, drive: 30 };
 export const SNAP_MAX_M = 300;
+/** How each mode reads in a user-facing message, and the two modes to suggest instead. */
+const MODE_WORD: Record<Mode, string> = { walk: 'walking', bike: 'cycling', drive: 'driving' };
+const OTHER_MODES: Record<Mode, string> = { walk: 'bike or drive', bike: 'walk or drive', drive: 'walk or bike' };
 
 export interface CandidateContext {
   spatial?: SpatialIndex;
@@ -32,13 +35,32 @@ export class SnapError extends Error {
   }
 }
 
+/**
+ * Both ends snapped, but the network has no path between them for the mode. Crosses Comlink with
+ * name + message intact (the UI shows the message as is).
+ */
+export class NoRouteError extends Error {
+  constructor(public mode: Mode) {
+    super(`No ${MODE_WORD[mode]} route found between these points. Try ${OTHER_MODES[mode]}, or move the pin.`);
+    this.name = 'NoRouteError';
+  }
+}
+
 export interface ScoredPath extends PathResult {
   lambda: number;
   segments: Set<number>;
 }
 
+/**
+ * Nearest arc for the mode that the search can actually leave (origin) or arrive on (destination);
+ * the nearest usable arc may be an island (an unconnected staircase) that strands the search. When
+ * no connected arc lies within SNAP_MAX_M the plain nearest usable arc is taken — a trip along that
+ * one arc still routes, anything else ends in NoRouteError.
+ */
 export function snapPoint(spatial: SpatialIndex, p: LonLat, mode: Mode, which: 'origin' | 'destination'): Snap {
-  const s = spatial.nearestArc(p[0], p[1], MODE_BIT[mode], SNAP_MAX_M);
+  const mask = MODE_BIT[mode], graph = spatial.graph;
+  const connected = which === 'origin' ? (a: number) => canLeaveArc(graph, a, mask) : (a: number) => canEnterArc(graph, a, mask);
+  const s = spatial.nearestArc(p[0], p[1], mask, SNAP_MAX_M, connected) ?? spatial.nearestArc(p[0], p[1], mask, SNAP_MAX_M);
   if (!s) throw new SnapError(which, p);
   return s;
 }
@@ -195,9 +217,7 @@ export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteReque
   const dest = snapPoint(spatial, req.to, req.mode, 'destination');
   const max = Math.max(1, req.maxCandidates ?? 3);
   const sw = sweep(searcher, origin, dest, req.mode, req.detour);
-  if (!sw) {
-    return { candidates: [], shortestM: 0, budgetM: 0, graphTiles: ctx.graphTiles ?? graph.tileKeys.length, ms: now() - t0 };
-  }
+  if (!sw) throw new NoRouteError(req.mode);
   const { shortest, budgetM, feasible } = sw;
   const alts = selectAlternatives(shortest, feasible, max - 1);
   const candidates: RouteCandidate[] = [];
