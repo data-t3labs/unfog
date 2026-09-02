@@ -2,13 +2,20 @@
  * Penalised A* over a Graph.
  *
  *   cost(arc) = len · (1 + λ · (1 − nov)) · dismount(×3, bike on DISMOUNT arcs) · avoid(×k)
+ *             + turn(arrival arc → arc)            (only with turnPenaltyM > 0)
  *
  * The heuristic is the straight-line distance to the destination snap point, admissible because
- * every multiplier is ≥ 1 so cost ≥ length. Ellipse pruning discards a node when the LENGTH of
- * the path found to it plus the straight-line remainder exceeds `ellipseFactor · budget` (length,
- * not penalised cost — pruning on cost would cut exactly the long never-visited detours a high
- * λ is meant to find). No immediate U-turns: the reverse of the arc a node was reached by is not
- * relaxed. Ties break on (f, node index) so results are deterministic.
+ * every multiplier is ≥ 1 and the turn term is ≥ 0, so cost ≥ length. Ellipse pruning discards a
+ * node when the LENGTH of the path found to it plus the straight-line remainder exceeds
+ * `ellipseFactor · budget` (length, not penalised cost — pruning on cost would cut exactly the
+ * long never-visited detours a high λ is meant to find). No immediate U-turns: the reverse of the
+ * arc a node was reached by is not relaxed. Ties break on (f, label index) so results are
+ * deterministic.
+ *
+ * Labels: nodes by default. With a turn penalty the search labels ARCS (state = the arc arrived
+ * by) — a node label cannot price the turn onto the next arc without losing optimality, because
+ * the best way into a node depends on where the path goes next. ~2.5 states per node in a street
+ * graph; the arrays are allocated on first use so an unpenalised search never pays for them.
  *
  * Origin and destination are virtual: the origin is two initial heap entries (partial forward
  * along the snapped arc, partial backward along its reverse), the destination is a virtual node
@@ -29,6 +36,10 @@ const HEURISTIC_SAFETY = 0.99;
  * gives p90 116 m at the same budget and the same novelty gain.
  */
 export const DISMOUNT_FACTOR = 3;
+/** Heading change below this is straight-through: no turn cost (a bend in the road, a kink at a junction). */
+export const TURN_MIN_DEG = 40;
+/** Heading change at or above this counts as a full 1.5 turns (a hairpin is not worse than that). */
+export const TURN_MAX_DEG = 135;
 
 export interface SearchOptions {
   lambda: number;
@@ -48,6 +59,13 @@ export interface SearchOptions {
    * the origin is a dead end.
    */
   forbidStartArc?: number;
+  /**
+   * Metres-equivalent added to the cost per 90° heading change at a node: linear in the angle,
+   * free below TURN_MIN_DEG, capped at TURN_MAX_DEG, never on a GLUE connector (its geometry is
+   * artificial). Only the cost is penalised — the length the budget and the heuristic bound is
+   * untouched. > 0 switches the search to arc labels. Default 0 (off).
+   */
+  turnPenaltyM?: number;
 }
 
 export interface PathResult {
@@ -60,7 +78,7 @@ export interface PathResult {
   startFrac: number;
   /** Fraction along the last arc's geometry where the path ends. */
   endFrac: number;
-  /** Nodes settled (diagnostics). */
+  /** Labels settled (diagnostics; arc labels with a turn penalty, nodes otherwise). */
   settled: number;
 }
 
@@ -125,6 +143,29 @@ export class MinHeap {
   }
 }
 
+/** What a search core hands back: the arc list in travel order and how the target was reached. */
+interface Found {
+  arcs: number[];
+  /** Origin and destination on the same arc, traversed directly. */
+  direct: boolean;
+  cost: number;
+  settled: number;
+}
+
+/** Everything both cores need, computed once per run. */
+interface RunSetup {
+  modeMask: number;
+  ellipse: number;
+  forbidStart: number;
+  turnK: number;
+  heur: (node: number) => number;
+  usable: (arc: number) => boolean;
+  cost: (arc: number) => number;
+  oa: number; ora: number; ot: number;
+  da: number; dra: number; ds: number; dP: number; dQ: number;
+  dUsable: boolean; drUsable: boolean;
+}
+
 export class Searcher {
   private readonly g: Float64Array;
   private readonly glen: Float64Array;
@@ -133,9 +174,21 @@ export class Searcher {
   private readonly closed: Uint8Array;
   private readonly heap = new MinHeap(4096);
   private readonly target: number;
-  /** Nodes settled by the last run, in order (diagnostics; loop mode reads a failed leg's pocket). */
-  private readonly settledList: Int32Array;
+  /**
+   * Nodes settled by the last run, in order (diagnostics; loop mode reads a failed leg's pocket).
+   * Sized for nodes; grown to arcCount + 1 on the first arc-labelled run (one entry per state).
+   */
+  private settledList: Int32Array;
   private settledN = 0;
+  /** Arc-labelled workspace (turn penalty), allocated on first use. Index arcCount = the target. */
+  private gA: Float64Array | null = null;
+  private glenA: Float64Array | null = null;
+  private prevA: Int32Array | null = null;
+  private closedA: Uint8Array | null = null;
+  /** Heading (radians, 0 = north, clockwise) of an arc's first / last segment; NaN = not computed. */
+  private headOut: Float32Array | null = null;
+  private headIn: Float32Array | null = null;
+  private readonly pt: [number, number] = [0, 0];
 
   constructor(readonly graph: Graph, readonly scorer: NoveltyScorer) {
     const n = graph.nodeCount + 1; // + virtual target
@@ -168,6 +221,45 @@ export class Searcher {
     return c;
   }
 
+  /**
+   * Heading of an arc's first (`out`) or last segment in travel direction, skipping zero-length
+   * steps in the geometry. Cached per arc.
+   */
+  private heading(arc: number, out: boolean): number {
+    const cache = out
+      ? (this.headOut ??= new Float32Array(this.graph.arcCount).fill(NaN))
+      : (this.headIn ??= new Float32Array(this.graph.arcCount).fill(NaN));
+    const cached = cache[arc];
+    if (cached === cached) return cached;
+    const g = this.graph, pt = this.pt, n = g.arcPointCount(arc);
+    let lon0: number, lat0: number, lon1: number, lat1: number;
+    if (out) {
+      g.arcPoint(arc, 0, pt); lon0 = pt[0]; lat0 = pt[1];
+      let i = 1;
+      do { g.arcPoint(arc, i, pt); i++; } while (i < n && pt[0] === lon0 && pt[1] === lat0);
+      lon1 = pt[0]; lat1 = pt[1];
+    } else {
+      g.arcPoint(arc, n - 1, pt); lon1 = pt[0]; lat1 = pt[1];
+      let i = n - 2;
+      do { g.arcPoint(arc, i, pt); i--; } while (i >= 0 && pt[0] === lon1 && pt[1] === lat1);
+      lon0 = pt[0]; lat0 = pt[1];
+    }
+    const h = Math.atan2((lon1 - lon0) * Math.cos(lat0 * DEG), lat1 - lat0);
+    cache[arc] = h;
+    return h;
+  }
+
+  /** Turn cost (metres-equivalent) for continuing from arc `a` onto arc `b` at their shared node. */
+  turnCost(a: number, b: number, penaltyM: number): number {
+    const flags = this.graph.arcFlags;
+    if ((flags[a] | flags[b]) & ArcFlag.GLUE) return 0;
+    let d = Math.abs(this.heading(b, true) - this.heading(a, false));
+    if (d > Math.PI) d = 2 * Math.PI - d;
+    const deg = d / DEG;
+    if (deg < TURN_MIN_DEG) return 0;
+    return (penaltyM * Math.min(deg, TURN_MAX_DEG)) / 90;
+  }
+
   run(origin: Snap, dest: Snap, opts: SearchOptions): PathResult | null {
     const graph = this.graph;
     const { lambda, mode } = opts;
@@ -175,10 +267,8 @@ export class Searcher {
     const avoid = opts.avoid ?? null;
     const avoidFactor = opts.avoidFactor ?? 5;
     const forbidStart = opts.forbidStartArc ?? -1;
+    const turnK = opts.turnPenaltyM ?? 0;
     const ellipse = (opts.budget ?? Infinity) * (opts.ellipseFactor ?? 1.05);
-    const g = this.g, glen = this.glen, prevArc = this.prevArc, prevNode = this.prevNode, closed = this.closed, heap = this.heap;
-    const T = this.target;
-    g.fill(Infinity); glen.fill(0); prevArc.fill(-1); prevNode.fill(-1); closed.fill(0); heap.clear();
     this.settledN = 0;
 
     const [dlon, dlat] = dest.point;
@@ -193,6 +283,44 @@ export class Searcher {
 
     // --- origin: partial arcs in both directions ---
     const oa = origin.arc, ora = graph.arcReverse[oa], ot = origin.t;
+    // --- destination: virtual target reached from either endpoint of its arc ---
+    let da = dest.arc, ds = dest.t;
+    if (da === ora) { da = oa; ds = 1 - ds; } // normalise onto the same direction as the origin arc
+    const dra = graph.arcReverse[da];
+    const dP = graph.arcFrom[da], dQ = graph.arcTo[da];
+    const dUsable = usable(da), drUsable = dra >= 0 && usable(dra);
+    const setup: RunSetup = { modeMask, ellipse, forbidStart, turnK, heur, usable, cost, oa, ora, ot, da, dra, ds, dP, dQ, dUsable, drUsable };
+
+    const found = turnK > 0 ? this.searchArcs(setup) : this.searchNodes(setup);
+    if (!found) return null;
+
+    const arcs = Uint32Array.from(found.arcs);
+    const first = arcs[0], last = arcs[arcs.length - 1];
+    const startFrac = first === oa ? ot : 1 - ot;
+    const endFrac = found.direct ? (first === oa ? ds : 1 - ds) : (last === da ? ds : 1 - ds);
+    // Length and new metres with the partial ends.
+    let lengthM = 0, newM = 0;
+    for (let i = 0; i < arcs.length; i++) {
+      const a = arcs[i];
+      let frac = 1;
+      if (arcs.length === 1) frac = endFrac - startFrac;
+      else if (i === 0) frac = 1 - startFrac;
+      else if (i === arcs.length - 1) frac = endFrac;
+      const l = graph.arcLen[a] * frac;
+      lengthM += l;
+      newM += l * this.scorer.get(a);
+    }
+    return { arcs, lengthM, newM, cost: found.cost, startFrac, endFrac, settled: found.settled };
+  }
+
+  /** Node-labelled core (no turn penalty). */
+  private searchNodes(s: RunSetup): Found | null {
+    const graph = this.graph;
+    const { ellipse, forbidStart, heur, usable, cost, oa, ora, ot, da, dra, ds, dP, dQ, dUsable, drUsable } = s;
+    const g = this.g, glen = this.glen, prevArc = this.prevArc, prevNode = this.prevNode, closed = this.closed, heap = this.heap;
+    const T = this.target;
+    g.fill(Infinity); glen.fill(0); prevArc.fill(-1); prevNode.fill(-1); closed.fill(0); heap.clear();
+
     const relaxStart = (arc: number, frac: number, node: number) => {
       const c = cost(arc) * frac, l = graph.arcLen[arc] * frac;
       if (c < g[node]) {
@@ -203,12 +331,6 @@ export class Searcher {
     if (usable(oa) && oa !== forbidStart) relaxStart(oa, 1 - ot, graph.arcTo[oa]);
     if (ora >= 0 && usable(ora) && ora !== forbidStart) relaxStart(ora, ot, graph.arcTo[ora]);
 
-    // --- destination: virtual target reached from either endpoint of its arc ---
-    let da = dest.arc, ds = dest.t;
-    if (da === ora) { da = oa; ds = 1 - ds; } // normalise onto the same direction as the origin arc
-    const dra = graph.arcReverse[da];
-    const dP = graph.arcFrom[da], dQ = graph.arcTo[da];
-    const dUsable = usable(da), drUsable = dra >= 0 && usable(dra);
     if (da === oa) {
       // Same arc: direct partial traversal (forward if ds ≥ ot, backward via the reverse arc).
       if (dUsable && ds >= ot && oa !== forbidStart) {
@@ -258,7 +380,6 @@ export class Searcher {
     }
     if (!closed[T]) return null;
 
-    // --- reconstruct ---
     const list: number[] = [];
     let node = T;
     let direct = false;
@@ -270,29 +391,85 @@ export class Searcher {
       node = p;
     }
     list.reverse();
-    const arcs = Uint32Array.from(list);
-    const first = arcs[0], last = arcs[arcs.length - 1];
-    let startFrac: number, endFrac: number;
-    if (direct) {
-      startFrac = first === oa ? ot : 1 - ot;
-      endFrac = first === oa ? ds : 1 - ds;
-    } else {
-      startFrac = first === oa ? ot : 1 - ot;
-      endFrac = last === da ? ds : 1 - ds;
+    return { arcs: list, direct, cost: g[T], settled };
+  }
+
+  /**
+   * Arc-labelled core (turn penalty): state = the arc just traversed, so the turn onto the next
+   * arc is priced exactly. State arcCount is the virtual target; `prevA[T]` = the arc the target
+   * was reached from (−2 = direct traversal of the shared origin/destination arc) and `tArc` the
+   * (partial) destination arc taken.
+   */
+  private searchArcs(s: RunSetup): Found | null {
+    const graph = this.graph;
+    const { ellipse, forbidStart, turnK, heur, usable, cost, oa, ora, ot, da, dra, ds, dP, dQ, dUsable, drUsable } = s;
+    const nA = graph.arcCount + 1, T = graph.arcCount;
+    const g = (this.gA ??= new Float64Array(nA)), glen = (this.glenA ??= new Float64Array(nA));
+    const prev = (this.prevA ??= new Int32Array(nA)), closed = (this.closedA ??= new Uint8Array(nA));
+    if (this.settledList.length < nA) this.settledList = new Int32Array(nA);
+    const heap = this.heap;
+    g.fill(Infinity); glen.fill(0); prev.fill(-1); closed.fill(0); heap.clear();
+    const arcTo = graph.arcTo, arcLen = graph.arcLen, arcStart = graph.arcStart, arcReverse = graph.arcReverse;
+    let tArc = -1;
+
+    const relaxStart = (arc: number, frac: number) => {
+      const c = cost(arc) * frac, l = arcLen[arc] * frac;
+      if (c < g[arc]) { g[arc] = c; glen[arc] = l; prev[arc] = -1; heap.push(c + heur(arcTo[arc]), arc); }
+    };
+    if (usable(oa) && oa !== forbidStart) relaxStart(oa, 1 - ot);
+    if (ora >= 0 && usable(ora) && ora !== forbidStart) relaxStart(ora, ot);
+
+    if (da === oa) {
+      if (dUsable && ds >= ot && oa !== forbidStart) {
+        const f = ds - ot;
+        g[T] = cost(oa) * f; glen[T] = arcLen[oa] * f; prev[T] = -2; tArc = oa;
+        heap.push(g[T], T);
+      }
+      if (ora >= 0 && usable(ora) && ot >= ds && ora !== forbidStart) {
+        const f = ot - ds, c = cost(ora) * f;
+        if (c < g[T]) { g[T] = c; glen[T] = arcLen[ora] * f; prev[T] = -2; tArc = ora; heap.push(c, T); }
+      }
     }
-    // Length and new metres with the partial ends.
-    let lengthM = 0, newM = 0;
-    for (let i = 0; i < arcs.length; i++) {
-      const a = arcs[i];
-      let frac = 1;
-      if (arcs.length === 1) frac = endFrac - startFrac;
-      else if (i === 0) frac = 1 - startFrac;
-      else if (i === arcs.length - 1) frac = endFrac;
-      const l = graph.arcLen[a] * frac;
-      lengthM += l;
-      newM += l * this.scorer.get(a);
+
+    let settled = 0;
+    while (heap.size > 0) {
+      const a = heap.pop();
+      if (closed[a]) continue;
+      closed[a] = 1;
+      settled++;
+      if (a === T) break;
+      const n = arcTo[a];
+      this.settledList[this.settledN++] = n;
+      const ga = g[a], la = glen[a];
+      const forbid = arcReverse[a];
+      const end = arcStart[n + 1];
+      for (let b = arcStart[n]; b < end; b++) {
+        if (b === forbid || closed[b] || !usable(b)) continue;
+        const ng = ga + cost(b) + this.turnCost(a, b, turnK);
+        if (ng >= g[b]) continue;
+        const v = arcTo[b];
+        const nl = la + arcLen[b];
+        const h = heur(v);
+        if (nl + h > ellipse) continue;
+        g[b] = ng; glen[b] = nl; prev[b] = a;
+        heap.push(ng + h, b);
+      }
+      if (n === dP && dUsable && a !== dra) {
+        const ng = ga + cost(da) * ds + this.turnCost(a, da, turnK);
+        if (ng < g[T]) { g[T] = ng; glen[T] = la + arcLen[da] * ds; prev[T] = a; tArc = da; heap.push(ng, T); }
+      }
+      if (n === dQ && drUsable && a !== da) {
+        const ng = ga + cost(dra) * (1 - ds) + this.turnCost(a, dra, turnK);
+        if (ng < g[T]) { g[T] = ng; glen[T] = la + arcLen[dra] * (1 - ds); prev[T] = a; tArc = dra; heap.push(ng, T); }
+      }
     }
-    return { arcs, lengthM, newM, cost: g[T], startFrac, endFrac, settled };
+    if (!closed[T]) return null;
+
+    const list: number[] = [tArc];
+    const direct = prev[T] === -2;
+    for (let a = prev[T]; a >= 0; a = prev[a]) list.push(a);
+    list.reverse();
+    return { arcs: list, direct, cost: g[T], settled };
   }
 }
 

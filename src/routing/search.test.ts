@@ -6,10 +6,10 @@ import { ArcFlag, encodeGraphTile, decodeGraphTile, type GraphTile } from './gra
 import { Graph } from './graph';
 import { MapCellLookup } from './cells';
 import { NoveltyScorer } from './novelty';
-import { Searcher, hasImmediateUTurn } from './search';
-import { LAMBDA_SWEEP, findCandidates, selectAlternatives, snapPoint, sweep, type ScoredPath } from './candidates';
+import { Searcher, TURN_MIN_DEG, hasImmediateUTurn } from './search';
+import { LAMBDA_SWEEP, MIN_GAIN_M, TURN_PENALTY_M, findCandidates, selectAlternatives, snapPoint, sweep, type ScoredPath } from './candidates';
 import { SpatialIndex } from './spatial';
-import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, findLoops, loopCoords, offsetPoint, routeLoop } from './loop';
+import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, findLoops, loopCoords, loopPct, offsetPoint, rankLoops, routeLoop } from './loop';
 
 let lattice: Lattice;
 let tiles: GraphTile[];
@@ -19,6 +19,20 @@ let scorer: NoveltyScorer;
 let searcher: Searcher;
 let spatial: SpatialIndex;
 const ROW = 15;
+
+const midpoint = (a: [number, number], b: [number, number]): [number, number] => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+/** Heading changes > TURN_MIN_DEG at the joints of a path, skipping a zero-length partial arc at either end. */
+function arcTurns(arcs: ArrayLike<number>): number {
+  const bearing = (i: number, j: number) => Math.atan2((graph.nodeLon[j] - graph.nodeLon[i]) * Math.cos(graph.nodeLat[i] * Math.PI / 180), graph.nodeLat[j] - graph.nodeLat[i]);
+  let turns = 0;
+  for (let i = 1; i < arcs.length; i++) {
+    const a = arcs[i - 1], b = arcs[i];
+    let d = Math.abs(bearing(graph.arcFrom[b], graph.arcTo[b]) - bearing(graph.arcFrom[a], graph.arcTo[a]));
+    if (d > Math.PI) d = 2 * Math.PI - d;
+    if (d * 180 / Math.PI > TURN_MIN_DEG) turns++;
+  }
+  return turns;
+}
 
 beforeAll(() => {
   lattice = makeLattice({ size: 30, spacingM: 100 });
@@ -120,6 +134,97 @@ describe('lattice across a tile boundary', () => {
     expect(selectAlternatives(direct, feasible, 2)).toEqual([most, cheap]);
     expect(selectAlternatives(direct, feasible, 3)).toEqual([most, cheap, nearClone]);
     expect(selectAlternatives(direct, [sp(1100, 0, [51, 52])], 2)).toEqual([]); // nothing beats Direct
+    // A pick must add a margin of new road (max(MIN_GAIN_M, 1 %)): a route "newer" by a few metres
+    // only because it is a few metres longer (a turn-penalised path in a never-visited area) is not
+    // an alternative. Direct 4,000 m all new; +40 m new is under the 50 m floor, +60 m over it.
+    const allNew = sp(4000, 4000, [1, 2, 3, 4, 5], 0);
+    expect(selectAlternatives(allNew, [sp(4060, 4040, [61, 62, 63, 64, 65])], 2)).toEqual([]);
+    expect(selectAlternatives(allNew, [sp(4060, 4000 + MIN_GAIN_M, [61, 62, 63, 64, 65])], 2)).toHaveLength(1);
+    // Direct 20 km: the 1 % rule (200 m) governs, not the 50 m floor.
+    const far = sp(20_000, 15_000, [1, 2, 3, 4, 5], 0);
+    expect(selectAlternatives(far, [sp(20_100, 15_150, [61, 62, 63, 64, 65])], 2)).toEqual([]);
+    expect(selectAlternatives(far, [sp(20_100, 15_200, [61, 62, 63, 64, 65])], 2)).toHaveLength(1);
+  });
+
+  // Route-quality sweep (NYC): walk "Most new" made 2.3 turns/km (p50) / 4.5 (p90) against Direct's
+  // 1.9 — combs through the visited blocks (#20: 4.9 vs 1.8). The turn penalty is a new cost term
+  // on a new (arc-labelled) search core; nothing covered turn costs before.
+  it('turn penalty: admissible and exact — never over the ellipse, never shorter than the shortest path, cost = arcs + turns, and the node-labelled optimum when the penalty vanishes', () => {
+    const pairs: Array<[[number, number], [number, number]]> = [
+      [lattice.at(0, ROW), lattice.at(29, ROW)],
+      [lattice.at(3, 2), lattice.at(27, 26)],
+      [lattice.at(10, 20), lattice.at(11, 5)],
+      [lattice.at(2, 14), lattice.at(27, 16)],
+    ];
+    const recomputed = (r: { arcs: Uint32Array; startFrac: number; endFrac: number }, lambda: number, K: number) => {
+      let c = 0;
+      for (let i = 0; i < r.arcs.length; i++) {
+        const frac = r.arcs.length === 1 ? r.endFrac - r.startFrac : i === 0 ? 1 - r.startFrac : i === r.arcs.length - 1 ? r.endFrac : 1;
+        c += searcher.arcCost(r.arcs[i], lambda, 'walk', null, 5) * frac;
+        if (i > 0) c += searcher.turnCost(r.arcs[i - 1], r.arcs[i], K);
+      }
+      return c;
+    };
+    for (const [a, b] of pairs) {
+      const o = snapPoint(spatial, a, 'walk', 'origin'), d = snapPoint(spatial, b, 'walk', 'destination');
+      const free = searcher.run(o, d, { lambda: 0, mode: 'walk' })!;
+      const budget = free.lengthM * 1.25;
+      for (const lambda of [0.35, 1, 3, 9]) {
+        const node = searcher.run(o, d, { lambda, mode: 'walk', budget })!;
+        // K → 0: the arc-labelled search must find the node-labelled optimum (exactness both ways).
+        const eps = searcher.run(o, d, { lambda, mode: 'walk', budget, turnPenaltyM: 1e-6 })!;
+        expect(eps.cost).toBeGreaterThanOrEqual(node.cost - 1e-6);
+        expect(eps.cost).toBeLessThanOrEqual(node.cost + 1e-6 * 1.5 * node.arcs.length);
+        for (const K of [TURN_PENALTY_M.walk, 20, 40]) {
+          const r = searcher.run(o, d, { lambda, mode: 'walk', budget, turnPenaltyM: K })!;
+          expect(r).not.toBeNull();
+          expect(r.lengthM).toBeGreaterThanOrEqual(free.lengthM - 1e-6);
+          expect(r.lengthM).toBeLessThanOrEqual(budget * 1.05 + 1e-6);
+          expect(r.cost).toBeGreaterThanOrEqual(r.lengthM - 1e-6); // admissible: the heuristic is a length lower bound
+          expect(r.cost).toBeCloseTo(recomputed(r, lambda, K), 6);
+          expect(hasImmediateUTurn(graph, r.arcs)).toBe(false);
+        }
+      }
+      // sweep(): Direct is the plain shortest path, the alternatives stay within the budget.
+      const sw = sweep(searcher, o, d, 'walk', 0.25)!;
+      expect(sw.shortest.lengthM).toBe(free.lengthM);
+      expect(Array.from(sw.shortest.arcs)).toEqual(Array.from(free.arcs));
+      for (const f of sw.feasible) expect(f.lengthM).toBeLessThanOrEqual(sw.budgetM + 0.5);
+    }
+    // Straight through is free, a right angle costs the penalty, a hairpin 1.5 × it.
+    const east = spatial.nearestArc(...midpoint(lattice.at(10, 10), lattice.at(11, 10)), ArcFlag.WALK)!.arc;
+    const eastOn = graph.nodeLon[graph.arcTo[east]] > graph.nodeLon[graph.arcFrom[east]] ? east : graph.arcReverse[east];
+    const n1110 = graph.arcTo[eastOn];
+    let straight = -1, right = -1, back = -1;
+    for (let x = graph.arcStart[n1110]; x < graph.arcStart[n1110 + 1]; x++) {
+      const to = graph.arcTo[x];
+      if (graph.nodeLon[to] > graph.nodeLon[n1110]) straight = x;
+      else if (graph.nodeLon[to] < graph.nodeLon[n1110]) back = x;
+      else if (graph.nodeLat[to] < graph.nodeLat[n1110]) right = x;
+    }
+    expect(searcher.turnCost(eastOn, straight, 12)).toBe(0);
+    expect(searcher.turnCost(eastOn, right, 12)).toBeCloseTo(12, 6);
+    expect(searcher.turnCost(eastOn, back, 12)).toBeCloseTo(18, 6);
+    expect(TURN_MIN_DEG).toBeGreaterThan(30); // a kink stays free
+  });
+
+  it('turn penalty prefers the straight route over the comb at equal length and novelty (route-quality-1 A7)', () => {
+    // (0,29) → (29,0): every monotone staircase is 5,800 m and all new (the stripe is crossed once,
+    // whichever way). Unpenalised, the (f, node index) tie-break walks a comb of ~36 turns; with the
+    // penalty the L-shaped path wins at the same length and the same new metres.
+    const o = snapPoint(spatial, lattice.at(0, 29), 'walk', 'origin'), d = snapPoint(spatial, lattice.at(29, 0), 'walk', 'destination');
+    const comb = searcher.run(o, d, { lambda: 1, mode: 'walk' })!;
+    const straight = searcher.run(o, d, { lambda: 1, mode: 'walk', turnPenaltyM: TURN_PENALTY_M.walk })!;
+    expect(arcTurns(comb.arcs)).toBeGreaterThanOrEqual(20);
+    expect(arcTurns(straight.arcs)).toBeLessThanOrEqual(3); // the L + at most a zero-length partial arc at each end
+    expect(straight.lengthM).toBeCloseTo(comb.lengthM, 6);
+    expect(straight.newM).toBeCloseTo(comb.newM, 0);
+    // Through findCandidates with the mode default: Direct is untouched (λ = 0, no penalty).
+    const res = findCandidates(graph, lookup, { from: lattice.at(0, 29), to: lattice.at(29, 0), mode: 'walk', detour: 0.25 }, { spatial, scorer, searcher });
+    const direct = res.candidates[res.candidates.length - 1];
+    expect(direct.name).toBe('Direct');
+    expect(direct.lengthM).toBe(5800);
+    expect(direct.lambda).toBe(0);
   });
 
   it('drive respects oneway rows, walk does not', () => {
@@ -152,11 +257,27 @@ describe('loop mode', () => {
       expect(c.pctNew).toBeGreaterThan(50);
       expect(compactness(c.coords)).toBeGreaterThanOrEqual(LOOP_MIN_COMPACTNESS);
     }
-    expect(res.candidates[0].name).toBe('Most new');
+    // Ranked by pctNew (P4); names are rank labels — "Most new" first, the rest "Balanced", no "Direct" loop (P5).
+    for (let i = 1; i < res.candidates.length; i++) expect(res.candidates[i].pctNew).toBeLessThanOrEqual(res.candidates[i - 1].pctNew);
+    expect(res.candidates.map((c) => c.name)).toEqual(['Most new', ...res.candidates.slice(1).map(() => 'Balanced')]);
     // The shape measure behind LOOP_MIN_COMPACTNESS: a 400 m square 0.79, a 10 × 400 m strip 0.08.
     const sq = 400 / 110_574, x = (m: number) => m / (111_320 * Math.cos(from[1] * Math.PI / 180));
     expect(compactness([[from[0], from[1]], [from[0] + x(400), from[1]], [from[0] + x(400), from[1] - sq], [from[0], from[1] - sq], [from[0], from[1]]])).toBeCloseTo(Math.PI / 4, 2);
     expect(compactness([[from[0], from[1]], [from[0] + x(400), from[1]], [from[0] + x(400), from[1] - sq / 40], [from[0], from[1] - sq / 40], [from[0], from[1]]])).toBeLessThan(LOOP_MIN_COMPACTNESS);
+  });
+
+  // Route-quality sweep (NYC): ranked by raw new metres, the longest loop in the ±25 % window won
+  // ("Most new" at 1.19–1.24 × target in 5 of 15 requests). No test looked at the loop order.
+  it('loops rank by pctNew, ties (same integer point) towards the target length — not by raw new metres (route-quality-1 P4)', () => {
+    const L = (lengthM: number, newM: number, heading: number) => ({ lengthM, newM, heading });
+    const long = L(2480, 1700, 0); // 69 %: the longest loop in the window and the most new metres
+    const dense = L(1900, 1500, 45); // 79 %
+    const near = L(2050, 1620, 90); // 79 % too, closer to the 2 km target → ahead of dense
+    const short = L(1600, 1200, 135); // 75 %
+    expect(loopPct(near)).toBe(loopPct(dense));
+    expect(rankLoops([long, dense, near, short], 2000)).toEqual([near, dense, short, long]);
+    expect(rankLoops([long, dense, near, short], 1900)).toEqual([dense, near, short, long]); // the tie flips with the target
+    expect(rankLoops([L(1000, 500, 90), L(1000, 500, 45)], 1000).map((l) => l.heading)).toEqual([45, 90]); // last resort: heading
   });
 
   // Route-quality sweep (NYC, 2026-09-02): 7 of 15 loops doubled back at a via point — the next leg

@@ -17,8 +17,20 @@ export interface RouteRequest {
   detour: number;
   /** Default 3. */
   maxCandidates?: number;
+  /**
+   * Turn penalty for the alternatives, metres-equivalent per 90° turn (heading changes under 40°
+   * are free; scaled by angle). Trades a little novelty for fewer zig-zags. Default per mode
+   * (walk / bike 12, drive 0); 0 = off. Never applies to "Direct", which stays the shortest path.
+   */
+  turnPenaltyM?: number;
 }
 
+/**
+ * A→B: "Most new" (newest distinct path within the budget), "Balanced" (best new metres per extra
+ * metre), "Direct" (the shortest path, always present, always last). Loops: rank labels only —
+ * loops are ranked by pctNew, the first is "Most new" and every other one "Balanced"; there is no
+ * "Direct" loop. The app shows loops as "Loop A / B / C" and ignores these names in loop mode.
+ */
 export type CandidateName = 'Most new' | 'Balanced' | 'Direct';
 
 export interface RouteCandidate {
@@ -49,6 +61,11 @@ export interface LoopRequest {
   /** Target loop length. */
   targetKm: number;
   maxCandidates?: number;
+  /**
+   * As RouteRequest.turnPenaltyM, applied to every leg. Default 0 (off): straighter legs made
+   * loops thinner in the NYC sweep, not better. Opt in to trade loop shape for fewer turns.
+   */
+  turnPenaltyM?: number;
 }
 
 export interface CoverageReport {
@@ -86,6 +103,11 @@ export interface RouteApi {
    * NoRouteError (ends snapped but no path between them for the mode).
    */
   route(req: RouteRequest): Promise<RouteResult>;
+  /**
+   * Round trips from `from` of about `targetKm` (each within ±25 %), ranked by pctNew — new metres
+   * per metre — with ties (same integer pctNew) broken towards the length closest to the target.
+   * May resolve with an empty list when no loop fits. Names are rank labels (see CandidateName).
+   */
   loop(req: LoopRequest): Promise<RouteResult>;
   /** The cell store changed (import / recording): drop cached novelty. */
   invalidateCells(version: number): Promise<void>;

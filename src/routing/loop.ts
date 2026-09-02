@@ -2,13 +2,15 @@
  * Loop ("take me somewhere new and back") — GraphHopper-style round trips: a fan of 8 headings;
  * per heading two via-points on a circle of radius targetKm/4 around the start (±45° of the
  * heading); the three legs are routed with the novelty penalty plus a ×5 penalty on arcs already
- * used by earlier legs of the same loop so the way back is not the way out. Loops are ranked by
- * never-visited metres and deduplicated; ≤ maxCandidates are returned.
+ * used by earlier legs of the same loop so the way back is not the way out (no turn penalty by
+ * default — see LOOP_TURN_PENALTY_M). Loops are ranked by pctNew (never-visited metres per metre;
+ * ties towards the target length) and deduplicated; ≤ maxCandidates are returned.
  */
 import type { LonLat, LoopRequest, RouteCandidate, RouteResult } from './api';
 import type { CellLookup } from './cells';
 import {
-  dismountMetres, etaMinutes, now, pathCoords, pickDistinct, snapPoint, type CandidateContext, type ScoredPath,
+  dismountMetres, etaMinutes, now, pathCoords, pickDistinct, searchOptions, snapPoint,
+  type CandidateContext, type ScoredPath,
 } from './candidates';
 import { MODE_BIT } from './graph-format';
 import type { Graph } from './graph';
@@ -44,6 +46,14 @@ export const LOOP_LEG_SLACKS: readonly number[] = [1.6, 3];
 export const LOOP_MIN_COMPACTNESS = 0.1;
 /** Via re-snaps per heading when a leg had to double back at a via (a dead-end pocket). */
 const LOOP_VIA_RETRIES = 2;
+/**
+ * Turn penalty for loop legs (see SearchOptions.turnPenaltyM): OFF. Unlike A→B alternatives the
+ * NYC sweep showed no win — at the walk default (12) loop turns/km fell 4.0 → 3.7 (p50) but
+ * straighter legs run out and back on parallel streets: compactness p50 0.36 → 0.31, pctNew
+ * 92 → 90, and a 3 km request lost two clean block loops for a 10.9 turns/km park wiggle.
+ * LoopRequest.turnPenaltyM opts in.
+ */
+export const LOOP_TURN_PENALTY_M = 0;
 const DEG = Math.PI / 180;
 
 /** Point at `distM` metres and `bearingDeg` (0 = north, clockwise) from `from`. */
@@ -77,7 +87,7 @@ function straightM(a: LonLat, b: LonLat): number {
  * only way out; a leg that finds nothing inside its length budget is retried with each further
  * slack in `slacks`.
  */
-export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: LoopRequest['mode'], heading: number, slacks: readonly number[] = LOOP_LEG_SLACKS): LoopPath | null {
+export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: LoopRequest['mode'], heading: number, slacks: readonly number[] = LOOP_LEG_SLACKS, turnPenaltyM = LOOP_TURN_PENALTY_M): LoopPath | null {
   const graph = searcher.graph;
   const avoid = new Uint8Array(graph.arcCount);
   const stops = [origin, ...vias, origin];
@@ -93,7 +103,7 @@ export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: 
     let pocket: number[] | null = null;
     for (const forbidStartArc of forbid >= 0 ? [forbid, -1] : [-1]) {
       for (const slack of slacks) {
-        leg = searcher.run(a, b, { lambda: LOOP_LAMBDA, mode, budget: Math.max(slack * d, d + 400), avoid, avoidFactor: LOOP_AVOID_FACTOR, forbidStartArc });
+        leg = searcher.run(a, b, { ...searchOptions(mode, LOOP_LAMBDA, Math.max(slack * d, d + 400), turnPenaltyM), avoid, avoidFactor: LOOP_AVOID_FACTOR, forbidStartArc });
         if (leg) break;
       }
       if (leg) { if (forbidStartArc < 0 && forbid >= 0) { uturnVias.push(i - 2); uturnPockets.push(pocket ?? []); } break; }
@@ -150,6 +160,21 @@ export function compactness(coords: LonLat[]): number {
   return len > 0 ? (4 * Math.PI * Math.abs(area) / 2) / (len * len) : 0;
 }
 
+/** Integer pctNew of a loop, the ranking key (what the UI shows). */
+export function loopPct(l: { lengthM: number; newM: number }): number {
+  return l.lengthM > 0 ? Math.round((100 * l.newM) / l.lengthM) : 0;
+}
+
+/**
+ * Rank loops by new metres per metre, not new metres: by new metres the longest loop in the
+ * window won (NYC sweep: "Most new" at 1.19–1.24 × target in 5 of 15 requests). Integer points,
+ * as the UI shows them, so loops that read the same are ordered by closeness to the target;
+ * then by heading for determinism. Sorts in place and returns the array.
+ */
+export function rankLoops<T extends { lengthM: number; newM: number; heading: number }>(loops: T[], targetM: number): T[] {
+  return loops.sort((a, b) => loopPct(b) - loopPct(a) || Math.abs(a.lengthM - targetM) - Math.abs(b.lengthM - targetM) || a.heading - b.heading);
+}
+
 export function loopCoords(graph: Graph, loop: LoopPath): LonLat[] {
   const out: LonLat[] = [];
   for (const leg of loop.legs) {
@@ -170,6 +195,7 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
   const origin = snapPoint(spatial, req.from, req.mode, 'origin');
   const targetM = req.targetKm * 1000;
   const max = Math.max(1, req.maxCandidates ?? 3);
+  const turnPenaltyM = req.turnPenaltyM ?? LOOP_TURN_PENALTY_M;
   const loops: LoopPath[] = [];
   const modeMask = MODE_BIT[req.mode];
   // A via is arrived on and then left: skip island arcs that would sink a leg, anything the
@@ -191,7 +217,7 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
       const s1 = spatial.nearestArc(p1[0], p1[1], modeMask, radius / 2, ok);
       const s2 = spatial.nearestArc(p2[0], p2[1], modeMask, radius / 2, ok);
       if (!s1 || !s2 || s1.arc === s2.arc) break;
-      const loop = routeLoop(searcher, origin, [s1, s2], req.mode, heading);
+      const loop = routeLoop(searcher, origin, [s1, s2], req.mode, heading, LOOP_LEG_SLACKS, turnPenaltyM);
       if (!loop) break;
       if (loop.uturnVias.length === 0) return loop;
       fallback ??= loop;
@@ -215,15 +241,16 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
     coordsOf.set(loop, coords);
     loops.push(loop);
   }
-  loops.sort((a, b) => b.newM - a.newM || Math.abs(a.lengthM - targetM) - Math.abs(b.lengthM - targetM) || a.heading - b.heading);
-  const picked = pickDistinct(loops, [], max) as LoopPath[];
-  const names: RouteCandidate['name'][] = ['Most new', 'Balanced', 'Direct'];
+  const picked = pickDistinct(rankLoops(loops, targetM), [], max) as LoopPath[];
+  // Rank labels: the newest loop is "Most new", every other one "Balanced" — a loop is never
+  // "Direct" (the app labels loops A/B/C by position and ignores these).
+  const names: RouteCandidate['name'][] = ['Most new', 'Balanced'];
   const candidates = picked.map((l, i) => ({
     name: names[Math.min(i, names.length - 1)],
     coords: coordsOf.get(l)!,
     lengthM: Math.round(l.lengthM),
     newM: Math.round(l.newM),
-    pctNew: l.lengthM > 0 ? Math.round((100 * l.newM) / l.lengthM) : 0,
+    pctNew: loopPct(l),
     lambda: l.lambda,
     etaMin: etaMinutes(l.lengthM, req.mode, req.mode === 'bike' ? l.legs.reduce((m, leg) => m + dismountMetres(graph, leg), 0) : 0),
   }));

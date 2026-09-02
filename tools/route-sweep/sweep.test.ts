@@ -20,11 +20,11 @@ import { describe, it } from 'vitest';
 import { distanceM } from '../../src/grid/cell';
 import type { LonLat, RouteCandidate, RouteResult } from '../../src/routing/api';
 import {
-  NoRouteError, SnapError, findCandidates, now, pathSegments, sharedFraction, snapPair,
+  NoRouteError, SnapError, TURN_PENALTY_M, findCandidates, now, pathSegments, searchOptions, sharedFraction, snapPair,
 } from '../../src/routing/candidates';
 import { ArcFlag, type Mode } from '../../src/routing/graph-format';
 import { Graph } from '../../src/routing/graph';
-import { findLoops } from '../../src/routing/loop';
+import { LOOP_TURN_PENALTY_M, findLoops } from '../../src/routing/loop';
 import { NoveltyScorer } from '../../src/routing/novelty';
 import type { PathResult } from '../../src/routing/search';
 import { encodePng } from '../../tests/fixtures/grid/png';
@@ -35,6 +35,12 @@ const OUT = process.env.ROUTE_SWEEP_OUT ?? new URL('../../test-results/route-swe
 const TAG = process.env.ROUTE_SWEEP_TAG ?? 'run';
 const SEED = Number(process.env.ROUTE_SWEEP_SEED ?? 20260902);
 const WAY_CACHE = process.env.ROUTE_SWEEP_WAYCACHE ?? join(OUT, 'nyc-way-classes.json');
+/** Turn penalty (metres per 90° turn) for every request, all modes; unset = the engine's per-mode default. */
+const TURN = process.env.ROUTE_SWEEP_TURN !== undefined ? Number(process.env.ROUTE_SWEEP_TURN) : undefined;
+const turnFor = (mode: Mode) => TURN ?? TURN_PENALTY_M[mode];
+const loopTurnFor = () => TURN ?? LOOP_TURN_PENALTY_M;
+/** Extra calls to render regardless of score, e.g. `20:walk:0.25,1001:walk` (loops: id:mode). */
+const RENDER = (process.env.ROUTE_SWEEP_RENDER ?? '').split(',').filter(Boolean).map((s) => s.split(':'));
 
 // ---------------------------------------------------------------------------------------------
 // helpers
@@ -314,7 +320,7 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
       const tw = now();
       let res: RouteResult | null = null, error: string | undefined;
       try {
-        res = findCandidates(graph, lookup, { from: pair.from, to: pair.to, mode, detour }, ctx);
+        res = findCandidates(graph, lookup, { from: pair.from, to: pair.to, mode, detour, turnPenaltyM: turnFor(mode) }, ctx);
       } catch (e) {
         error = e instanceof SnapError || e instanceof NoRouteError ? `${e.name}: ${e.message}` : String(e);
       }
@@ -324,13 +330,13 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
       if (!res) { call.violations.push(error ?? 'no result'); return; }
       const direct = res.candidates[res.candidates.length - 1];
       if (direct.name !== 'Direct') call.violations.push('Direct not last');
-      // reproduce the arcs of every candidate (deterministic search)
+      // reproduce the arcs of every candidate (deterministic search, same options as sweep())
       const [o, d] = snapPair(spatial, pair.from, pair.to, mode);
-      const s0 = searcher.run(o, d, { lambda: 0, mode });
+      const s0 = searcher.run(o, d, searchOptions(mode, 0));
       const budget = s0 ? (1 + detour) * s0.lengthM : 0;
       const rows: CandRow[] = [];
       for (const c of res.candidates) {
-        const p = c.lambda === 0 ? s0 : searcher.run(o, d, { lambda: c.lambda, mode, budget });
+        const p = c.lambda === 0 ? s0 : searcher.run(o, d, searchOptions(mode, c.lambda, budget, turnFor(mode)));
         let arcs: number[] | null = null, fracs: number[] | null = null;
         if (p && Math.abs(p.lengthM - c.lengthM) <= 1) { arcs = Array.from(p.arcs); fracs = fracsOf(p); }
         const row = analyse({ kind: 'route', id: pair.id, mode, detour, nearHome: pair.nearHome, shortestM: res.shortestM, budgetM: res.budgetM, straightM: pair.straightM, ms: res.ms }, c, direct, arcs, fracs);
@@ -357,7 +363,7 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
       const { id: lid, from } = spec;
       const tw = now();
       let res: RouteResult | null = null, error: string | undefined;
-      try { res = findLoops(graph, lookup, { from, mode: spec.mode, targetKm: spec.targetKm }, ctx); } catch (e) { error = String(e); }
+      try { res = findLoops(graph, lookup, { from, mode: spec.mode, targetKm: spec.targetKm, turnPenaltyM: loopTurnFor() }, ctx); } catch (e) { error = String(e); }
       const wallMs = now() - tw;
       const call: CallRow = { kind: 'loop', id: lid, mode: spec.mode, detour: 0, targetKm: spec.targetKm, from, straightM: 0, nearHome: spec.nearHome, ms: res?.ms ?? wallMs, wallMs, shortestM: spec.targetKm * 1000, budgetM: res?.budgetM ?? 0, candidates: res?.candidates.length ?? 0, error, pairShare: [], violations: [] };
       calls.push(call);
@@ -380,6 +386,8 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
     // ---- 4. tables ----
     const md: string[] = [];
     md.push(`## Sweep \`${TAG}\` — seed ${SEED}, ${pairs.length} pairs, ${calls.length} calls, ${cands.length} candidates`);
+    md.push('');
+    md.push(`Turn penalty (m per 90° turn): ${MODES.map((m) => `${m} ${turnFor(m)}`).join(', ')}, loops ${loopTurnFor()}${TURN !== undefined ? ' (ROUTE_SWEEP_TURN override)' : ' (engine defaults)'}.`);
     md.push('');
     md.push(`Graph: ${tiles.length} tiles, ${graph.nodeCount} nodes, ${graph.arcCount} arcs. Visited set: ${visitedArcs.size} segments / ${visitedKm.toFixed(1)} km around ${HOMES.map((h) => h.name).join(' + ')} (${lookup.size} cells).`);
     md.push('');
@@ -442,6 +450,12 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
     md.push('');
     md.push('### Loops');
     md.push('');
+    {
+      const L = cands.filter((r) => r.kind === 'loop'), L1 = L.filter((r) => r.name === 'Most new');
+      const ratios = L.map((r) => r.ratio), off = L.map((r) => Math.abs(r.ratio - 1));
+      md.push(`Distribution over ${L.length} loops (${L1.length} first picks): length/target p10 / p50 / p90 = ${f2(quantile(ratios, 0.1))} / ${f2(quantile(ratios, 0.5))} / ${f2(quantile(ratios, 0.9))}; |ratio − 1| p50 / p90 = ${f2(quantile(off, 0.5))} / ${f2(quantile(off, 0.9))}; loops at ≥ 1.19 × target: ${L.filter((r) => r.ratio >= 1.19).length} (first picks ${L1.filter((r) => r.ratio >= 1.19).length}); pctNew p50 all / first picks = ${f0(quantile(L.map((r) => r.pctNew), 0.5))} / ${f0(quantile(L1.map((r) => r.pctNew), 0.5))}; coord turns/km p50 / p90 = ${f1(quantile(L.map((r) => r.coordTurnsPerKm), 0.5))} / ${f1(quantile(L.map((r) => r.coordTurnsPerKm), 0.9))}; compactness p50 = ${f2(quantile(L.map((r) => r.compact), 0.5))}; loop ms p50 / max = ${f0(quantile(calls.filter((c) => c.kind === 'loop').map((c) => c.ms), 0.5))} / ${f0(Math.max(...calls.filter((c) => c.kind === 'loop').map((c) => c.ms)))}.`);
+      md.push('');
+    }
     md.push('| id | mode | target km | near home | loops | ms | per loop: name len (ratio) pctNew twice% compact turns/km via-U-turns endGap |');
     md.push('|---|---|---|---|---|---|---|');
     for (const c of calls.filter((c) => c.kind === 'loop')) {
@@ -503,6 +517,14 @@ describe.skipIf(!ENABLED)('route-quality sweep (ROUTE_SWEEP=1)', () => {
       render(join(OUT, file), graph, scorer, visitedArcs, w.siblings, w.pins, HOMES.map((h) => h.p));
       md.push(`| ${i + 1} | ${file} | ${w.key} | #${w.row.id} ${w.row.kind} ${w.row.mode} d=${w.row.detour}${w.row.targetKm ? ` ${w.row.targetKm} km` : ''} | ${w.why} |`);
     });
+    md.push('');
+    for (const [id, mode, detour] of RENDER) {
+      const row = cands.find((r) => r.id === Number(id) && r.mode === mode && (detour === undefined ? r.kind === 'loop' : r.detour === Number(detour)));
+      if (!row) { md.push(`- render ${id}:${mode}:${detour ?? 'loop'}: no such call`); continue; }
+      const file = `${TAG}-pick-${row.kind}${row.id}-${row.mode}${row.kind === 'route' ? `-d${row.detour}` : ''}.png`;
+      render(join(OUT, file), graph, scorer, visitedArcs, sib(row), pinsOf(row), HOMES.map((h) => h.p));
+      md.push(`- rendered ${file}: ${sib(row).map((r) => `${r.name} ${r.lengthM} m ${r.pctNew} % ${f1(r.arcTurnsPerKm || r.coordTurnsPerKm)} turns/km`).join(' · ')}`);
+    }
     md.push('');
     md.push('Top 15 by category score (not all rendered):');
     md.push('');

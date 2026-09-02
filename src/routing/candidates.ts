@@ -9,13 +9,42 @@ import { ArcFlag, MODE_BIT, type Mode } from './graph-format';
 import type { Graph } from './graph';
 import { NoveltyScorer } from './novelty';
 import type { CellLookup } from './cells';
-import { Searcher, type PathResult } from './search';
+import { Searcher, type PathResult, type SearchOptions } from './search';
 import { SpatialIndex, canEnterArc, canLeaveArc, type Snap } from './spatial';
 
 export const LAMBDA_SWEEP = [0.35, 0.7, 1, 1.5, 2, 3, 4, 6, 9] as const;
 export const DEDUPE_SHARED = 0.6;
 export const SPEED_KMH: Record<Mode, number> = { walk: 4.8, bike: 15, drive: 30 };
 export const SNAP_MAX_M = 300;
+/**
+ * Default turn penalty per mode (metres-equivalent per 90° turn, see SearchOptions.turnPenaltyM)
+ * for the λ > 0 searches — Direct (λ = 0) is never penalised, it stays the distance-shortest
+ * path. NYC sweep (route-quality-2): 12 takes walk "Most new" from 2.3 → 1.2 turns/km (p50) and
+ * 4.5 → 3.0 (p90), the worst comb from 6.4 → 1.4, for ≤ 3 pct points of novelty on 3 of 19 pairs;
+ * 20 and 30 straighten nothing further at p50, cost novelty on one pair (30) and thin loops.
+ * Drive: 0 — drivers turn; the sweep showed no drive combs.
+ */
+export const TURN_PENALTY_M: Record<Mode, number> = { walk: 12, bike: 12, drive: 0 };
+/**
+ * An alternative must add at least max(MIN_GAIN_M, MIN_GAIN_FRAC · Direct's length) of new road
+ * over Direct. Without it a turn-penalised λ search in a never-visited area returns a straighter
+ * route that is "newer" only by being a few metres longer (NYC sweep: 6 of 40 walk calls got a
+ * "Most new" at 99–100 % vs Direct's 99–100 %); the unpenalised sweep never produced one.
+ */
+export const MIN_GAIN_M = 50;
+export const MIN_GAIN_FRAC = 0.01;
+
+/**
+ * Search options for one λ of the sweep: the turn penalty applies to the penalised searches only,
+ * so the λ = 0 baseline is the true shortest path. Shared with the loop legs and the sweep tool
+ * (which reproduces a candidate's arcs by re-running its search).
+ */
+export function searchOptions(mode: Mode, lambda: number, budgetM?: number, turnPenaltyM = 0): SearchOptions {
+  const opts: SearchOptions = { lambda, mode };
+  if (budgetM !== undefined) opts.budget = budgetM;
+  if (lambda > 0 && turnPenaltyM > 0) opts.turnPenaltyM = turnPenaltyM;
+  return opts;
+}
 /** How each mode reads in a user-facing message, and the two modes to suggest instead. */
 const MODE_WORD: Record<Mode, string> = { walk: 'walking', bike: 'cycling', drive: 'driving' };
 const OTHER_MODES: Record<Mode, string> = { walk: 'bike or drive', bike: 'walk or drive', drive: 'walk or bike' };
@@ -196,16 +225,17 @@ export function sweep(
   mode: Mode,
   detour: number,
   lambdas: readonly number[] = LAMBDA_SWEEP,
+  turnPenaltyM = TURN_PENALTY_M[mode],
 ): { shortest: ScoredPath; budgetM: number; feasible: ScoredPath[]; searches: number } | null {
   const graph = searcher.graph;
-  const s0 = searcher.run(origin, dest, { lambda: 0, mode });
+  const s0 = searcher.run(origin, dest, searchOptions(mode, 0));
   if (!s0) return null;
   const shortest: ScoredPath = { ...s0, lambda: 0, segments: pathSegments(graph, s0.arcs) };
   const budgetM = (1 + detour) * shortest.lengthM;
   const feasible: ScoredPath[] = [];
   let over = 0, searches = 1;
   for (const lambda of lambdas) {
-    const r = searcher.run(origin, dest, { lambda, mode, budget: budgetM });
+    const r = searcher.run(origin, dest, searchOptions(mode, lambda, budgetM, turnPenaltyM));
     searches++;
     if (!r) break;
     if (r.lengthM > budgetM + 0.5) {
@@ -219,12 +249,12 @@ export function sweep(
   return { shortest, budgetM, feasible, searches };
 }
 
-/** Pick up to `slots` mutually distinct paths (distinct from `against` too) from a ranked list. */
+/** Pick up to `slots` mutually distinct paths (distinct from `against` too) from a ranked list, each with ≥ `minNewM` new metres. */
 export function pickDistinct(ranked: ScoredPath[], against: ScoredPath[], slots: number, minNewM = -Infinity): ScoredPath[] {
   const picked: ScoredPath[] = [];
   for (const r of ranked) {
     if (picked.length >= slots) break;
-    if (r.newM <= minNewM) continue;
+    if (r.newM < minNewM) continue;
     let dup = false;
     for (const c of against) if (sharedFraction(r.segments, c.segments) > DEDUPE_SHARED) { dup = true; break; }
     if (!dup) for (const c of picked) if (sharedFraction(r.segments, c.segments) > DEDUPE_SHARED) { dup = true; break; }
@@ -237,11 +267,12 @@ export function pickDistinct(ranked: ScoredPath[], against: ScoredPath[], slots:
  * Alternatives to Direct, best first: "Most new" = the newest distinct feasible path; "Balanced" =
  * the distinct path with the best gain in new metres per extra metre over Direct (the runner-up by
  * new metres is usually a near-clone of Most new); further slots by new metres. Every pick beats
- * Direct on new metres and shares ≤ DEDUPE_SHARED of its segments with every other pick.
+ * Direct on new metres by at least the MIN_GAIN margin and shares ≤ DEDUPE_SHARED of its
+ * segments with every other pick.
  */
 export function selectAlternatives(shortest: ScoredPath, feasible: ScoredPath[], slots: number): ScoredPath[] {
   if (slots <= 0) return [];
-  const minNew = shortest.newM + 1e-6;
+  const minNew = shortest.newM + Math.max(MIN_GAIN_M, MIN_GAIN_FRAC * shortest.lengthM);
   const most = pickDistinct(feasible, [shortest], 1, minNew);
   if (slots === 1 || most.length === 0) return most;
   const efficiency = (p: ScoredPath) => (p.newM - shortest.newM) / Math.max(1, p.lengthM - shortest.lengthM);
@@ -258,7 +289,7 @@ export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteReque
   const searcher = ctx.searcher ?? new Searcher(graph, scorer);
   const [origin, dest] = snapPair(spatial, req.from, req.to, req.mode);
   const max = Math.max(1, req.maxCandidates ?? 3);
-  const sw = sweep(searcher, origin, dest, req.mode, req.detour);
+  const sw = sweep(searcher, origin, dest, req.mode, req.detour, LAMBDA_SWEEP, req.turnPenaltyM ?? TURN_PENALTY_M[req.mode]);
   if (!sw) throw new NoRouteError(req.mode);
   const { shortest, budgetM, feasible } = sw;
   const alts = selectAlternatives(shortest, feasible, max - 1);

@@ -84,7 +84,10 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
 - λ sweep {0.35, 0.7, 1, 1.5, 2, 3, 4, 6, 9}; keep paths with len ≤ B; dedupe (shared-arc fraction > 0.6 = duplicate);
   rank by new metres; return ≤3: "Most new", "Balanced", "Direct" (Direct = shortest, always present).
 - Modes: walk (ignores oneway; steps allowed), bike (oneway unless `oneway:bicycle=no`; steps = dismount), drive (oneway, no
-  footways; no turn restrictions in v1). Snap origin/destination to the nearest arc (grid-bucketed), split virtually.
+  footways; no turn restrictions in v1).
+- Turn penalty (2026-09-02, sweep-tuned): walk/bike searches add 12 m-equivalent per direction change ≥ ~40° (arc-labelled exact A*,
+  admissible); Direct (λ=0) is never penalised; drive 0; loops 0 by default (straight legs thin loops). Cost ≈ 2.2× per penalised search.
+- Loop ranking: by pctNew (ties → closest to target length); loop names 'Most new'/'Balanced' (UI shows Loop A/B/C). Snap origin/destination to the nearest arc (grid-bucketed), split virtually.
 - Loop mode ("Explore from here", shipped 2026-09-02): heading fan of 8, 2 via-points on a circle of radius ~0.22·T, own-route arcs ×5, ±25 % length window, keep 3 best; UI chips 2/3/5/8 km + 1–15 km slider.
 - Budget: < 2 s for a 10 km city route on an iPhone; graphs never materialise per-edge objects.
 
