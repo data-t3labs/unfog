@@ -61,10 +61,12 @@ node $C mirror   [--no-wait] [--force] [--dry-run]   # shard plan → shard work
 node $C all --publish                            # everything, in order (publish, then mirror)
 ```
 Every step is idempotent; re-running continues where it stopped (`state.json`). `--force` redoes
-steps whose outputs exist. Anything longer than ~2 min runs detached (survives the session):
+steps whose outputs exist. `build` and `borders` run in child processes with their own heap, but `merge`
+and `pack` run in the driver itself: launch the driver with a large heap (`node --max-old-space-size=49152`)
+— the North America merge died at Node's default ≈ 4 GB heap on 2026-09-02 and finished in 9.5 min with 48 GB. Anything longer than ~2 min runs detached (survives the session):
 
 ```
-bash ~/.openclaw/workspace/scripts/core/run-detached.sh TASK-<id>-na node $PWD/tools/build-graph/dist/continent.js all --publish --jobs 3
+bash ~/.openclaw/workspace/scripts/core/run-detached.sh TASK-<id>-na node --max-old-space-size=49152 $PWD/tools/build-graph/dist/continent.js all --publish --jobs 3
 tmux ls | grep job-TASK-<id>-na          # alive?
 tail -f ~/.openclaw/jobs/TASK-<id>-na-*.log
 node tools/build-graph/dist/continent.js status
@@ -196,6 +198,7 @@ any push there) re-enables them.
 
 - `md5 mismatch`: Geofabrik replaced the file mid-download; the driver re-downloads once, else `trash` the `.pbf` + `.ok` and re-run `fetch`.
 - child `FATAL ERROR: … heap out of memory`: raise the multiplier in `heapFor()` (build-continent.ts) or run `--jobs 1`.
+- driver `FATAL ERROR: … heap out of memory` during `merge`/`pack` (exit 134): relaunch with `node --max-old-space-size=49152 …`; every step resumes.
 - `build <id>: SKIP, no extract`: `fetch` first (or the bulk shell fetch in the report).
 - Very slow `pass 2` lines in borders: memory-bandwidth contention — lower `--jobs`.
 - `publish` throws after failed uploads: re-run `publish`; it uploads only what is missing/changed and writes `packs-index.json` last, so a partial run never publishes an index that points at missing packs.
