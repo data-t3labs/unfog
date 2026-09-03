@@ -1,0 +1,48 @@
+name: Mirror graph packs to GitHub Pages
+
+# Downloads this shard's packs (cells assigned to this repository's name in
+# data-t3labs/unfog:tools/build-graph/pages-shards.json) from the graphs-v1 release and publishes
+# them as this repo's Pages site. Nothing is stored in git. Skips the deploy when the live site
+# already serves the same packs (bytes + sha256). Docs: data-t3labs/unfog docs/coverage-runbook.md § Hosting.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Redeploy even if the live site already matches the release
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: mirror
+        run: node mirror-shard.mjs --shard "${{ github.event.repository.name }}" --out site ${{ inputs.force && '--force' || '' }}
+      - if: steps.mirror.outputs.changed == 'true'
+        run: du -sh site && ls site/packs | wc -l
+      - if: steps.mirror.outputs.changed == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - if: steps.mirror.outputs.changed == 'true'
+        id: deployment
+        uses: actions/deploy-pages@v4
