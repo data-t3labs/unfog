@@ -8,6 +8,7 @@ import { createDataScreen } from './app/data';
 import { loadEngines } from './app/engines';
 import { fmtArea, fmtInt } from './app/format';
 import { createHelpScreen, showInstallCardIfNeeded } from './app/help';
+import { startPrefetchDriver } from './app/prefetch-driver';
 import { initPwa } from './app/pwa';
 import { createRouteSheet } from './app/route-sheet';
 import { createSearch } from './app/search';
@@ -195,6 +196,8 @@ async function boot(): Promise<void> {
   const dataScreen = createDataScreen(ctx);
   statsScreen = createStatsScreen(ctx);
   helpScreen = createHelpScreen(ctx);
+  // Coverage v2: the streets around you download as you go (packs; src/app/prefetch-driver.ts).
+  startPrefetchDriver(ctx);
 
   shell.searchPill.addEventListener('click', () => search.open());
   shell.searchClear.addEventListener('click', () => routeSheet.close());

@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { makeLattice } from '../../tests/fixtures/routing/lattice';
-import { graphTileBounds, packGraphTile, type RegionManifest } from './graph-format';
+import { graphTileBounds, packGraphTile, unpackGraphTile, type RegionManifest } from './graph-format';
 import { TileSource, graphTilesFor, tileKeyOf } from './tiles-source';
 
 function fakeFetch(files: Map<string, Uint8Array | object>, calls: string[]): typeof fetch {
@@ -36,7 +36,7 @@ describe('TileSource', () => {
     const bbox: [number, number, number, number] = [b.west + 1e-6, b.south + 1e-6, b.east - 1e-6, b.north - 1e-6];
     expect(graphTilesFor(bbox)).toEqual([[inputs[0].tx, inputs[0].ty]]);
     const cov = await src.coverage(bbox);
-    expect(cov).toEqual({ needed: 1, available: 1, regions: ['test'] });
+    expect(cov).toEqual({ needed: 1, available: 1, packable: 0, regions: ['test'] });
     const first = await src.tilesFor(bbox);
     expect(first.tiles.length).toBe(1);
     expect(first.keys).toEqual([tileKeyOf(inputs[0].tx, inputs[0].ty)]);
@@ -105,6 +105,46 @@ describe('TileSource', () => {
     expect(await src.listDownloads()).toEqual([]);
     src.clearMemory();
     expect((await src.tilesFor(bbox)).tiles.length).toBe(0);
+    await src.close();
+  });
+
+  it('asks the fallback (pack cache) after memory, prebuilt and downloads; coverage counts its tiles as available and the fetchable rest as packable', async () => {
+    const lattice = makeLattice({ size: 4, spacingM: 100 });
+    const t = [...lattice.tiles.values()][0];
+    const packed = new Map([[tileKeyOf(t.tx, t.ty), packGraphTile(t)]]);
+    const east: [number, number] = [t.tx + 1, t.ty]; // published, not cached
+    const src = new TileSource({ fetch: fakeFetch(new Map(), []) });
+    await src.init('/unfog/');
+    const gets: string[] = [];
+    src.fallback = {
+      async getTile(x, y) {
+        gets.push(tileKeyOf(x, y));
+        const b = packed.get(tileKeyOf(x, y));
+        return b ? unpackGraphTile(b) : null;
+      },
+      async hasTile(x, y) {
+        return packed.has(tileKeyOf(x, y));
+      },
+      covers: (x, y) => packed.has(tileKeyOf(x, y)) || (x === east[0] && y === east[1]),
+    };
+    const boxOf = (x: number, y: number): [number, number, number, number] => {
+      const b = graphTileBounds(x, y);
+      return [b.west + 1e-6, b.south + 1e-6, b.east - 1e-6, b.north - 1e-6];
+    };
+    expect(await src.coverage(boxOf(t.tx, t.ty))).toEqual({ needed: 1, available: 1, packable: 0, regions: [] });
+    expect(await src.coverage(boxOf(east[0], east[1]))).toEqual({ needed: 1, available: 0, packable: 1, regions: [] });
+    expect(await src.coverage(boxOf(t.tx + 2, t.ty))).toEqual({ needed: 1, available: 0, packable: 0, regions: [] });
+    expect(await src.missingLocally(boxOf(t.tx, t.ty))).toEqual([[t.tx, t.ty]]); // the fallback is not "local" until decoded
+    const got = await src.tilesFor(boxOf(t.tx, t.ty));
+    expect(got.tiles.length).toBe(1);
+    expect(got.tiles[0].nodeId.length).toBe(t.nodeId.length);
+    expect(gets).toEqual([tileKeyOf(t.tx, t.ty)]);
+    await src.tilesFor(boxOf(t.tx, t.ty));
+    expect(gets.length).toBe(1); // memory hit now
+    expect(await src.missingLocally(boxOf(t.tx, t.ty))).toEqual([]);
+    const none = await src.tilesFor(boxOf(east[0], east[1]));
+    expect(none.tiles.length).toBe(0);
+    expect(none.missing).toEqual([tileKeyOf(east[0], east[1])]);
     await src.close();
   });
 });

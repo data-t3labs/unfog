@@ -1,72 +1,22 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
 import { makeLattice } from '../../tests/fixtures/routing/lattice';
+import { fakePackServer as fakeServer, publishPacks } from '../../tests/fixtures/routing/pack-server';
 import { graphTileBounds, packGraphTile, unpackGraphTile, type GraphTileInput } from './graph-format';
 import {
   PACK_HEADER_BYTES, cellKey, cellOf, coalesceRanges, encodePack, mortonKey, packIndexBytes, parseCellKey, parsePackIndex, rangeHeader, sliceEntry,
-  type PacksIndex,
 } from './pack-format';
 import { PackSource, tilesInBBox } from './pack-source';
 
-// ---- fixtures ---------------------------------------------------------------------------------
+// ---- fixtures (the fake Range-capable host + publisher live in tests/fixtures/routing/pack-server.ts, shared with the engine test)
 
-function latticeTiles(size: number, spacingM: number): GraphTileInput[] {
-  return [...makeLattice({ size, spacingM }).tiles.values()];
-}
-
-interface FakeServer {
-  fetch: typeof fetch;
-  calls: Array<{ url: string; range: string | null }>;
-  /** When true the server ignores Range and answers 200 with the whole body. */
-  ignoreRange: boolean;
-  fail: boolean;
-  files: Map<string, Uint8Array | object>;
-}
-
-function fakeServer(files: Map<string, Uint8Array | object>): FakeServer {
-  const s: FakeServer = { calls: [], ignoreRange: false, fail: false, files, fetch: null as unknown as typeof fetch };
-  s.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
-    const headers = new Headers(init?.headers);
-    const range = headers.get('range');
-    s.calls.push({ url, range });
-    if (s.fail) throw new TypeError('network down');
-    const body = files.get(url);
-    if (body === undefined) return new Response(null, { status: 404 });
-    if (!(body instanceof Uint8Array)) return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
-    if (range && !s.ignoreRange) {
-      const m = /^bytes=(\d+)-(\d+)$/.exec(range)!;
-      const start = Number(m[1]), end = Math.min(Number(m[2]), body.length - 1);
-      return new Response(body.slice(start, end + 1).buffer as ArrayBuffer, { status: 206, headers: { 'content-range': `bytes ${start}-${end}/${body.length}` } });
-    }
-    return new Response(body.slice().buffer as ArrayBuffer, { status: 200 });
-  }) as typeof fetch;
-  return s;
+function latticeTiles(size: number, spacingM: number, origin?: [number, number]): GraphTileInput[] {
+  return [...makeLattice({ size, spacingM, origin }).tiles.values()];
 }
 
 const BASE = 'https://example.test/release/';
 
-function publish(tiles: GraphTileInput[], builtAt = '2026-09-02T00:00:00Z'): { files: Map<string, Uint8Array | object>; index: PacksIndex; packs: Map<string, ReturnType<typeof encodePack>> } {
-  const byCell = new Map<string, GraphTileInput[]>();
-  for (const t of tiles) {
-    const [cx, cy] = cellOf(t.tx, t.ty);
-    const k = cellKey(cx, cy);
-    (byCell.get(k) ?? byCell.set(k, []).get(k)!).push(t);
-  }
-  const files = new Map<string, Uint8Array | object>();
-  const packs = new Map<string, ReturnType<typeof encodePack>>();
-  const index: PacksIndex = { version: 1, zoom: 12, packZoom: 6, builtAt, release: 'test', packs: {} };
-  for (const [k, list] of byCell) {
-    const [cx, cy] = parseCellKey(k)!;
-    const p = encodePack([cx, cy], list.map((t) => ({ tx: t.tx, ty: t.ty, bytes: packGraphTile(t) })));
-    packs.set(k, p);
-    const url = `${BASE}6-${cx}-${cy}.ufp`;
-    files.set(url, p.bytes);
-    index.packs[k] = { url, bytes: p.bytes.length, indexBytes: p.index.indexBytes, tiles: p.index.tileCount, builtAt, source: 'lattice' };
-  }
-  files.set(`${BASE}packs-index.json`, index);
-  return { files, index, packs };
-}
+const publish = (tiles: GraphTileInput[], builtAt?: string) => publishPacks(tiles, { base: BASE, builtAt });
 
 const bboxOf = (t: { tx: number; ty: number }): [number, number, number, number] => {
   const b = graphTileBounds(t.tx, t.ty);
@@ -242,5 +192,50 @@ describe('PackSource', () => {
     await src3.clear(true);
     expect(src3.packsIndex).toBeNull();
     await src.close(); await src2.close(); await src3.close();
+  });
+
+  it('a pack whose URL 404s (shard not deployed) fails its tiles quietly; covers/status group by cell; init never waits past its refresh timeout', async () => {
+    // Two cells: New York (default lattice origin) and Vancouver; the New York pack is missing from the host.
+    const ny = latticeTiles(4, 100), van = latticeTiles(4, 100, [-123.12, 49.28]);
+    const nyCell = cellKey(...cellOf(ny[0].tx, ny[0].ty)), vanCell = cellKey(...cellOf(van[0].tx, van[0].ty));
+    expect(nyCell).not.toBe(vanCell);
+    const { files, index } = publishPacks([...ny, ...van], { base: BASE, source: 'Geofabrik us/new-york 2026-09-01' });
+    files.delete(index.packs[nyCell].url);
+    const server = fakeServer(files);
+    const src = new PackSource({ indexUrl: `${BASE}packs-index.json`, fetch: server.fetch, dbName: 'unfog-packs-404' });
+    await src.init();
+    expect(src.covers(ny[0].tx, ny[0].ty)).toBe(true);
+    expect(src.covers(van[0].tx, van[0].ty)).toBe(true);
+    expect(src.covers(0, 0)).toBe(false);
+    const r = await src.fetchTiles([[ny[0].tx, ny[0].ty], [van[0].tx, van[0].ty]]);
+    expect(r.failed).toEqual([`${ny[0].tx}/${ny[0].ty}`]);
+    expect(r.fetched).toBe(1);
+    expect(await src.getTile(ny[0].tx, ny[0].ty)).toBeNull(); // the retry 404s again: null, never a throw
+    expect(await src.coverage(bboxOf(ny[0]))).toEqual({ needed: 1, cached: 0, packable: 1, cells: [nyCell] });
+    expect(await src.coverage(bboxOf(van[0]))).toEqual({ needed: 1, cached: 1, packable: 1, cells: [vanCell] });
+    const status = await src.status();
+    expect(status.indexCells).toBe(2);
+    expect(status.indexAgeMs).toBeLessThan(60_000);
+    expect(status.totalTiles).toBe(1);
+    expect(status.cells).toEqual([{ cell: vanCell, tiles: 1, bytes: status.totalBytes, lastUsed: status.cells[0].lastUsed, source: 'Geofabrik us/new-york 2026-09-01' }]);
+    await src.clear();
+    expect((await src.status()).cells).toEqual([]);
+    await src.close();
+
+    // Boot bound: an index that takes 200 ms arrives after init({ refreshTimeoutMs: 20 }) returned, in the background.
+    const slow: typeof fetch = async (input, init) => {
+      await new Promise((res) => setTimeout(res, 200));
+      return server.fetch(input, init);
+    };
+    const late = new PackSource({ indexUrl: `${BASE}packs-index.json`, fetch: slow, dbName: 'unfog-packs-late' });
+    const t0 = Date.now();
+    await late.init({ refreshTimeoutMs: 20 });
+    expect(Date.now() - t0).toBeLessThan(150);
+    expect(late.packsIndex).toBeNull();
+    expect(late.covers(van[0].tx, van[0].ty)).toBe(false);
+    expect(await late.indexRefresh).toBe(true);
+    expect(late.covers(van[0].tx, van[0].ty)).toBe(true);
+    await late.clear(true);
+    await late.close();
   });
 });

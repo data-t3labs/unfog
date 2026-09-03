@@ -13,6 +13,7 @@ import { fmtArea, fmtBytes, fmtDate, fmtDateTime, fmtDistance, fmtInt, fmtRelati
 import { GREYED_OUT_HINT } from './help';
 import { icons } from './icons';
 import type { ImportOutcome, ImportProgress } from './import-types';
+import { createPacksSection } from './packs-data';
 import { requestPersistentStorage } from './pwa';
 import { exportTrackGpx, shareOrDownload } from './share';
 import { readJSON, writeJSON } from './settings';
@@ -180,7 +181,8 @@ export function createDataScreen(ctx: AppContext): DataScreen {
     backupInfo.classList.toggle('warn', old);
   }
 
-  // ---- regions
+  // ---- routing data: the automatic pack cache (coverage v2), then the prebuilt regions + downloaded areas
+  const packsSection = createPacksSection(ctx);
   const regionsList = el('div', { class: 'list' });
   async function renderRegions(): Promise<void> {
     clear(regionsList);
@@ -324,6 +326,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       exportBtn,
       backupInfo,
       el('h3', { text: 'Routing data' }),
+      packsSection.el,
       regionsList,
       el('h3', { text: 'Sessions' }),
       el('p', { class: 'muted small', text: 'What Track my movement recorded: one session per day the app was open (or per launch). Export one as GPX for Fog of World’s Import folder.' }),
@@ -335,7 +338,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
 
   async function refresh(): Promise<void> {
     renderBackupInfo();
-    await Promise.all([renderRegions(), renderSessions()]);
+    await Promise.all([packsSection.refresh(), renderRegions(), renderSessions()]);
   }
 
   return {

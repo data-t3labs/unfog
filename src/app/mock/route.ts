@@ -202,7 +202,22 @@ export function createMockRoute(synth: SynthCells): RouteApi {
       const needed = (Math.abs(x1 - x0) + 1) * (Math.abs(y1 - y0) + 1);
       const c: LonLat = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
       const regions = REGIONS.filter((r) => inBBox(c, r.bbox)).map((r) => r.id);
-      return { needed, available: covered(c) ? needed : 0, regions };
+      return { needed, available: covered(c) ? needed : 0, packable: 0, regions };
+    },
+    // No pack cache in mock mode: nothing is fetched, nothing is listed.
+    async packsHasTile() {
+      return false;
+    },
+    async packsFetchTiles(tiles) {
+      return { fetched: 0, bytes: 0, uncovered: tiles.map(([x, y]) => `${x}/${y}`), failed: [], alreadyCached: 0 };
+    },
+    async packsListCached() {
+      return [];
+    },
+    async packsEvict() {},
+    async packsClear() {},
+    async packsStatus() {
+      return { indexAgeMs: Infinity, indexCells: 0, cells: [], totalBytes: 0, totalTiles: 0 };
     },
     async downloadRegion(regionId, onProgress) {
       const total = 24;

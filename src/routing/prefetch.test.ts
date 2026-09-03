@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createPrefetchDriver } from '../app/prefetch-driver';
 import { graphTileBounds, lonLatToGraphTile } from './graph-format';
 import { DEFAULT_PREFETCH, Prefetcher, decidePrefetch, initialPrefetchState, planEviction, ringTiles, type PrefetchCache, type PrefetchEnv } from './prefetch';
 
@@ -173,5 +174,60 @@ describe('Prefetcher', () => {
     expect((await p.tick(env({ now: 2 }))).fetched).toBe(5);
     expect(p.state.pending).toBe(false);
     expect((await p.tick(env({ now: 3 }))).decision).toEqual({ action: 'skip', reason: 'unchanged' });
+  });
+});
+
+describe('createPrefetchDriver (src/app/prefetch-driver.ts)', () => {
+  it('starts on the map centre, rounds at once on a fix in a new tile, ignores map moves while tracking, honours them idle, and stops cleanly', async () => {
+    const cache = fakeCache(() => true);
+    const route = { packsHasTile: cache.hasTile, packsFetchTiles: cache.fetchTiles, packsListCached: cache.listCached, packsEvict: cache.evict };
+    let fix: ((lon: number, lat: number) => void) | null = null;
+    let move: (() => void) | null = null;
+    let centre = centreOf(500, 600);
+    let tracking = false;
+    let online = true;
+    let unsubscribed = 0;
+    const driver = createPrefetchDriver({
+      route,
+      onFix: (cb) => { fix = cb; return () => { fix = null; unsubscribed++; }; },
+      onMapMove: (cb) => { move = cb; return () => { move = null; unsubscribed++; }; },
+      mapCentre: () => centre,
+      tracking: () => tracking,
+      env: () => ({ online, saveData: false, now: Date.now() }),
+      tickMs: 3_600_000,
+      onlineTarget: null,
+      config: { ...DEFAULT_PREFETCH, minIntervalMs: 0, positionPriorityMs: 0 },
+    });
+    // The saved map centre is where the user was: its ring is fetched right away.
+    await driver.tick();
+    expect(driver.prefetcher.state.centre).toEqual([500, 600]);
+    expect(cache.tiles.size).toBe(25);
+    // A fix in another tile → a round at once (no wait for the timer).
+    fix!(...centreOf(700, 700));
+    await driver.tick();
+    expect(cache.tiles.size).toBe(50);
+    // Map moves while a tracking session runs do not move the ring; idle ones do.
+    tracking = true;
+    centre = centreOf(900, 900);
+    move!();
+    await driver.tick();
+    expect(driver.prefetcher.state.centre).toEqual([700, 700]);
+    expect(cache.tiles.size).toBe(50);
+    tracking = false;
+    move!();
+    await driver.tick();
+    expect(driver.prefetcher.state.centre).toEqual([900, 900]);
+    expect(cache.tiles.size).toBe(75);
+    // Offline: nothing is fetched; a tick when back online resumes.
+    online = false;
+    fix!(...centreOf(300, 300));
+    expect((await driver.tick()).decision).toEqual({ action: 'skip', reason: 'offline' });
+    expect(cache.tiles.size).toBe(75);
+    online = true;
+    expect((await driver.tick()).fetched).toBe(25);
+    driver.stop();
+    expect(unsubscribed).toBe(2);
+    expect(fix).toBeNull();
+    expect(move).toBeNull();
   });
 });

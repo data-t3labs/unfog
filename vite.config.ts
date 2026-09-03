@@ -18,6 +18,51 @@ function buildStamp(): string {
   }
 }
 
+type RuntimeCachingEntry = NonNullable<NonNullable<NonNullable<Parameters<typeof VitePWA>[0]>['workbox']>['runtimeCaching']>[number];
+
+/**
+ * Service-worker runtime caching (exported so tests/unit/sw-runtime-caching.test.ts can check which
+ * URLs each rule claims — the pack files must never be answered from a cache).
+ */
+export const runtimeCaching: RuntimeCachingEntry[] = [
+  {
+    // Basemap vector tiles, style, glyphs, sprites — cached as you pan so revisited areas work offline.
+    urlPattern: /^https:\/\/tiles\.openfreemap\.org\//,
+    handler: 'CacheFirst',
+    options: {
+      cacheName: 'basemap',
+      expiration: { maxEntries: 6000, maxAgeSeconds: 60 * 60 * 24 * 60 },
+      cacheableResponse: { statuses: [0, 200] },
+    },
+  },
+  {
+    // Satellite basemap: Esri World Imagery tiles (src/map/map.ts), cached as you pan like the
+    // vector basemap. 256-px JPEGs, ~20 KB each; 3000 entries ≈ 60 MB for a well-walked city.
+    urlPattern: /^https:\/\/server\.arcgisonline\.com\/ArcGIS\/rest\/services\/World_Imagery\//,
+    handler: 'CacheFirst',
+    options: {
+      cacheName: 'satellite',
+      expiration: { maxEntries: 3000, maxAgeSeconds: 60 * 60 * 24 * 30 },
+      cacheableResponse: { statuses: [0, 200] },
+    },
+  },
+  {
+    // Prebuilt routing graph tiles (also bulk-fetched into this cache by "Download region").
+    // NOT /unfog/graph/packs/: packs-index.json must reach the network (PackSource fetches
+    // it with `cache: 'no-cache'` and keeps its own copy in IndexedDB) — a CacheFirst hit
+    // would pin a stale coverage list for 180 days — and a `.ufp` pack mirrored there is
+    // read by byte range; a cache answering a Range request with a stored full body breaks
+    // the 206 contract (and would pull whole packs). Pack tiles live in IndexedDB `unfog-packs`.
+    urlPattern: ({ url }) => url.pathname.startsWith('/unfog/graph/') && !url.pathname.startsWith('/unfog/graph/packs/'),
+    handler: 'CacheFirst',
+    options: {
+      cacheName: 'graph',
+      expiration: { maxEntries: 2000, maxAgeSeconds: 60 * 60 * 24 * 180 },
+      cacheableResponse: { statuses: [0, 200] },
+    },
+  },
+];
+
 // Served from GitHub Pages at https://data-t3labs.github.io/unfog/ — every absolute URL in the
 // app must go through import.meta.env.BASE_URL.
 export default defineConfig({
@@ -67,39 +112,7 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
         navigateFallback: '/unfog/index.html',
         navigateFallbackDenylist: [/\/unfog\/welcome/],
-        runtimeCaching: [
-          {
-            // Basemap vector tiles, style, glyphs, sprites — cached as you pan so revisited areas work offline.
-            urlPattern: /^https:\/\/tiles\.openfreemap\.org\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'basemap',
-              expiration: { maxEntries: 6000, maxAgeSeconds: 60 * 60 * 24 * 60 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // Satellite basemap: Esri World Imagery tiles (src/map/map.ts), cached as you pan like the
-            // vector basemap. 256-px JPEGs, ~20 KB each; 3000 entries ≈ 60 MB for a well-walked city.
-            urlPattern: /^https:\/\/server\.arcgisonline\.com\/ArcGIS\/rest\/services\/World_Imagery\//,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'satellite',
-              expiration: { maxEntries: 3000, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // Prebuilt routing graph tiles (also bulk-fetched into this cache by "Download region").
-            urlPattern: ({ url }) => url.pathname.startsWith('/unfog/graph/'),
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'graph',
-              expiration: { maxEntries: 2000, maxAgeSeconds: 60 * 60 * 24 * 180 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-        ],
+        runtimeCaching,
       },
       devOptions: { enabled: false },
     }),

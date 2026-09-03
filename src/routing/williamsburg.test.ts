@@ -12,8 +12,10 @@ import { SpatialIndex } from './spatial';
 import { RouteEngine, routeBBox } from './engine';
 import { cellToLonLat } from '../grid/cell';
 import type { BBox } from './api';
-import { graphTileBounds } from './graph-format';
+import { graphTileBounds, lonLatToGraphTile } from './graph-format';
+import { cellKey, cellOf } from './pack-format';
 import { makeLattice } from '../../tests/fixtures/routing/lattice';
+import { fakePackServer, publishPacks } from '../../tests/fixtures/routing/pack-server';
 
 const FIXTURE = new URL('../../tests/fixtures/osm/williamsburg.json.gz', import.meta.url).pathname;
 const HOME: [number, number] = [-73.9568, 40.7176];
@@ -137,6 +139,75 @@ describe('Williamsburg fixture', () => {
     await engine.tiles.close();
     // eslint-disable-next-line no-console
     console.log('[williamsburg bench]', JSON.stringify(bench));
+  });
+
+  it('routes over published packs (coverage v2): no prebuilt region, no download, one coalesced round; the cache serves offline; a missing shard is the straight-line floor, a loop there stays NoCoverage', async () => {
+    // Williamsburg as one pack on a "shard" URL; a second cell's pack is listed but not deployed (404).
+    const first = [...inputs.values()][0];
+    const wbCell = cellKey(...cellOf(first.tx, first.ty));
+    const SHARD = 'https://example.test/unfog-graph-1/packs/';
+    const pub = publishPacks([...inputs.values()], { base: 'https://example.test/unfog/graph/packs/', source: 'Geofabrik us/new-york 2026-09-01', packUrl: (_cell, name) => `${SHARD}${name}` });
+    // The Atlantic south of Block Island: z12 tile 1229/1537 → cell 6/19/24, listed with a URL that 404s.
+    const SEA_A: [number, number] = [-71.9, 40.9], SEA_B: [number, number] = [-71.88, 40.91];
+    const seaCell = cellKey(...cellOf(...lonLatToGraphTile(SEA_A[0], SEA_A[1])));
+    expect(seaCell).not.toBe(wbCell);
+    pub.index.packs[seaCell] = { url: `https://example.test/unfog-graph-2/packs/6-19-24.ufp`, bytes: 1000, indexBytes: 48, tiles: 1, builtAt: '2026-09-02T00:00:00Z', source: 'Geofabrik us/new-york 2026-09-01' };
+    const server = fakePackServer(pub.files);
+    const packs = { indexUrl: pub.indexUrl, fetch: server.fetch, dbName: 'unfog-packs-engine' };
+    const engine = new RouteEngine({ cells: lookup, packs, tiles: { fetch: server.fetch } });
+    await engine.init('/unfog/');
+    expect(await engine.listRegions()).toEqual([]);
+    expect(await engine.listDownloads()).toEqual([]);
+    const box = routeBBox(HOME, DOMINO);
+    const before = await engine.coverage(box);
+    expect(before.available).toBe(0);
+    expect(before.packable).toBeGreaterThanOrEqual(1);
+    const res = await engine.route({ from: HOME, to: DOMINO, mode: 'walk', detour: 0.25 });
+    expect(res.candidates.length).toBeGreaterThanOrEqual(2);
+    expect(res.candidates[res.candidates.length - 1].name).toBe('Direct');
+    expect(res.graphTiles).toBeGreaterThanOrEqual(1);
+    // The pack's index came first in one range request, tiles in coalesced ranges, never the whole file.
+    const packUrl = pub.index.packs[wbCell].url;
+    const packCalls = server.calls.filter((c) => c.url === packUrl);
+    expect(packCalls[0].range).toBe(`bytes=0-${pub.packs.get(wbCell)!.index.indexBytes - 1}`);
+    expect(packCalls.length).toBeLessThanOrEqual(1 + inputs.size);
+    expect(engine.perf!.packs.fullBodies).toBe(0);
+    expect(engine.perf!.packs.fetchedTiles).toBeGreaterThanOrEqual(1);
+    expect(engine.perf!.packs.fetchBytes).toBeLessThanOrEqual(pub.packs.get(wbCell)!.bytes.length);
+    expect((await engine.coverage(box)).available).toBeGreaterThanOrEqual(1);
+    const status = await engine.packsStatus();
+    expect(status.indexCells).toBe(2);
+    expect(status.cells.map((c) => c.cell)).toEqual([wbCell]);
+    expect(status.cells[0].source).toBe('Geofabrik us/new-york 2026-09-01');
+    expect(status.totalTiles).toBe(engine.perf!.packs.fetchedTiles);
+    // Offline (network down) with the same IndexedDB: a fresh engine routes from the cache.
+    server.fail = true;
+    const offline = new RouteEngine({ cells: lookup, packs, tiles: { fetch: server.fetch } });
+    await offline.init('/unfog/');
+    const again = await offline.route({ from: HOME, to: DOMINO, mode: 'walk', detour: 0.25 });
+    expect(again.candidates.map((c) => c.lengthM)).toEqual(res.candidates.map((c) => c.lengthM));
+    await offline.tiles.close();
+    await offline.packs.close();
+    // The 404 cell: a route there is the straight-line floor, not an error; a loop cannot be.
+    server.fail = false;
+    const floor = await engine.route({ from: SEA_A, to: SEA_B, mode: 'walk', detour: 0.25 });
+    expect(floor.candidates.length).toBe(1);
+    expect(floor.candidates[0].name).toBe('Direct');
+    expect(floor.candidates[0].parts?.map((p) => p.kind)).toEqual(['straight']);
+    expect(floor.graphTiles).toBe(0);
+    await expect(engine.loop({ from: SEA_A, mode: 'walk', targetKm: 2 })).rejects.toMatchObject({ name: 'NoCoverageError' });
+    // Outside every pack the error stands (the sheet offers a download there).
+    await expect(engine.route({ from: [10, 50], to: [10.01, 50.01], mode: 'walk', detour: 0.25 })).rejects.toMatchObject({ name: 'NoCoverageError' });
+    // Clear drops the cache (and the decoded copies): the next route fetches again.
+    const calls = server.calls.length;
+    await engine.packsClear();
+    expect((await engine.packsStatus()).totalTiles).toBe(0);
+    await engine.route({ from: HOME, to: DOMINO, mode: 'walk', detour: 0.25 });
+    expect(server.calls.length).toBeGreaterThan(calls);
+    expect((await engine.packsStatus()).totalTiles).toBeGreaterThanOrEqual(1);
+    await engine.packsClear();
+    await engine.tiles.close();
+    await engine.packs.close();
   });
 
   it('prepares cells for the whole merged graph, so a score cached while brushing past an arc is never stale (review F2)', async () => {

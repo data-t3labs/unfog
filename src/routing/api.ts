@@ -1,8 +1,9 @@
 /**
  * Contract between the main thread and the route worker (Comlink). Fixed in wave 0. The worker
- * (src/routing/route.worker.ts) loads graph tiles (prebuilt regions from `${baseUrl}graph/` or
- * areas downloaded via Overpass and cached in IndexedDB `unfog-graph`), scores novelty against
- * the cell store (IndexedDB `unfog`, read-only), and searches.
+ * (src/routing/route.worker.ts) loads graph tiles (prebuilt regions from `${baseUrl}graph/`,
+ * areas downloaded via Overpass and cached in IndexedDB `unfog-graph`, and — beneath both — the
+ * published z6 packs of coverage v2, byte-ranged on demand and cached in IndexedDB `unfog-packs`),
+ * scores novelty against the cell store (IndexedDB `unfog`, read-only), and searches.
  */
 import type { Mode, RegionManifest } from './graph-format';
 
@@ -95,10 +96,45 @@ export interface LoopRequest {
 export interface CoverageReport {
   /** Graph tiles needed for the bbox. */
   needed: number;
-  /** Tiles available (prebuilt region, cached download, or in memory). */
+  /** Tiles available (prebuilt region, cached download, cached pack tile, or in memory). */
   available: number;
+  /** Tiles a published pack covers that are not on the device yet (fetched automatically when online). */
+  packable: number;
   /** Region ids that cover part of the bbox. */
   regions: string[];
+}
+
+/** One z6 cell's worth of cached pack tiles (coverage v2), as the Data screen lists them. */
+export interface PackCacheCell {
+  /** Cell key "6/<cx>/<cy>". */
+  cell: string;
+  tiles: number;
+  bytes: number;
+  /** Most recent use of any tile in the cell (ms epoch). */
+  lastUsed: number;
+  /** Where the streets came from, e.g. "Geofabrik us/new-york 2026-09-01" (from packs-index.json; absent when the index is gone). */
+  source?: string;
+}
+
+export interface PackCacheStatus {
+  /** Age of the coverage list (packs-index.json) in ms; Infinity when none has been loaded yet. */
+  indexAgeMs: number;
+  /** Cells in the published coverage list (0 = no list yet). */
+  indexCells: number;
+  cells: PackCacheCell[];
+  totalBytes: number;
+  totalTiles: number;
+}
+
+/** Outcome of a pack prefetch (mirrors pack-source.ts FetchTilesResult; never rejects for network errors). */
+export interface PackFetchResult {
+  fetched: number;
+  bytes: number;
+  /** Tiles no pack covers. */
+  uncovered: string[];
+  /** Tiles a pack covers but the fetch failed for (network, or a shard not deployed yet). */
+  failed: string[];
+  alreadyCached: number;
 }
 
 export interface DownloadProgress {
@@ -127,8 +163,11 @@ export interface RouteApi {
    * Always resolves with ≥ 1 candidate (Direct last) when any graph tile covers the request:
    * pins snap to the nearest usable street up to 5 km away (the walk there is an `offroad` part),
    * and ends the network cannot join get a `straight` part between the two sides' nearest nodes
-   * instead of an error. Rejects, with `name` intact, only on NoCoverageError (no tiles at all) —
-   * `directLine` is the "route anyway" for that case.
+   * instead of an error. Tiles a published pack covers are fetched first when online (coverage
+   * v2); when none could be loaded but a pack covers the box (offline with nothing cached, a shard
+   * not deployed yet) the result is the straight-line floor (`directLine`), not an error. Rejects,
+   * with `name` intact, only on NoCoverageError (no tiles and no pack at all) — `directLine` is the
+   * "route anyway" for that case.
    */
   route(req: RouteRequest): Promise<RouteResult>;
   /** The straight line between the pins as one Direct candidate, scored for novelty; needs no graph. */
@@ -141,4 +180,19 @@ export interface RouteApi {
   loop(req: LoopRequest): Promise<RouteResult>;
   /** The cell store changed (import / recording): drop cached novelty. */
   invalidateCells(version: number): Promise<void>;
+
+  // ---- pack cache (coverage v2). The worker owns IndexedDB `unfog-packs`; the main thread's
+  // prefetch driver (src/app/prefetch-driver.ts) and the Data screen go through these.
+
+  /** A pack tile is on the device (memory or IndexedDB). */
+  packsHasTile(x: number, y: number): Promise<boolean>;
+  /** Fetch + cache the given z12 tiles from their packs (one coalesced round per pack; cached ones skipped). */
+  packsFetchTiles(tiles: Array<[x: number, y: number]>): Promise<PackFetchResult>;
+  /** Every cached pack tile with size + last use (the prefetcher's eviction input). */
+  packsListCached(): Promise<Array<{ key: string; x: number; y: number; cell: string; size: number; lastUsed: number }>>;
+  packsEvict(keys: string[]): Promise<void>;
+  /** Drop every cached pack tile (the coverage list stays; tiles come back automatically). */
+  packsClear(): Promise<void>;
+  /** What the pack cache holds, grouped by cell, plus the coverage list's age. */
+  packsStatus(): Promise<PackCacheStatus>;
 }

@@ -4,7 +4,9 @@
  *   2. prebuilt regions served from `${baseUrl}graph/<region>/12/<x>/<y>.ufg` (the service worker
  *      caches them; `downloadRegion` pre-fills that cache so a region works offline),
  *   3. areas the user downloaded via Overpass, packed and kept in IndexedDB `unfog-graph`
- *      (store `tiles` key "<x>/<y>", store `areas`).
+ *      (store `tiles` key "<x>/<y>", store `areas`),
+ *   4. the `fallback` (coverage v2: the PackSource's local cache of published pack tiles — the
+ *      engine fills it before a request, so this layer never touches the network itself).
  */
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { BBox, CoverageReport, DownloadProgress, LonLat } from './api';
@@ -58,6 +60,18 @@ export interface TileSourceOptions {
   fetch?: typeof fetch;
 }
 
+/**
+ * The layer beneath prebuilt regions and downloads (coverage v2: pack-source.ts). Local only —
+ * `getTile` must not go to the network; the engine fetches a request's tiles into the fallback
+ * first (one coalesced round per pack) and `covers` says what a fetch could still bring.
+ */
+export interface TileFallback {
+  getTile(x: number, y: number): Promise<GraphTile | null>;
+  hasTile(x: number, y: number): Promise<boolean>;
+  /** A published source covers the tile (fetchable when online). */
+  covers(x: number, y: number): boolean;
+}
+
 /** Cumulative tile-loading costs (diagnostics; read through RouteEngine.perf). */
 export interface TileSourcePerf {
   memoryHits: number;
@@ -74,6 +88,8 @@ export interface TileSourcePerf {
 export class TileSource {
   baseUrl = '/';
   readonly perf: TileSourcePerf = { memoryHits: 0, fetched: 0, fetchBytes: 0, fetchMs: 0, unpackMs: 0, idbHits: 0, idbMs: 0 };
+  /** Consulted after memory, prebuilt and downloads (RouteEngine installs the PackSource here). */
+  fallback: TileFallback | null = null;
   private regions: RegionManifest[] = [];
   private readonly prebuilt = new Map<string, { region: string; bytes: number }>();
   private readonly memory = new Map<string, GraphTile>();
@@ -164,13 +180,26 @@ export class TileSource {
     const wanted = graphTilesFor(bbox);
     const downloaded = await this.downloadedKeySet();
     const regions = new Set<string>();
-    let available = 0;
+    let available = 0, packable = 0;
     for (const [x, y] of wanted) {
       const k = tileKeyOf(x, y);
       const p = this.prebuilt.get(k);
-      if (p) { regions.add(p.region); available++; } else if (downloaded.has(k) || this.memory.has(k)) available++;
+      if (p) { regions.add(p.region); available++; continue; }
+      if (downloaded.has(k) || this.memory.has(k)) { available++; continue; }
+      if (!this.fallback) continue;
+      if (await this.fallback.hasTile(x, y)) available++;
+      else if (this.fallback.covers(x, y)) packable++;
     }
-    return { needed: wanted.length, available, regions: [...regions] };
+    return { needed: wanted.length, available, packable, regions: [...regions] };
+  }
+
+  /** Tiles of a bbox that neither memory, a prebuilt region nor a download holds (what a pack fetch could add). */
+  async missingLocally(bbox: BBox): Promise<Array<[x: number, y: number]>> {
+    const downloaded = await this.downloadedKeySet();
+    return graphTilesFor(bbox).filter(([x, y]) => {
+      const k = tileKeyOf(x, y);
+      return !this.memory.has(k) && !this.prebuilt.has(k) && !downloaded.has(k);
+    });
   }
 
   /** Decoded tiles for a bbox (fetched concurrently); tiles with no data are listed in `missing`. */
@@ -185,7 +214,7 @@ export class TileSource {
     return { tiles, keys, missing };
   }
 
-  /** One decoded tile from memory → prebuilt → downloads, or null. */
+  /** One decoded tile from memory → prebuilt → downloads → fallback (pack cache), or null. */
   async getTile(x: number, y: number): Promise<GraphTile | null> {
     const k = tileKeyOf(x, y);
     const cached = this.memory.get(k);
@@ -221,6 +250,9 @@ export class TileSource {
         try { tile = unpackGraphTile(rec.bytes); } catch { tile = null; }
         perf.unpackMs += now() - t1;
       }
+    }
+    if (!tile && this.fallback) {
+      try { tile = await this.fallback.getTile(x, y); } catch { tile = null; }
     }
     if (tile) this.remember(k, tile);
     return tile;

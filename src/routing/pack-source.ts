@@ -6,10 +6,12 @@
  *         └─ tiles    (byte-range requests, coalesced per pack; cached in IndexedDB `unfog-packs`
  *                      store `tiles` keyed "x/y", with size + lastUsed for LRU eviction)
  *
- * Not wired yet: tiles-source.ts stays the source of prebuilt regions + Overpass downloads; the
- * integration plan in docs/BUILD-PLAN.md §2.4 puts PackSource behind it as the universal layer.
- * Own database (`unfog-packs`, not `unfog-graph`) so this file never has to bump the version of
- * the database tiles-source.ts opens at v1.
+ * Wired (coverage v2): RouteEngine constructs one next to TileSource and installs it as the
+ * TileSource fallback (memory → prebuilt region → downloaded area → pack cache); a route request
+ * first fetches the box's missing tiles in one coalesced round per pack (engine.ts graphFor), and
+ * the main thread's prefetch driver keeps the 5×5 ring around the user warm through RouteApi's
+ * `packs*` methods. Own database (`unfog-packs`, not `unfog-graph`) so this file never has to bump
+ * the version of the database tiles-source.ts opens at v1.
  *
  * Hosting (measured 2026-09-02): GitHub release assets answer `Range` with 206 but carry NO CORS
  * headers on either hop (github.com 302 → release-assets.githubusercontent.com), so a browser on
@@ -21,7 +23,7 @@
  * (200 + whole body) still works: the body is sliced (perf.fullBodies).
  */
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { BBox } from './api';
+import type { BBox, PackCacheCell, PackCacheStatus } from './api';
 import { GRAPH_ZOOM, lonLatToGraphTile, unpackGraphTile, type GraphTile } from './graph-format';
 import {
   PACK_ZOOM, cellKey, cellOf, coalesceRanges, parsePackIndex, rangeHeader, sliceEntry,
@@ -111,7 +113,8 @@ export class PackSource {
   readonly perf: PackSourcePerf = { memoryHits: 0, idbHits: 0, rangeRequests: 0, fullBodies: 0, fetchedTiles: 0, fetchBytes: 0, fetchMs: 0, unpackMs: 0, indexFetches: 0 };
   private index: PacksIndex | null = null;
   private indexFetchedAt = 0;
-  private readonly indexUrl: string;
+  /** packs-index.json location; the engine sets it from the app's base URL before init(). */
+  indexUrl: string;
   private readonly fetchFn: typeof fetch | null;
   private readonly indexMaxAgeMs: number;
   private readonly memoryTiles: number;
@@ -140,19 +143,38 @@ export class PackSource {
 
   // ---- packs-index.json -------------------------------------------------------------------
 
-  /** Load the packs index: IndexedDB copy first, refreshed from the network when older than the max age. */
-  async init(): Promise<void> {
+  /**
+   * Load the packs index: IndexedDB copy first, refreshed from the network when older than the max
+   * age. Never throws. With `refreshTimeoutMs`, init resolves after that long even if the network
+   * refresh is still running (it keeps going and lands the index when it arrives) — the engine's
+   * init must not let a slow packs-index.json stall the app's boot.
+   */
+  async init(opts: { refreshTimeoutMs?: number } = {}): Promise<void> {
     const db = await this.openDb();
     const rec = db ? await db.get('meta', 'packs-index') : undefined;
     if (rec) { this.index = rec.index; this.indexFetchedAt = rec.fetchedAt; }
-    if (!this.index || this.now() - this.indexFetchedAt > this.indexMaxAgeMs) await this.refreshIndex();
+    if (this.index && this.now() - this.indexFetchedAt <= this.indexMaxAgeMs) return;
+    const refresh = this.refreshIndex();
+    this.refreshing = refresh;
+    if (opts.refreshTimeoutMs === undefined) { await refresh; return; }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([refresh, new Promise<void>((r) => { timer = setTimeout(r, opts.refreshTimeoutMs); })]);
+    clearTimeout(timer);
   }
+
+  /** The index refresh started by init() (resolved or still in flight); tests await it. */
+  get indexRefresh(): Promise<boolean> | null { return this.refreshing; }
+  private refreshing: Promise<boolean> | null = null;
 
   /** Fetch packs-index.json now; a failure keeps the cached copy (returns false). */
   async refreshIndex(): Promise<boolean> {
     if (!this.fetchFn) return false;
     try {
-      const res = await this.fetchFn(this.indexUrl, { cache: 'no-cache' });
+      // `no-cache` revalidates the HTTP cache; the service worker's runtime rules leave this path
+      // alone (vite.config.ts) so a stale index never comes out of a CacheFirst cache. A hung
+      // connection is cut after 30 s so a later init() can try again.
+      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(30_000) : undefined;
+      const res = await this.fetchFn(this.indexUrl, { cache: 'no-cache', signal });
       if (!res.ok) return false;
       const json = (await res.json()) as PacksIndex;
       if (!json || json.version !== 1 || typeof json.packs !== 'object') return false;
@@ -186,6 +208,25 @@ export class PackSource {
     const key = cellKey(cx, cy, this.index.packZoom ?? PACK_ZOOM);
     const p = this.index.packs[key];
     return p ? { ...p, key } : undefined;
+  }
+
+  /** A published pack covers this z12 tile (it may still be empty there: open water has no entry). */
+  covers(x: number, y: number): boolean {
+    return this.packFor(x, y) !== undefined;
+  }
+
+  /** What the cache holds, grouped by cell, plus the index age (the Data screen's "Routing data"). */
+  async status(): Promise<PackCacheStatus> {
+    const byCell = new Map<string, PackCacheCell>();
+    let totalBytes = 0, totalTiles = 0;
+    for (const t of await this.listCached()) {
+      let c = byCell.get(t.cell);
+      if (!c) { c = { cell: t.cell, tiles: 0, bytes: 0, lastUsed: 0, source: this.index?.packs[t.cell]?.source }; byCell.set(t.cell, c); }
+      c.tiles++; c.bytes += t.size; c.lastUsed = Math.max(c.lastUsed, t.lastUsed);
+      totalBytes += t.size; totalTiles++;
+    }
+    const cells = [...byCell.values()].sort((a, b) => b.lastUsed - a.lastUsed);
+    return { indexAgeMs: this.indexAgeMs, indexCells: this.index ? Object.keys(this.index.packs).length : 0, cells, totalBytes, totalTiles };
   }
 
   // ---- IndexedDB ---------------------------------------------------------------------------

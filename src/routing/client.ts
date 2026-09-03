@@ -44,6 +44,12 @@ export function wrapRouteApi(remote: Remote<RouteApi>, worker: Worker): RouteCli
     directLine: (req) => remote.directLine(req),
     loop: (req) => remote.loop(req),
     invalidateCells: (version) => remote.invalidateCells(version),
+    packsHasTile: (x, y) => remote.packsHasTile(x, y),
+    packsFetchTiles: (tiles) => remote.packsFetchTiles(tiles),
+    packsListCached: () => remote.packsListCached(),
+    packsEvict: (keys) => remote.packsEvict(keys),
+    packsClear: () => remote.packsClear(),
+    packsStatus: () => remote.packsStatus(),
   };
 }
 

@@ -5,7 +5,7 @@
  */
 import { distanceM } from '../grid/cell';
 import type {
-  BBox, CoverageReport, DownloadProgress, LonLat, LoopRequest, RouteApi, RouteRequest, RouteResult,
+  BBox, CoverageReport, DownloadProgress, LonLat, LoopRequest, PackCacheStatus, PackFetchResult, RouteApi, RouteRequest, RouteResult,
 } from './api';
 import { findCandidates, now, straightLineResult } from './candidates';
 import type { CellLookup } from './cells';
@@ -14,12 +14,17 @@ import { Graph } from './graph';
 import type { RegionManifest } from './graph-format';
 import { findLoops } from './loop';
 import { NoveltyScorer } from './novelty';
+import { PackSource, packsIndexUrl, type PackSourceOptions, type PackSourcePerf } from './pack-source';
 import { Searcher } from './search';
 import { SpatialIndex } from './spatial';
 import { TileSource, type TileSourceOptions, type TileSourcePerf } from './tiles-source';
 
 const DEG = Math.PI / 180;
 export const MAX_AREA_RADIUS_KM = 8;
+/** Boot waits at most this long for a fresh packs-index.json (a late one still lands in the background). */
+const PACKS_INDEX_BOOT_MS = 5_000;
+/** A pack byte-range that has not answered by then is a failed tile, not a hung route request. */
+const PACK_FETCH_DEADLINE_MS = 60_000;
 /**
  * Retry sleeps of the Overpass fetch, per endpoint (research §1a: back off ≥ 30 s on 429).
  * Passed explicitly so the progress note can say how long the wait is.
@@ -57,7 +62,7 @@ const OVERPASS_DEADLINE_MS = (OVERPASS_TIMEOUT_S + 30) * 1000;
  * gets to see. A deadline rejection is an ordinary (retryable) error; an abort of `outer`
  * (offline) is re-thrown as that abort so the ladder stops.
  */
-export function fetchWithDeadline(ms: number, outer?: AbortSignal, base: typeof fetch = fetch): typeof fetch {
+export function fetchWithDeadline(ms: number, outer?: AbortSignal, base: typeof fetch = fetch, who = 'Overpass'): typeof fetch {
   return async (input, init) => {
     const ctrl = new AbortController();
     const onOuter = () => ctrl.abort(outer?.reason);
@@ -68,7 +73,7 @@ export function fetchWithDeadline(ms: number, outer?: AbortSignal, base: typeof 
       return await base(input, { ...init, signal: ctrl.signal });
     } catch (e) {
       if (outer?.aborted) throw outer.reason instanceof Error ? outer.reason : e;
-      if (ctrl.signal.aborted) throw new Error(`Overpass did not answer within ${Math.round(ms / 1000)} s`);
+      if (ctrl.signal.aborted) throw new Error(`${who} did not answer within ${Math.round(ms / 1000)} s`);
       throw e;
     } finally {
       clearTimeout(timer);
@@ -85,9 +90,13 @@ function describeAttempt(error: unknown, delayMs: number | undefined, lastOnEndp
   return `${what} — retrying in ${Math.round((delayMs ?? 0) / 1000)} s`;
 }
 
-/** No graph tile has data for the request. Crosses Comlink with name + message intact. */
+/**
+ * No graph tile has data for the request. Crosses Comlink with name + message intact.
+ * `packable` > 0 means a published pack covers the box but nothing could be loaded (offline with
+ * nothing cached, or a shard not deployed yet): route() answers that with the straight-line floor.
+ */
 export class NoCoverageError extends Error {
-  constructor(public missingTiles: number) {
+  constructor(public missingTiles: number, public packable = 0) {
     super(`No graph coverage here (${missingTiles} tile${missingTiles === 1 ? '' : 's'} without data) — download this area first`);
     this.name = 'NoCoverageError';
   }
@@ -104,6 +113,8 @@ interface CachedGraph {
 
 export interface EngineOptions {
   tiles?: TileSourceOptions;
+  /** Pack source (coverage v2) options — tests inject a fake fetch / index URL / database name. */
+  packs?: PackSourceOptions;
   /** Override the cell lookup (tests). Must implement prepare()/invalidate() if IdbCellLookup-like. */
   cells?: CellLookup & { prepare?(bbox: BBox): Promise<number>; invalidate?(): void };
   /** Merged graphs kept alive. Default 2. */
@@ -147,25 +158,43 @@ export interface RoutePerf {
   /** Arcs novelty-scored so far on this graph (cumulative over its cached life). */
   scored: number;
   source: TileSourcePerf;
+  /** Pack cache counters (coverage v2): range requests, bytes, IndexedDB hits. */
+  packs: PackSourcePerf;
 }
 
 export class RouteEngine implements RouteApi {
   readonly tiles: TileSource;
+  /** Published z6 packs (coverage v2): the layer beneath prebuilt regions and downloads. */
+  readonly packs: PackSource;
   readonly cells: CellLookup & { prepare?(bbox: BBox): Promise<number>; invalidate?(): void };
   private readonly graphs: CachedGraph[] = [];
   private readonly graphCacheSize: number;
+  private readonly packsIndexUrlFixed: boolean;
   cellVersion = 0;
   perf: RoutePerf | null = null;
   private lastGraphPhase = { tilesMs: 0, mergeMs: 0, spatialMs: 0, hit: false };
 
   constructor(opts: EngineOptions = {}) {
     this.tiles = new TileSource(opts.tiles);
+    // Decoded tiles live in TileSource's LRU only (memoryTiles 0); a hung byte-range is cut so a
+    // route request fails a tile instead of hanging. Tests pass their own fetch / index URL / db.
+    const deadlineFetch = typeof fetch === 'function' ? fetchWithDeadline(PACK_FETCH_DEADLINE_MS, undefined, fetch.bind(globalThis), 'The map server') : undefined;
+    this.packs = new PackSource({ memoryTiles: 0, fetch: deadlineFetch, ...opts.packs });
+    this.packsIndexUrlFixed = opts.packs?.indexUrl !== undefined;
+    this.tiles.fallback = {
+      getTile: (x, y) => this.packs.getTile(x, y, { network: false }),
+      hasTile: (x, y) => this.packs.hasTile(x, y),
+      covers: (x, y) => this.packs.covers(x, y),
+    };
     this.cells = opts.cells ?? new IdbCellLookup();
     this.graphCacheSize = opts.graphCache ?? 2;
   }
 
   async init(baseUrl: string): Promise<void> {
-    await this.tiles.init(baseUrl);
+    if (!this.packsIndexUrlFixed) this.packs.indexUrl = packsIndexUrl(baseUrl);
+    // Both never throw: a missing packs-index (dev, e2e) just means no packs; the refresh is
+    // bounded so a slow network cannot push route.init past the app's boot timeout.
+    await Promise.all([this.tiles.init(baseUrl), this.packs.init({ refreshTimeoutMs: PACKS_INDEX_BOOT_MS })]);
   }
 
   async listRegions(): Promise<RegionManifest[]> {
@@ -232,12 +261,20 @@ export class RouteEngine implements RouteApi {
     this.graphs.length = 0;
   }
 
-  /** Merged graph for a bbox (cached by tile set). Throws when no tile has data. */
+  /**
+   * Merged graph for a bbox (cached by tile set). Throws when no tile has data. Online, the tiles
+   * nothing local holds are fetched from their packs first — one coalesced byte-range round per
+   * pack, so a first route in a new city costs a couple of requests, not one per tile.
+   */
   async graphFor(bbox: BBox): Promise<CachedGraph> {
     const tStart = now();
+    if (!isOffline()) {
+      const want = await this.tiles.missingLocally(bbox);
+      if (want.length) await this.packs.fetchTiles(want);
+    }
     const { tiles, keys, missing } = await this.tiles.tilesFor(bbox);
     const tilesMs = now() - tStart;
-    if (tiles.length === 0) throw new NoCoverageError(missing.length);
+    if (tiles.length === 0) throw new NoCoverageError(missing.length, (await this.tiles.coverage(bbox)).packable);
     const key = keys.join(',');
     const i = this.graphs.findIndex((c) => c.key === key);
     if (i >= 0) {
@@ -273,7 +310,16 @@ export class RouteEngine implements RouteApi {
   async route(req: RouteRequest): Promise<RouteResult> {
     const t0 = now();
     const bbox = routeBBox(req.from, req.to);
-    const c = await this.graphFor(bbox);
+    let c: CachedGraph;
+    try {
+      c = await this.graphFor(bbox);
+    } catch (e) {
+      // A pack covers this box but nothing loaded (offline with nothing cached, a shard not
+      // deployed yet): the straight-line floor, no prompt. Outside every pack the error stands
+      // and the sheet offers a download.
+      if (e instanceof NoCoverageError && e.packable > 0) return this.directLine(req);
+      throw e;
+    }
     const t1 = now();
     const prepared = (await this.prepareCells(c)) ?? 0;
     const t2 = now();
@@ -321,6 +367,7 @@ export class RouteEngine implements RouteApi {
       arcs: c.graph.arcCount,
       scored: c.scorer.scoredCount,
       source: { ...this.tiles.perf },
+      packs: { ...this.packs.perf },
     };
   }
 
@@ -328,5 +375,34 @@ export class RouteEngine implements RouteApi {
     this.cellVersion = version;
     this.cells.invalidate?.();
     for (const c of this.graphs) c.scorer.invalidate();
+  }
+
+  // ---- pack cache (coverage v2), for the main thread's prefetch driver and the Data screen
+
+  packsHasTile(x: number, y: number): Promise<boolean> {
+    return this.packs.hasTile(x, y);
+  }
+
+  packsFetchTiles(tiles: Array<[x: number, y: number]>): Promise<PackFetchResult> {
+    return this.packs.fetchTiles(tiles);
+  }
+
+  packsListCached(): Promise<Array<{ key: string; x: number; y: number; cell: string; size: number; lastUsed: number }>> {
+    return this.packs.listCached();
+  }
+
+  packsEvict(keys: string[]): Promise<void> {
+    return this.packs.evict(keys);
+  }
+
+  /** Drop every cached pack tile, plus the decoded copies and merged graphs built from them, so the next route fetches afresh. */
+  async packsClear(): Promise<void> {
+    await this.packs.clear();
+    this.tiles.clearMemory();
+    this.graphs.length = 0;
+  }
+
+  packsStatus(): Promise<PackCacheStatus> {
+    return this.packs.status();
   }
 }
