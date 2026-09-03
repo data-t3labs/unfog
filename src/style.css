@@ -258,6 +258,13 @@ html.dark .chip, html.dark .hint, html.dark .track-pill { box-shadow: var(--shad
   background: var(--bg-solid); box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.35); border-radius: 18px 18px 0 0;
 }
 .follow-bar .btn { min-height: 44px; }
+/* Hand-off (feedback-3): under Go, one compact row — Google Maps (one button per part when split), Apple Maps, Save GPX —
+   36 px links styled as .btn.small (48 px touch target via ::after above). One row, so a 3-loop sheet keeps the map strip the fit needs. */
+.handoff { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.handoff .row { display: flex; flex-wrap: wrap; gap: 6px; }
+.handoff .row .btn { flex: 1 1 auto; white-space: nowrap; text-decoration: none; }
+.handoff .gmaps .ic { color: var(--accent-text); }
+.handoff .note { margin: 0; }
 
 /* modal sheets (confirm) */
 .backdrop { position: fixed; inset: 0; z-index: 40; background: rgba(0, 0, 0, 0); display: flex; align-items: flex-end; justify-content: center; transition: background 0.2s; }

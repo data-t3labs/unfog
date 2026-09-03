@@ -177,6 +177,19 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
         'Routing needs street data: prebuilt regions (Data → Routing data) or "Download this area" when you plan a route somewhere new (needs a connection once).',
       ]),
     ),
+    navigate: section(
+      'navigate',
+      'Navigate with Google Maps',
+      p('Unfog can show a route while it is open, but a web app cannot talk you through the turns with the screen off. Google Maps can: under Go, tap Google Maps and the route opens there as walking directions, ready for turn-by-turn.'),
+      bullets([
+        'Google Maps takes at most 9 checkpoints per trip. Unfog picks the 9 corners that matter most; when a route needs more, it opens in parts (1 of 3, 2 of 3…), one button each. Open the next part when you reach the end of one.',
+        'Between checkpoints Google walks its own streets, so it may take a small shortcut past a corner Unfog would have turned at. The checkpoints are the corners that matter.',
+        'A route that starts where you stand starts turn-by-turn at once. A route planned from the map centre, and every later part, starts at its own point: Google shows a preview until you get there, then Start.',
+        'Off-path and straight legs (drawn dashed) are fine: Google finds its own way to the next checkpoint.',
+        'Apple Maps takes one destination and no checkpoints, so that button only walks you to the end of the route, the way Apple sees fit. Loops have no destination, so it is not offered there.',
+        'Save GPX writes the route as a file for any other app (Komoot, Gaia, OsmAnd, AllTrails…): share sheet → the app, or Save to Files.',
+      ]),
+    ),
     settings: section('settings', 'Settings', settingsBody),
   };
 
@@ -191,6 +204,7 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
       sections.always,
       sections.location,
       sections.routes,
+      sections.navigate,
       sections.settings,
       // The build stamp tells which deploy this phone runs after an "Update available" reload.
       el(

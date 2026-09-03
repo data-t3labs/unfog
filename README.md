@@ -27,6 +27,9 @@ Screenshots are the real app over sample walks in Williamsburg, Brooklyn (captur
   don't, timed at walking pace
 - Loop mode ("Explore from here"): pick 2 / 3 / 5 / 8 km (or 1–15 km on the slider) and get up to
   three round trips from where you stand, sorted by unexplored distance
+- Hand-off to Google Maps: one tap opens the chosen route or loop in the Google Maps app for
+  turn-by-turn walking directions — its corners become checkpoints and long routes open in parts;
+  Apple Maps (destination only) and Save GPX for any other app
 - Prebuilt routing graphs for New York City and Metro Vancouver; download any other area on demand
 - Track my movement: one switch in Settings, then Unfog clears the fog as you move whenever it is
   open and on screen (the screen stays awake); sessions export as GPX for Fog of World's Import folder

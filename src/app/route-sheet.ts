@@ -9,6 +9,10 @@
  * One travel mode (feedback-2, data: "one mode, the most permissive"): every request goes to the
  * engine as `walk` — footpaths, stairs, both directions of every street — and times are at
  * walking pace. The Walk/Bike/Drive chips are gone; the engine keeps its Mode type for tools/tests.
+ *
+ * Under Go, the hand-off block (feedback-3): the chosen route in Google Maps for turn-by-turn (in
+ * parts when it needs more than 9 checkpoints — src/app/handoff.ts), Apple Maps (destination only),
+ * or saved as GPX for any other app.
  */
 import type { LonLat, RouteCandidate, RouteResult } from '../routing/api';
 import type { Mode } from '../routing/graph-format';
@@ -16,8 +20,10 @@ import { distanceM } from '../grid/cell';
 import { candidateColor } from '../map/routes';
 import type { AppContext, Destination } from './context';
 import { fmtDistance, fmtDistanceTidy, fmtMinutes } from './format';
+import { DEFAULT_SPLIT, appleMapsUrl, googleMapsUrl, partLabel, routeGpxFileName, routeToGpx, splitIntoParts } from './handoff';
 import { icons } from './icons';
 import { readJSON, writeJSON } from './settings';
+import { shareOrDownload } from './share';
 import { REGION_DL_KEY, ROUTE_PREFS_KEY, type RegionDownloads } from './store-keys';
 import { clear, debounce, el, svg, toast } from './ui';
 
@@ -95,7 +101,9 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   const cands = el('div', { class: 'cands' });
   const status = el('div', { class: 'route-status' });
   const goBtn = el('button', { class: 'go', type: 'button', onclick: () => void go() }, 'Go');
-  const sheet = el('div', { class: 'sheet route', hidden: true }, el('div', { class: 'grab' }), closeBtn, title, note, routeControls, loopControls, cands, status, goBtn);
+  // Hand-off (feedback-3): the chosen route in Google Maps (turn-by-turn, in parts when long), Apple Maps (destination only), or as GPX.
+  const handoff = el('div', { class: 'handoff', hidden: true });
+  const sheet = el('div', { class: 'sheet route', hidden: true }, el('div', { class: 'grab' }), closeBtn, title, note, routeControls, loopControls, cands, status, goBtn, handoff);
 
   const barText = el('div', { class: 't' });
   const barSwatch = el('div', { class: 'sw' });
@@ -173,6 +181,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
 
   function renderCands(): void {
     clear(cands);
+    renderHandoff(); // hides the block while a result is pending, so no stale links survive a re-route or a new sheet
     if (!result) {
       goBtn.disabled = true;
       return;
@@ -189,6 +198,53 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
       cands.appendChild(row);
     });
     goBtn.disabled = n === 0;
+  }
+
+  /**
+   * Google Maps takes 9 checkpoints per trip, so the route is cut into parts that chain end to
+   * start (handoff.ts); the first part starts from the phone when the route does, so turn-by-turn
+   * begins at once. Apple Maps takes one destination — A→B only (a round trip's destination is
+   * where you stand). Save GPX is for every other app.
+   *
+   * One compact row of small buttons (36 px, 48 px touch target): the sheet's height is what the
+   * map strip above it is fitted to, and a 3-loop sheet had ~76 px to spare — a full-width button
+   * plus a second row starved the fit (real.spec test 12).
+   */
+  function renderHandoff(): void {
+    clear(handoff);
+    const c = result?.candidates[selected];
+    if (!c || c.coords.length < 2) {
+      handoff.hidden = true;
+      return;
+    }
+    handoff.hidden = false;
+    const fromDevice = !fromMapCentre();
+    const parts = splitIntoParts(c.coords, DEFAULT_SPLIT);
+    const n = parts.length;
+    const link = (href: string, cls: string, attrs: Record<string, string>, ...children: Array<Node | string | null>) => el('a', { class: `btn small ${cls}`, href, target: '_blank', rel: 'noopener', ...attrs }, ...children);
+    // One "Google Maps" button, or one per part — "1 of 2 · 5.7 km", "2 of 2 · 7.2 km" (two to a line; the
+    // arrow and the note name the app) — with the full words in the accessible name.
+    const google = parts.map((p, i) => {
+      const href = googleMapsUrl(p, { navigate: true, originFromDevice: fromDevice && i === 0 });
+      const part = `${i + 1} of ${n} · ${km(p.lengthM)}`;
+      const aria = n > 1 ? `Google Maps, ${partLabel(i, n)}, ${km(p.lengthM)}` : 'Google Maps';
+      return i === 0 ? link(href, 'gmaps', { 'aria-label': aria }, svg(icons.locate), n > 1 ? part : 'Google Maps') : link(href, 'part', { 'aria-label': aria }, part);
+    });
+    const apple =
+      kind === 'route' && dest
+        ? link(appleMapsUrl(dest.lonlat, fromDevice ? undefined : origin ?? undefined), 'amaps', { title: 'Walking directions to the destination only — Apple Maps takes no checkpoints' }, 'Apple Maps')
+        : null;
+    const gpx = el('button', { class: 'btn small gpx', type: 'button', onclick: () => void saveGpx(c) }, 'Save GPX');
+    if (n === 1) handoff.appendChild(el('div', { class: 'row' }, google[0], apple, gpx));
+    else handoff.append(el('div', { class: 'row' }, ...google), el('div', { class: 'row' }, apple, gpx), el('p', { class: 'muted small note', text: `Google Maps: ${n} parts (9 checkpoints per trip).` }));
+  }
+
+  /** The route as a GPX track through the share sheet (or a download), named after the place / loop. */
+  async function saveGpx(c: RouteCandidate): Promise<void> {
+    const label = kind === 'loop' ? candName(c, selected) : dest?.name ?? 'Route';
+    const r = await shareOrDownload(routeGpxFileName(label), routeToGpx(c.coords, `Unfog · ${label}`), 'application/gpx+xml');
+    if (r === 'cancelled') return;
+    toast(r === 'shared' ? 'GPX shared' : 'GPX downloaded', { kind: 'success' });
   }
 
   function setStatus(node: HTMLElement | string | null): void {

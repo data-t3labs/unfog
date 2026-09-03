@@ -17,7 +17,7 @@ export interface Destination {
 }
 
 /** The collapsible sections of the Help screen (src/app/help.ts). */
-export type HelpSection = 'export' | 'install' | 'tracking' | 'always' | 'location' | 'routes' | 'settings';
+export type HelpSection = 'export' | 'install' | 'tracking' | 'always' | 'location' | 'routes' | 'navigate' | 'settings';
 
 export interface AppContext {
   engines: Engines;
