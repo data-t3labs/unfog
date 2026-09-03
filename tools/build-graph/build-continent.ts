@@ -11,7 +11,10 @@
  *             rebuild tiles → <work>/merged/<cell>/
  *   pack      z6 packs (<work>/packs/6-<x>-<y>.ufp) + packs-index.json; merged tiles override extract tiles
  *   publish   upload packs + packs-index.json as assets of one GitHub release (gh CLI)
- *   all       fetch → build → borders → merge → pack (→ publish with --publish)
+ *   mirror    re-plan tools/build-graph/pages-shards.json from the published index (commit + push it
+ *             when it changed), trigger every unfog-graph-N shard workflow (gh), wait for the runs
+ *             (unless --no-wait) and verify each shard site with HTTP; state.shards records the result
+ *   all       fetch → build → borders → merge → pack (→ publish → mirror with --publish)
  *   status    print the state file summary
  * Every step is idempotent: <work>/state.json records what is done (with timings) and re-running
  * continues. Heavy steps run in child processes with a heap sized from the PBF (≈ 12× its size).
@@ -30,6 +33,7 @@ import { CONTINENTS, extractSpec, fetchExtract, type ExtractSpec } from './fetch
 import { dedupeWays, planBorders, rebuildCell, wayCells, wayTileIndex, writeTiles, type BorderPlan, type ExtractTiles } from './merge-tiles';
 import { groupByCell, packInfoOf, readPacksIndex, tilesFromManifestDir, writePack, writePacksIndex, type TileFile } from './pack-tiles';
 import { loadPbfWays } from './pbf-ways';
+import { planShards, shardPlanFile, summarizeShards } from './shard-planner.mjs';
 
 // ---------------------------------------------------------------------------------------------
 // state
@@ -41,6 +45,8 @@ interface ExtractState {
 }
 interface MergeState { s: number; tiles: number; empty: number; ways: number; bytes: number; hash: string; at: string }
 interface PackState { bytes: number; indexBytes: number; tiles: number; sha256: string; origins: string[]; at: string; inputHash?: string; uploaded?: { release: string; sha256: string; at: string } }
+/** One shard site (unfog-graph-N) as of the last `mirror`: what was triggered, how the run ended, whether the site verified. */
+interface ShardState { at: string; cells: number; bytes: number; base: string; run?: number; conclusion?: string; verified?: boolean; note?: string }
 interface State {
   version: 1;
   continent: string;
@@ -48,6 +54,7 @@ interface State {
   borders?: { at: string; border: number; cells: number; rebuild: number };
   merge: Record<string, MergeState>;
   packs: Record<string, PackState>;
+  shards?: Record<string, ShardState>;
 }
 
 interface Ctx {
@@ -55,6 +62,7 @@ interface Ctx {
   work: string;
   geofabrik: string;
   dist: string;
+  repoRoot: string;
   state: State;
   statePath: string;
   logPath: string;
@@ -66,6 +74,7 @@ interface Ctx {
   publish: boolean;
   force: boolean;
   dryRun: boolean;
+  noWait: boolean;
 }
 
 const ts = () => new Date().toISOString();
@@ -95,14 +104,15 @@ const hash = (v: unknown): string => createHash('sha1').update(JSON.stringify(v)
 // ---------------------------------------------------------------------------------------------
 // args
 // ---------------------------------------------------------------------------------------------
-const USAGE = `usage: continent.js <fetch|build|borders|merge|pack|publish|all|status|border-extract> [options]
+const USAGE = `usage: continent.js <fetch|build|borders|merge|pack|publish|mirror|all|status|border-extract> [options]
   --continent <id>   (north-america)     --work <dir>   (tools/build-graph/cache/<continent>)
   --geofabrik <dir>  (tools/build-graph/cache/geofabrik)
   --only a,b,c       restrict fetch/build/borders to these extract ids (e.g. us/washington,british-columbia)
   --jobs N           parallel child processes for build/borders (3)
   --release <tag>    (graphs-v1)          --repo <owner/name>  (data-t3labs/unfog)
   --url-base <url>   asset URL prefix written into packs-index.json (derived from --repo/--release)
-  --publish          (all) also publish   --force  re-do steps whose outputs exist   --dry-run  (publish) print only`;
+  --publish          (all) also publish + mirror   --force  re-do steps whose outputs exist (mirror: force the shard deploys)
+  --dry-run          (publish, mirror) print only   --no-wait  (mirror) trigger the shard workflows and return`;
 
 function parseArgs(argv: string[]): { cmd: string; rest: string[]; ctx: Ctx } {
   const here = dirname(fileURLToPath(import.meta.url));
@@ -112,7 +122,7 @@ function parseArgs(argv: string[]): { cmd: string; rest: string[]; ctx: Ctx } {
   const cmd = argv[0] ?? 'status';
   for (let i = 1; i < argv.length; i++) {
     const k = argv[i];
-    if (k === '--publish' || k === '--force' || k === '--dry-run' || k === '--no-verify') { opt[k.slice(2)] = true; continue; }
+    if (k === '--publish' || k === '--force' || k === '--dry-run' || k === '--no-verify' || k === '--no-wait') { opt[k.slice(2)] = true; continue; }
     if (k.startsWith('--')) { const v = argv[++i]; if (v === undefined) throw new Error(`${k} needs a value\n${USAGE}`); opt[k.slice(2)] = v; continue; }
     rest.push(k);
   }
@@ -123,7 +133,7 @@ function parseArgs(argv: string[]): { cmd: string; rest: string[]; ctx: Ctx } {
   const release = String(opt.release ?? 'graphs-v1');
   const repo = String(opt.repo ?? 'data-t3labs/unfog');
   const ctx: Ctx = {
-    continent, work, geofabrik, release, repo,
+    continent, work, geofabrik, release, repo, repoRoot,
     dist: here,
     statePath: join(work, 'state.json'),
     logPath: join(work, 'log.txt'),
@@ -134,6 +144,7 @@ function parseArgs(argv: string[]): { cmd: string; rest: string[]; ctx: Ctx } {
     publish: opt.publish === true,
     force: opt.force === true,
     dryRun: opt['dry-run'] === true,
+    noWait: opt['no-wait'] === true,
   };
   mkdirSync(work, { recursive: true });
   return { cmd, rest, ctx };
@@ -466,12 +477,137 @@ function cmdPublish(ctx: Ctx): void {
   log(ctx, `publish: ${files.length} packs + ${PACKS_INDEX_NAME} → ${ctx.urlBase}`);
 }
 
+// ---------------------------------------------------------------------------------------------
+// mirror: shard plan → shard workflows → verification (docs/coverage-runbook.md § Hosting)
+// ---------------------------------------------------------------------------------------------
+const sleepS = (s: number): void => { execFileSync('sleep', [String(s)]); };
+
+interface ShardVerify { ok: boolean; note: string }
+interface LiveShardIndex { packs?: Record<string, { bytes: number; sha256?: string }> }
+// Accept-Encoding: identity — Node's fetch asks for gzip and Pages then reports the COMPRESSED length.
+const identity = { 'accept-encoding': 'identity' };
+
+/** index.json → 200 and, for three sample packs, HEAD length = index bytes + Range → 206 (+ ACAO *). */
+async function verifyShard(base: string, cells: string[], index: PacksIndex): Promise<ShardVerify> {
+  const notes: string[] = [];
+  const bust = `?t=${Date.now()}`;
+  let live: LiveShardIndex | null = null;
+  try {
+    const r = await fetch(`${base}index.json${bust}`, { cache: 'no-store' });
+    if (r.status !== 200) return { ok: false, note: `index.json → HTTP ${r.status}` };
+    live = (await r.json()) as LiveShardIndex;
+  } catch (e) { return { ok: false, note: `index.json: ${(e as Error).message}` }; }
+  const stale = cells.filter((c) => { const l = live?.packs?.[c]; const i = index.packs[c]; return !l || !i || l.bytes !== i.bytes || (i.sha256 && l.sha256 !== i.sha256); });
+  if (stale.length) notes.push(`${stale.length} cells differ from the published index (${stale.slice(0, 3).join(', ')}${stale.length > 3 ? ', …' : ''})`);
+  const byBytes = [...cells].sort((a, b) => index.packs[b].bytes - index.packs[a].bytes);
+  const samples = [...new Set([byBytes[0], byBytes[Math.floor(byBytes.length / 2)], byBytes[byBytes.length - 1]])].filter(Boolean);
+  for (const c of samples) {
+    const info = index.packs[c];
+    const url = base + info.url.split('/').pop()!;
+    try {
+      const h = await fetch(url, { method: 'HEAD', cache: 'no-store', headers: identity });
+      const len = Number(h.headers.get('content-length'));
+      if (h.status !== 200) { notes.push(`${c} HEAD → ${h.status}`); continue; }
+      if (len !== info.bytes) { notes.push(`${c} content-length ${len} ≠ ${info.bytes}`); continue; }
+      const r = await fetch(url, { headers: { ...identity, Range: 'bytes=0-1023' }, cache: 'no-store' });
+      if (r.status !== 206) { notes.push(`${c} Range → ${r.status}`); continue; }
+      if (r.headers.get('access-control-allow-origin') !== '*') notes.push(`${c} no access-control-allow-origin: *`);
+      await r.arrayBuffer();
+    } catch (e) { notes.push(`${c}: ${(e as Error).message}`); }
+  }
+  return { ok: notes.length === 0, note: notes.length ? notes.join('; ') : `${samples.length} samples: HEAD length ok, Range → 206` };
+}
+
+async function cmdMirror(ctx: Ctx): Promise<void> {
+  const index = readPacksIndex(join(ctx.work, 'packs'));
+  if (!index) throw new Error('no packs-index.json: run pack + publish first');
+  const planFile = join(ctx.repoRoot, 'tools', 'build-graph', 'pages-shards.json');
+  const prev = existsSync(planFile) ? (JSON.parse(readFileSync(planFile, 'utf8')) as Parameters<typeof planShards>[1]) : { shards: {} };
+  if (!Object.keys(prev.shards ?? {}).length) throw new Error(`${planFile} lists no shards (see docs/coverage-runbook.md § Hosting)`);
+  const plan = planShards(index, prev);
+  for (const l of summarizeShards(plan).split('\n')) log(ctx, `mirror: ${l}`);
+  for (const n of plan.overCap) log(ctx, `mirror: WARNING ${n} is over capMB after keeping its assignments`);
+  if (plan.unassigned.length) throw new Error(`mirror: ${plan.unassigned.length} cells (${mb(plan.unassignedBytes)}) fit in no shard — add "unfog-graph-${Object.keys(plan.shards).length + 1}": {"cells": []} to ${planFile}, create that repo from tools/build-graph/shard-repo (runbook § Hosting) and re-run`);
+  const rel = 'tools/build-graph/pages-shards.json';
+  if (plan.changed) {
+    const doc = shardPlanFile(plan, prev);
+    log(ctx, `mirror: plan changed (${plan.added.length} added, ${plan.dropped.length} dropped) → ${rel}`);
+    if (!ctx.dryRun) {
+      writeFileSync(planFile, JSON.stringify(doc, null, 1) + '\n');
+      // The shard workflows read the plan from this repo's main branch, so it must be pushed first.
+      // Only this one path is staged; a foreign staged change means another session is mid-commit.
+      const git = (a: string[]) => execFileSync('git', ['-C', ctx.repoRoot, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+      const staged = git(['diff', '--cached', '--name-only']).trim();
+      if (staged) throw new Error(`mirror: the git index already has staged changes (${staged.split('\n').join(', ')}); commit or unstage them, then commit + push ${rel} and re-run mirror`);
+      git(['add', rel]);
+      git(['commit', '-q', '-m', `Coverage v2 hosting: shard plan ${ctx.release} (${plan.added.length} added, ${plan.dropped.length} dropped)`, '--', rel]);
+      git(['push']);
+      log(ctx, `mirror: committed + pushed ${rel}`);
+    }
+  } else log(ctx, `mirror: plan unchanged (${plan.kept} cells kept)`);
+
+  const shards = ctx.state.shards ??= {};
+  const owner = ctx.repo.split('/')[0];
+  const t0 = Date.now();
+  const triggered: string[] = [];
+  for (const [name, s] of Object.entries(plan.shards)) {
+    shards[name] = { at: ts(), cells: s.cells.length, bytes: s.bytes, base: s.base };
+    try {
+      gh(['workflow', 'run', 'mirror.yml', '-R', `${owner}/${name}`, ...(ctx.force ? ['-f', 'force=true'] : [])], ctx.dryRun, ctx);
+      triggered.push(name);
+    } catch (e) {
+      shards[name].conclusion = 'not-triggered';
+      shards[name].note = `gh workflow run failed: ${(e as Error).message.split('\n')[0].slice(0, 160)} — does the repo exist with mirror.yml? (tools/build-graph/shard-repo, runbook § Hosting)`;
+      log(ctx, `mirror ${name}: ${shards[name].note}`);
+    }
+  }
+  saveState(ctx);
+  if (ctx.dryRun || ctx.noWait) { log(ctx, `mirror: triggered ${triggered.length}/${Object.keys(plan.shards).length} shard workflows${ctx.noWait ? ' (--no-wait)' : ''}`); return; }
+
+  // Poll each shard's newest mirror.yml run created after the trigger, up to 40 min.
+  const pending = new Set(triggered);
+  const deadline = Date.now() + 40 * 60 * 1000;
+  sleepS(15);
+  while (pending.size && Date.now() < deadline) {
+    for (const name of [...pending]) {
+      const out = gh(['run', 'list', '-R', `${owner}/${name}`, '--workflow', 'mirror.yml', '--limit', '3', '--json', 'databaseId,status,conclusion,createdAt'], false, ctx);
+      const runs = (JSON.parse(out || '[]') as { databaseId: number; status: string; conclusion: string; createdAt: string }[]).filter((r) => Date.parse(r.createdAt) >= t0 - 60_000);
+      const run = runs[0];
+      if (!run) continue;
+      shards[name].run = run.databaseId;
+      if (run.status !== 'completed') continue;
+      shards[name].conclusion = run.conclusion;
+      pending.delete(name);
+      log(ctx, `mirror ${name}: run ${run.databaseId} ${run.conclusion} after ${secs(Date.now() - t0)}`);
+    }
+    saveState(ctx);
+    if (pending.size) sleepS(20);
+  }
+  for (const name of pending) { shards[name].conclusion = 'timeout'; log(ctx, `mirror ${name}: still running after 40 min — check gh run list -R ${owner}/${name}`); }
+
+  let bad = 0;
+  for (const [name, s] of Object.entries(plan.shards)) {
+    if (!triggered.includes(name)) { bad++; continue; }
+    const v = await verifyShard(s.base, s.cells, index);
+    shards[name].verified = v.ok;
+    shards[name].note = v.note;
+    if (!v.ok) bad++;
+    log(ctx, `mirror ${name}: ${v.ok ? 'verified' : 'NOT verified'} — ${v.note}`);
+  }
+  saveState(ctx);
+  if (bad) throw new Error(`mirror: ${bad} shard(s) failed or did not verify — see state.json shards; fix and re-run mirror (then the main deploy picks up the index)`);
+  log(ctx, `mirror: ${Object.keys(plan.shards).length} shards verified; push main (or gh workflow run deploy.yml) so the app's packs-index.json points at them`);
+}
+
 function cmdStatus(ctx: Ctx): void {
   const s = ctx.state;
   const rows = Object.entries(s.extracts).map(([id, e]) => `${id.padEnd(28)} fetch ${e.fetch ? mb(e.fetch.bytes).padStart(10) + ' ' + String(e.fetch.downloadS).padStart(6) + ' s' : '-'.padStart(19)}  build ${e.build ? `${String(e.build.tiles).padStart(5)} tiles ${mb(e.build.bytes).padStart(9)} ${String(e.build.s).padStart(6)} s walk ${(100 * e.build.walk).toFixed(0)} %` : '-'}  borders ${e.borders ? `${e.borders.ways} ways/${e.borders.cells} cells` : '-'}`);
   console.log(rows.join('\n'));
   const packs = Object.values(s.packs);
   console.log(`\nextracts ${Object.keys(s.extracts).length} (built ${Object.values(s.extracts).filter((e) => e.build).length}) · border cells ${s.borders?.cells ?? '-'} (${s.borders?.border ?? '-'} border tiles, ${s.borders?.rebuild ?? '-'} to rebuild) · merged ${Object.keys(s.merge).length} · packs ${packs.length} = ${mb(packs.reduce((n, p) => n + p.bytes, 0))} (uploaded ${packs.filter((p) => p.uploaded).length})`);
+  const shards = Object.entries(s.shards ?? {});
+  if (shards.length) console.log(`shards ${shards.length}: ` + shards.map(([n, sh]) => `${n} ${sh.cells} cells ${mb(sh.bytes)} ${sh.conclusion ?? 'pending'}${sh.verified === undefined ? '' : sh.verified ? ' verified' : ' NOT verified'} (${sh.at.slice(0, 16)}Z)`).join(' · '));
+  else console.log('shards: none mirrored yet (run mirror)');
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -486,9 +622,10 @@ async function main(): Promise<void> {
     case 'merge': cmdMerge(ctx); break;
     case 'pack': cmdPack(ctx); break;
     case 'publish': cmdPublish(ctx); break;
+    case 'mirror': await cmdMirror(ctx); break;
     case 'all':
       await cmdFetch(ctx); await cmdBuild(ctx); await cmdBorders(ctx); cmdMerge(ctx); cmdPack(ctx);
-      if (ctx.publish) cmdPublish(ctx);
+      if (ctx.publish) { cmdPublish(ctx); await cmdMirror(ctx); }
       break;
     case 'status': cmdStatus(ctx); return;
     case '-h': case '--help': console.log(USAGE); return;

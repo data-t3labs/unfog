@@ -1,40 +1,5 @@
 {
- "note": "Cells mirrored from the graphs-v1 release onto GitHub Pages by tools/build-graph/mirror-packs.mjs (deploy.yml). Keep the total under ~950 MB; see docs/coverage-runbook.md.",
- "updatedAt": "2026-09-02T22:58:32.240Z",
- "regions": [
-  "us/washington",
-  "us/new-york",
-  "british-columbia",
-  "us/oregon",
-  "us/new-jersey",
-  "us/idaho"
- ],
- "cells": [
-  "6/7/18",
-  "6/8/18",
-  "6/8/19",
-  "6/8/20",
-  "6/9/18",
-  "6/9/19",
-  "6/9/20",
-  "6/9/21",
-  "6/9/22",
-  "6/9/23",
-  "6/10/18",
-  "6/10/19",
-  "6/10/20",
-  "6/10/21",
-  "6/10/22",
-  "6/10/23",
-  "6/11/20",
-  "6/11/21",
-  "6/11/22",
-  "6/11/23",
-  "6/12/23",
-  "6/17/23",
-  "6/18/23",
-  "6/18/24",
-  "6/19/23",
-  "6/19/24"
- ]
+ "note": "Cells mirrored from the graphs-v1 release into the app's OWN Pages site by tools/build-graph/mirror-packs.mjs (deploy.yml). Since coverage v2 hosting (2026-09-03) the main site serves only packs-index.json; every pack is served by the unfog-graph-N shard sites in pages-shards.json. Keep this empty unless a cell must live on the app's site (≤ 950 MB total); see docs/coverage-runbook.md § Hosting.",
+ "updatedAt": "2026-09-03T00:15:00.000Z",
+ "cells": []
 }

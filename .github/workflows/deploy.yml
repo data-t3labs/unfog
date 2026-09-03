@@ -26,10 +26,15 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      # Routing graph packs (coverage v2): release assets have no CORS headers, so the packs listed in
-      # tools/build-graph/pages-mirror.json are mirrored from the graphs-v1 release into the Pages
-      # site (same origin as the app; Range → 206). Nothing is stored in git. docs/coverage-runbook.md
+      # Routing graph packs (coverage v2 hosting): release assets have no CORS headers, so the packs
+      # live on the sibling Pages sites unfog-graph-N (same origin as the app; Range → 206) per
+      # tools/build-graph/pages-shards.json. This step writes dist/graph/packs/packs-index.json with
+      # the shard URLs (and mirrors the cells of pages-mirror.json, normally none); the second step
+      # HEADs every shard URL and fails the deploy if a pack is missing or its size differs from the
+      # index (a shard that has not deployed yet → 404: run its mirror.yml first). Nothing is stored
+      # in git. docs/coverage-runbook.md § Hosting
       - run: node tools/build-graph/mirror-packs.mjs --out dist/graph/packs
+      - run: node tools/build-graph/mirror-packs.mjs --check --out dist/graph/packs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
