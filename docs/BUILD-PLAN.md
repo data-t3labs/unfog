@@ -9,10 +9,12 @@ This file is the single spec every implementer reads. Contracts live in code (`s
 A PWA (iPhone Safari, Home Screen install) for Jacob (NYC). Imports his Fog of World history (Sync.zip / raw Sync files / .fwss),
 GPX (Apple Health, Strava), Google Timeline JSON, and Unfog backups. Shows a **fog** layer (light OpenFreeMap "bright" basemap under
 soft dark fog, lifted with a feathered edge wherever he has been), a **heat** layer (amber→red glow by visit count over a dimmed map),
-and — the point — **novelty routing**: pick a destination, choose walk/bike/drive and a detour budget (+10…+100 %, default +25 %),
-get 2–3 candidate routes that maximise never-visited street distance, tap Go and follow on the map. Foreground **Record** sessions
-(Wake Lock) add visits live; sessions export as GPX for Fog of World's Import folder. Everything on-device; **backup/restore** via
-the share sheet. Routing graphs are prebuilt for NYC metro + Metro Vancouver and downloadable on demand anywhere (Overpass).
+and — the point — **novelty routing**: pick a destination and a detour budget (+10…+100 %, default +25 %), get 2–3 candidate
+routes that maximise never-visited street distance, tap Go and follow on the map. One travel mode (feedback-2, 2026-09-02): routes
+follow paths where they exist and straight lines where they don't, timed at walking pace. **Track my movement** (a switch in
+Settings, feedback-2) records passively whenever the app is open and on screen (Wake Lock), clearing fog live; sessions export as
+GPX for Fog of World's Import folder. Everything on-device; **backup/restore** via the share sheet. Routing graphs are prebuilt for
+NYC metro + Metro Vancouver and downloadable on demand anywhere (Overpass).
 
 Settled decisions (data, 2026-09-02): name Unfog; public repo `data-t3labs/unfog`; URL `https://data-t3labs.github.io/unfog/`;
 no build ceremony — Claude's judgment; smooth high-res rendering (NOT blocky cells); FoW cell grid kept as the data model.
@@ -94,7 +96,9 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
 - λ sweep {0.35, 0.7, 1, 1.5, 2, 3, 4, 6, 9}; keep paths with len ≤ B; dedupe (shared-arc fraction > 0.6 = duplicate);
   rank by new metres; return ≤3: "Most new", "Balanced", "Direct" (Direct = shortest, always present).
 - Modes: walk (ignores oneway; steps allowed), bike (oneway unless `oneway:bicycle=no`; steps = dismount), drive (oneway, no
-  footways; no turn restrictions in v1).
+  footways; no turn restrictions in v1). **The app asks for `walk` only** (feedback-2, data: "one mode, the most permissive —
+  don't even have the other modes buried somewhere"): the Walk/Bike/Drive chips, the mode preference and every mode mention in
+  the UI/docs are gone (`src/app/route-sheet.ts` `TRAVEL_MODE`); the engine keeps its Mode type + per-mode bits for tools/tests.
 - Turn penalty (2026-09-02, sweep-tuned): walk/bike searches add 12 m-equivalent per direction change ≥ ~40° (arc-labelled exact A*,
   admissible); Direct (λ=0) is never penalised; drive 0; loops 0 by default (straight legs thin loops). Cost ≈ 2.2× per penalised search.
 - Loop ranking: by pctNew (ties → closest to target length); loop names 'Most new'/'Balanced' (UI shows Loop A/B/C). Snap origin/destination to the nearest arc (grid-bucketed), split virtually.
@@ -161,8 +165,12 @@ high-res graph of the places you are automatically — no clicks; at least North
   source, sha256) — the storage of record. **Release assets serve `Range` as 206 but carry no CORS headers** on either
   hop (github.com 302 → release-assets.githubusercontent.com): headless Chromium on the app origin fails every fetch
   (measured 2026-09-02). So the deploy workflow mirrors the cells in `tools/build-graph/pages-mirror.json` from the
-  release into the Pages site (`mirror-packs.mjs` → `/unfog/graph/packs/`, same origin, Range → 206 verified, nothing in
-  git; ≤ 950 MB per site — the full continent needs sibling Pages sites of the same account, same origin, data's call).
+  release into Pages sites on the app's origin, nothing in git. **Decision (2026-09-03): sibling Pages sites `unfog-graph-N`**
+  (same origin `data-t3labs.github.io`, Range → 206 + ACAO `*` verified): five shards of ≈ 707 MB (cap 900) serve all 262
+  packs; `tools/build-graph/pages-shards.json` (stable planner `shard-plan.mjs`) says which cell lives where, each shard repo
+  (template `tools/build-graph/shard-repo/`) mirrors its cells from the release by workflow, and the app's own site serves
+  only `packs-index.json` with the shard URLs (`mirror-packs.mjs`, `--check` guards the deploy). `continent.js mirror` runs
+  the plan → shard workflows → verification; runbook § Hosting.
   A client reads a pack's index with one range request (`bytes=0-<indexBytes-1>`) and then only the tiles it needs.
   Prebuilt `public/graph/{nyc,vancouver,saltspring}` stay as offline-precached regions; packs are the universal layer beneath.
 - **Pipeline** (`tools/build-graph/build-continent.ts` → `dist/continent.js`, resumable, `state.json`): `fetch` (Geofabrik
@@ -210,6 +218,15 @@ high-res graph of the places you are automatically — no clicks; at least North
 - Not standalone on iOS → install card (Share → Add to Home Screen → Add) with a "continue in Safari" link.
 - Location only from a user gesture; on PERMISSION_DENIED show the Settings path + the iOS 26 "Reset Location & Privacy" tip.
 - Wake Lock re-acquired on visibilitychange; fixes persisted continuously; accuracy > 50 m dropped.
+- **Tracking** (feedback-2, 2026-09-02 — "this tracks your movements passively from the moment you turn it on"): no Record
+  button. `settings.tracking` is a persisted switch (Help → Settings, also offered once on first run after the install card);
+  while on, `src/app/tracking.ts` starts a session at boot and keeps it running whenever the page is visible (the location watch
+  pauses/resumes with visibility, the wake lock is re-acquired on return). No Start/Stop, no summary sheet: sessions roll over at
+  local midnight and on every launch — the persisted session of the previous run is saved as a track first
+  (`saveUnfinishedSession`), so a crash / iOS kill / update reload loses ≤ one checkpoint. The map shows only a quiet
+  "Tracking" pill (paused / waiting-for-GPS variants); Settings carries the honest note that iOS only records while the app is
+  open and on screen, pointing to Help → "Always recording" (Fog of World as the background recorder; Overland import coming).
+  The service-worker update no longer refuses Reload mid-session.
 
 ## 3. Waves
 

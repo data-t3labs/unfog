@@ -1,5 +1,5 @@
 /**
- * Boot: service worker → settings → engines (real workers or mocks) → map → UI → resume checks.
+ * Boot: service worker → settings → engines (real workers or mocks) → map → UI → tracking resume.
  * See docs/BUILD-PLAN.md §2. `?mock=1` forces the in-page mock engines.
  */
 import './style.css';
@@ -9,12 +9,12 @@ import { loadEngines } from './app/engines';
 import { fmtArea, fmtInt } from './app/format';
 import { createHelpScreen, showInstallCardIfNeeded } from './app/help';
 import { initPwa } from './app/pwa';
-import { createRecordUI } from './app/record-ui';
 import { createRouteSheet } from './app/route-sheet';
 import { createSearch } from './app/search';
 import { RENDER_KEYS, getSettings, onSettingsChange, renderSettings, updateSettings, type Basemap } from './app/settings';
 import { createShell } from './app/shell';
 import { createStatsScreen } from './app/stats';
+import { createTracking, type TrackingController } from './app/tracking';
 import { el, toast } from './app/ui';
 import { LocationManager, describeLocationError } from './map/location';
 import { DEFAULT_CENTER, UnfogMap, savedCenter } from './map/map';
@@ -44,7 +44,7 @@ async function boot(): Promise<void> {
   const mount = document.getElementById('app');
   if (!mount) throw new Error('#app missing');
   mount.replaceChildren(el('div', { class: 'boot' }, el('span', { class: 'spinner' }), 'Loading Unfog…'));
-  const pwa = initPwa();
+  initPwa();
 
   const params = new URLSearchParams(location.search);
   const forceMock = params.get('mock') === '1';
@@ -75,11 +75,11 @@ async function boot(): Promise<void> {
     },
   };
   const recorder = new Recorder(engines.grid, locationMgr, recordHooks);
-  pwa.isRecording = () => recorder.status === 'recording'; // an app update is never applied mid-walk
 
   let routeSheet: ReturnType<typeof createRouteSheet>;
   let statsScreen: ReturnType<typeof createStatsScreen>;
   let helpScreen: ReturnType<typeof createHelpScreen>;
+  let tracking: TrackingController;
 
   async function refreshStatChip(): Promise<void> {
     try {
@@ -99,6 +99,9 @@ async function boot(): Promise<void> {
     shell,
     location: locationMgr,
     recorder,
+    get tracking() {
+      return tracking;
+    },
     settings: () => getSettings(),
     async dataChanged() {
       map.bumpOverlay();
@@ -188,18 +191,14 @@ async function boot(): Promise<void> {
   // ---- UI modules
   const search = createSearch(ctx);
   routeSheet = createRouteSheet(ctx);
-  const recordUI = createRecordUI(ctx, recordHooks);
+  tracking = createTracking(ctx, recordHooks);
   const dataScreen = createDataScreen(ctx);
   statsScreen = createStatsScreen(ctx);
   helpScreen = createHelpScreen(ctx);
 
   shell.searchPill.addEventListener('click', () => search.open());
   shell.searchClear.addEventListener('click', () => routeSheet.close());
-  shell.recordBtn.addEventListener('click', () => void recordUI.start());
-  map.onLongPress((ll) => {
-    if (recorder.status === 'recording') return;
-    ctx.openRoute({ name: 'Dropped pin', locality: `${ll[1].toFixed(5)}, ${ll[0].toFixed(5)}`, lonlat: ll });
-  });
+  map.onLongPress((ll) => ctx.openRoute({ name: 'Dropped pin', locality: `${ll[1].toFixed(5)}, ${ll[0].toFixed(5)}`, lonlat: ll }));
   shell.onTab((tab) => {
     if (tab === 'stats') void statsScreen.refresh();
     if (tab === 'data') void dataScreen.refresh();
@@ -210,8 +209,12 @@ async function boot(): Promise<void> {
   // ---- boot-time checks
   void refreshStatChip();
   map.onReady(() => {
-    recordUI.offerResume();
-    showInstallCardIfNeeded(ctx);
+    // Save whatever the previous run left, start tracking if the switch is on, then (first run)
+    // offer the switch — after the install card on iOS Safari, since installing starts over anyway.
+    void tracking.resume().then(() => {
+      const installCard = showInstallCardIfNeeded(ctx, () => tracking.offerIfNeeded());
+      if (!installCard) tracking.offerIfNeeded();
+    });
     window.setTimeout(() => dataScreen.maybeNag(), 4000);
     map.map.once('idle', () => {
       window.__unfog = { ready: true, mock: engines.gridMock || engines.routeMock, openRoute: (d) => ctx.openRoute(d), openLoop: (from) => ctx.openLoop(from), ctx, readyAt: performance.now(), perf: overlayPerf };

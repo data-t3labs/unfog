@@ -36,6 +36,8 @@ const DOMINO_PARK = { name: 'Domino Park', locality: 'Williamsburg, Brooklyn', l
 const JAMAICA = { name: 'Archer Avenue', locality: 'Jamaica, Queens', lonlat: [-73.798, 40.706] as [number, number], origin: [-73.8075, 40.702] as [number, number] };
 
 const shot = (page: Page, name: string) => page.screenshot({ path: path.join(shots, `real-${name}.png`), fullPage: false });
+/** Feedback-2 review frames (route sheet, loop sheet, Settings, the tracking pill). */
+const shotFb2 = (page: Page, name: string) => page.screenshot({ path: path.join(shots, `fb2-${name}.png`), fullPage: false });
 
 // ---------------------------------------------------------------- page-side types (structural, kept independent of src/)
 
@@ -84,6 +86,8 @@ type UnfogWindow = {
         };
       };
       dataChanged(): Promise<void>;
+      /** "Track my movement" (src/app/tracking.ts); rollover = the midnight path, driven directly. */
+      tracking: { enabled: boolean; active: boolean; rollover(): Promise<void> };
       map: {
         map: {
           loaded(): boolean;
@@ -131,6 +135,8 @@ async function prepare(page: Page, opts: BootOptions = {}): Promise<Booted> {
     if (m.type() === 'error') consoleErrors.push(m.text());
   });
   if (!opts.installCard) await page.addInitScript(() => localStorage.setItem('unfog.installDismissed', String(Date.now())));
+  // The first-run "Track my movement?" card (feedback-2) is smoke-tested; here it would only shift the chrome.
+  await page.addInitScript(() => localStorage.setItem('unfog.trackingOffered', String(Date.now())));
   if (opts.share === 'capture') {
     await page.addInitScript(() => {
       const w = window as unknown as { __shared: Array<{ name: string; type: string; b64: string }> };
@@ -303,6 +309,30 @@ async function walk(context: BrowserContext, page: Page, from: [number, number],
   return cur;
 }
 
+/** Help → Settings → the "Track my movement" switch (feedback-2: tracking is a switch, not a map button). */
+async function setTracking(page: Page, on: boolean): Promise<void> {
+  await page.getByRole('tab', { name: 'Help' }).click();
+  const settings = page.locator('#help-settings');
+  if ((await settings.getAttribute('open')) === null) await settings.locator('summary').click(); // <details open=""> → ''
+  const sw = settings.getByRole('switch', { name: 'Track my movement' });
+  await expect(sw).toHaveAttribute('aria-checked', String(!on));
+  await sw.click();
+  await expect(sw).toHaveAttribute('aria-checked', String(on), { timeout: 20_000 });
+  await page.getByRole('tab', { name: 'Map' }).click();
+}
+
+/**
+ * The pill once a fix has arrived: plain "Tracking", or "Tracking · keep the screen on" where the
+ * Screen Wake Lock is unavailable (headless Chromium here; Safari tabs before iOS 18.4).
+ */
+const PILL_ON = /^Tracking( · keep the screen on)?$/;
+
+/** The persisted session (localStorage `unfog.session`, written on every fix), or null. */
+const session = (page: Page) => page.evaluate(() => JSON.parse(localStorage.getItem('unfog.session') ?? 'null') as { id: string; points: unknown[]; distanceM: number } | null);
+
+const listSessions = (page: Page) =>
+  page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.engines.grid.listTracks()).then((ts) => ts.filter((t) => t.source === 'session'));
+
 /** Decode the single pixel of a 1×1 PNG (Chromium screenshot with a 1×1 clip at CSS scale). */
 function pngPixel(png: Buffer): [number, number, number, number] {
   const sig = png.subarray(0, 8).toString('hex');
@@ -420,7 +450,10 @@ test.describe('Unfog real engines', () => {
     // Empty state: a one-line hint under the map (tap → Data) and the Stats screen says so too.
     const hint = page.locator('.hint');
     await expect(hint).toBeVisible();
-    await expect(hint).toHaveText('Import your Fog of World history or tap Record');
+    await expect(hint).toHaveText('Import your Fog of World history, or turn on tracking in Settings');
+    // Feedback-2: no Record button; the tracking pill only shows while the switch is on.
+    await expect(page.getByRole('button', { name: 'Record', exact: true })).toHaveCount(0);
+    await expect(page.locator('.track-pill')).toBeHidden();
     expect((await hint.boundingBox())!.height, 'hint is a 44 px touch target').toBeGreaterThanOrEqual(44);
     const s = await stats(page);
     expect(s.visitedCells).toBe(0);
@@ -563,7 +596,7 @@ test.describe('Unfog real engines', () => {
     expect(overlayErrors, 'no overlay/grid console errors').toEqual([]);
   });
 
-  test('3. route sheet on the real NYC graph: Direct, then novelty after marking it walked; modes, slider, Go/End', async ({ page }) => {
+  test('3. route sheet on the real NYC graph: Direct, then novelty after marking it walked; one mode, slider, Go/End', async ({ page }) => {
     const b = await boot(page);
     await openRoute(page, DOMINO_PARK);
     const sheet = page.locator('.sheet.route');
@@ -579,7 +612,11 @@ test.describe('Unfog real engines', () => {
     await expect(sheet.locator('.route-status')).not.toContainText('map centre'); // origin = the user's position
     // The selected row is the only pressed one (assistive tech reads the selection).
     await expect(sheet.locator('.cand[aria-pressed="true"]')).toHaveCount(1);
-    await expect(sheet.locator('.modes button[aria-pressed="true"]')).toHaveText('Walk');
+    // Feedback-2: one travel mode — no Walk/Bike/Drive chips; a line says what a route is instead.
+    await expect(sheet.locator('.modes')).toHaveCount(0);
+    for (const name of ['Walk', 'Bike', 'Drive']) await expect(sheet.getByRole('button', { name, exact: true })).toHaveCount(0);
+    await expect(sheet.locator('.sheet-note')).toHaveText('Routes follow paths where they exist and straight lines where they don’t, timed at walking pace.');
+    expect(direct!.etaMin, 'walking pace (4.8 km/h)').toBeGreaterThanOrEqual(Math.floor((direct!.lengthM / 1000 / 4.8) * 60));
     // The route lines are on the map.
     const routeFeatures = await page.evaluate(() => (window as unknown as { __unfog: { ctx: { map: { map: { querySourceFeatures(s: string): unknown[] } } } } }).__unfog.ctx.map.map.querySourceFeatures('unfog-routes').length);
     expect(routeFeatures).toBeGreaterThan(0);
@@ -623,19 +660,7 @@ test.describe('Unfog real engines', () => {
     expect(second[0].lengthM).toBeLessThanOrEqual(direct2.lengthM * 1.25 + 30); // within the +25 % budget
     await idle(page);
     await shot(page, 'route-after-walk');
-
-    // Bike re-routes: the same distance takes fewer minutes.
-    await sheet.getByRole('button', { name: 'Bike' }).click();
-    await expect(sheet.locator('.modes button.on')).toHaveText('Bike');
-    const bike = await waitRouted(page);
-    const bikeDirect = bike[bike.length - 1];
-    expect(bikeDirect.name).toBe('Direct');
-    expect(bikeDirect.etaMin).toBeLessThan(direct2.etaMin);
-    await sheet.getByRole('button', { name: 'Drive' }).click();
-    const drive = await waitRouted(page);
-    expect(drive[drive.length - 1].name).toBe('Direct');
-    await sheet.getByRole('button', { name: 'Walk' }).click();
-    await waitRouted(page);
+    await shotFb2(page, 'route-sheet');
 
     // Detour slider: +25 % → +60 % re-routes and the budget text changes.
     const sliderRow = sheet.locator('.slider');
@@ -649,8 +674,10 @@ test.describe('Unfog real engines', () => {
     expect(wide[wide.length - 1].name).toBe('Direct');
     expect(wide[0].lengthM).toBeLessThanOrEqual(direct2.lengthM * 1.6 + 30);
     test.info().annotations.push({ type: 'candidates-60pct', description: wide.map((c) => `${c.name} ${c.lengthM} m ${c.pctNew}% new`).join(' | ') });
-    // Persisted for the next sheet.
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.routePrefs') ?? '{}'))).toMatchObject({ mode: 'walk', detour: 0.6 });
+    // Persisted for the next sheet (no mode preference any more).
+    const prefs = await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.routePrefs') ?? '{}'));
+    expect(prefs).toMatchObject({ detour: 0.6 });
+    expect(prefs).not.toHaveProperty('mode');
 
     // Tapping a row selects it; Go collapses to the follow bar; End restores the chrome.
     await sheet.locator('.cand').last().click();
@@ -669,7 +696,7 @@ test.describe('Unfog real engines', () => {
     await bar.getByRole('button', { name: 'End' }).click();
     await expect(bar).toBeHidden();
     await expect(page.locator('.search .ph')).toHaveText('Where to?');
-    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
+    await expect(page.locator('.stat-chip')).toBeVisible();
     await expect(page.locator('.tabs')).toBeVisible();
     // The GeoJSON source re-tiles asynchronously after setData([]).
     await expect
@@ -721,68 +748,98 @@ test.describe('Unfog real engines', () => {
     expect(b.errors).toEqual([]);
   });
 
-  test('5. record: banner distance grows with fixes; Stop → summary, session listed, GPX download', async ({ page, context }) => {
+  test('5. tracking (feedback-2): the Settings switch runs a passive session — moving fixes grow it and cells increase live; off saves it quietly; Data lists it with GPX download', async ({ page, context }) => {
     const b = await boot(page, { share: 'none' });
     const before = await stats(page);
     await context.setGeolocation({ longitude: BEDFORD_N7[0], latitude: BEDFORD_N7[1], accuracy: 5 });
-    await page.getByRole('button', { name: 'Record', exact: true }).click();
-    const banner = page.locator('.rec-banner');
-    await expect(banner).toBeVisible({ timeout: 20_000 });
-    await expect(page.locator('.app')).toHaveClass(/recording/);
-    await expect(page.locator('.fab.active')).toHaveCount(1);
-    const dist = banner.locator('.rec-main > span').nth(1);
-    await expect(dist).toHaveText('0 m');
-    // Along N 7th St towards the river: ~19 m per fix, 8 fixes.
+    // The switch lives in Help → Settings with the honest iOS note; the map has no Record button.
+    await page.getByRole('tab', { name: 'Help' }).click();
+    await page.locator('#help-settings summary').click();
+    const sw = page.getByRole('switch', { name: 'Track my movement' });
+    await expect(sw).toHaveAttribute('aria-checked', 'false');
+    await expect(page.locator('#help-settings')).toContainText('iOS only lets a web app record while it is open and the screen is on');
+    await sw.click();
+    await expect(sw).toHaveAttribute('aria-checked', 'true', { timeout: 20_000 }); // flips at once; persists once location is granted
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('unfog.settings') ?? '{}').tracking ?? false), { timeout: 20_000 }).toBe(true);
+    await expect(sw).toBeEnabled();
+    await shotFb2(page, 'settings');
+    // The note's link opens "Always recording" (Fog of World as the background recorder; Overland coming).
+    await page.locator('#help-settings').getByRole('button', { name: 'Always recording' }).click();
+    await expect(page.locator('#help-always')).toHaveAttribute('open', '');
+    await expect(page.locator('#help-always')).toContainText('Fog of World records in the background');
+    await expect(page.locator('#help-always')).toContainText('Overland');
+    await page.getByRole('tab', { name: 'Map' }).click();
+
+    // The pill is the only trace on the map; the chrome is untouched (no banner, no Stop, no follow hijack).
+    const pill = page.locator('.track-pill');
+    await expect(pill).toBeVisible();
+    await expect(pill).toHaveText(PILL_ON, { timeout: 20_000 }); // the first fix arrived
+    await expect(pill).toHaveClass(/\bon\b/);
+    await expect(page.locator('.stat-chip')).toBeVisible();
+    await expect(page.locator('.tabs')).toBeVisible();
+    await expect(page.locator('.rec-banner')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Stop/ })).toHaveCount(0);
+    // Along N 7th St towards the river: ~19 m per fix, 8 fixes; the session persists on every fix.
     await walk(context, page, BEDFORD_N7, [-0.0002, 0.00008], 8);
-    await expect(dist).not.toHaveText('0 m');
-    const bannerM = parseDistanceM((await dist.textContent()) ?? '');
-    expect(bannerM).toBeGreaterThanOrEqual(100);
-    expect(bannerM).toBeLessThanOrEqual(200);
-    await expect(banner.locator('b')).not.toHaveText('0:00');
-    await shot(page, 'recording');
+    const s1 = (await session(page))!;
+    expect(s1.points.length).toBe(9); // first watch fix + 8 steps
+    expect(s1.distanceM).toBeGreaterThanOrEqual(100);
+    expect(s1.distanceM).toBeLessThanOrEqual(200);
+    // Cells increase live (a checkpoint every ≤ 5 s) — nothing to stop; the stat chip follows.
+    await expect.poll(async () => (await stats(page)).visitedCells, { timeout: 15_000, message: 'cells marked by a checkpoint' }).toBeGreaterThan(before.visitedCells + 5);
+    await expect(page.locator('.stat-chip .sub')).not.toHaveText('0 cells');
+    const mid = await stats(page);
+    await walk(context, page, [BEDFORD_N7[0] - 8 * 0.0002, BEDFORD_N7[1] + 8 * 0.00008], [-0.0002, 0.00008], 4);
+    await expect.poll(async () => (await stats(page)).visitedCells, { timeout: 15_000, message: 'cells keep increasing as fixes arrive' }).toBeGreaterThan(mid.visitedCells);
+    expect((await session(page))!.points.length).toBe(13);
+    await idle(page);
+    await shot(page, 'tracking');
+    await shotFb2(page, 'tracking-pill');
+    // Routing is not blocked by a running session.
+    await openRoute(page, DOMINO_PARK);
+    await waitRouted(page);
+    await expect(pill).toBeVisible();
+    await page.locator('.sheet.route').getByRole('button', { name: 'Close' }).click();
 
-    await page.getByRole('button', { name: 'Stop recording' }).click();
-    const summary = page.locator('.record-summary');
-    await expect(summary).toBeVisible({ timeout: 20_000 });
-    await expect(summary.locator('h2')).toHaveText('Walk recorded');
-    await expect(summary.locator('p')).toContainText(/9 GPS points/); // first watch fix + 8 steps
-    const sumDist = parseDistanceM((await summary.locator('.stat').first().locator('.v').textContent()) ?? '');
-    expect(sumDist).toBeGreaterThanOrEqual(100);
-    const newCells = Number((await summary.locator('.stat').nth(2).locator('.v').textContent())?.replace(/,/g, ''));
-    expect(newCells).toBeGreaterThan(5);
-    await shot(page, 'summary');
+    // Off: the switch saves the session — no summary sheet, no dialog — and the pill goes.
+    await setTracking(page, false);
+    await expect(pill).toBeHidden();
+    await expect(page.locator('.record-summary')).toHaveCount(0);
+    await expect(page.locator('.sheet.modal')).toHaveCount(0);
+    expect(await session(page)).toBeNull();
+    await expect(page.locator('.toast', { hasText: 'Tracking off' })).toBeVisible();
+    // Fixes after Off change nothing (a checkpoint would have run within 5 s).
+    const after = await stats(page);
+    await walk(context, page, [BEDFORD_N7[0] - 12 * 0.0002, BEDFORD_N7[1] + 12 * 0.00008], [-0.0002, 0.00008], 3);
+    await page.waitForTimeout(6000);
+    expect((await stats(page)).visitedCells).toBe(after.visitedCells);
+    expect(await session(page)).toBeNull();
 
+    // The store has the cells and the session; the Data tab lists it with GPX export + delete.
+    expect(after.visitedCells).toBeGreaterThan(before.visitedCells + 5);
+    const sessions = await listSessions(page);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].points).toBe(13);
+    await page.getByRole('tab', { name: 'Data' }).click();
+    await expect(page.locator('#screen-data')).toContainText('Sessions');
+    await expect(page.locator('#screen-data')).not.toContainText(/\bRecord\b/);
+    const row = page.locator('#screen-data .row-item', { hasText: 'GPS points' });
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText(/^Tracked /);
+    await expect(row).toContainText('13 GPS points');
+    await shot(page, 'data-session');
     // Export GPX (no navigator.share here → <a download>).
-    const [download] = await Promise.all([page.waitForEvent('download'), summary.getByRole('button', { name: 'Export GPX' }).click()]);
+    const [download] = await Promise.all([page.waitForEvent('download'), row.getByRole('button', { name: 'Export GPX' }).click()]);
     expect(download.suggestedFilename()).toMatch(/^unfog-\d{4}-\d{2}-\d{2}-\d{4}\.gpx$/);
     const gpx = fs.readFileSync((await download.path())!, 'utf8');
     expect(gpx).toMatch(/^<\?xml/);
     expect(gpx).toContain('<gpx version="1.1" creator="Unfog"');
-    expect((gpx.match(/<trkpt /g) ?? []).length).toBeGreaterThanOrEqual(9);
-    expect((gpx.match(/<time>/g) ?? []).length).toBeGreaterThanOrEqual(10); // metadata + every point
+    expect((gpx.match(/<trkpt /g) ?? []).length).toBe(13);
+    expect((gpx.match(/<time>/g) ?? []).length).toBe(14); // metadata + every point
     await expect(page.locator('.toast.success')).toContainText('GPX downloaded');
-    await summary.getByRole('button', { name: 'Done' }).click();
-    await expect(summary).toBeHidden();
-    await expect(banner).toBeHidden();
-    await expect(page.locator('.fab.active')).toHaveCount(0);
-
-    // The store has the cells and the session; the Data tab lists it with GPX export + delete.
-    const after = await stats(page);
-    expect(after.visitedCells).toBeGreaterThan(before.visitedCells + 5);
-    await expect(page.locator('.stat-chip .sub')).not.toHaveText('0 cells');
-    const tracks = await page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.engines.grid.listTracks());
-    expect(tracks.filter((t) => t.source === 'session')).toHaveLength(1);
-    expect(tracks[0].points).toBe(9);
-    await page.getByRole('tab', { name: 'Data' }).click();
-    const row = page.locator('#screen-data .row-item', { hasText: 'GPS points' });
-    await expect(row).toHaveCount(1);
-    await expect(row).toContainText(/^Walk /);
-    await expect(row).toContainText('9 GPS points');
-    await expect(row.getByRole('button', { name: 'Export GPX' })).toBeVisible();
-    await shot(page, 'data-session');
     await page.getByRole('tab', { name: 'Stats' }).click();
-    await expect(page.locator('#screen-stats')).toContainText('Recorded sessions');
-    await expect(page.locator('#screen-stats .stat', { hasText: 'recorded sessions' }).locator('.v')).toHaveText('1');
+    await expect(page.locator('#screen-stats')).toContainText('Tracked sessions');
+    await expect(page.locator('#screen-stats .stat', { hasText: 'tracked sessions' }).locator('.v')).toHaveText('1');
     // Delete the session: the row goes, the cells stay.
     await page.getByRole('tab', { name: 'Data' }).click();
     await row.getByRole('button', { name: 'Delete session' }).click();
@@ -912,7 +969,7 @@ test.describe('Unfog real engines', () => {
     const card = page.locator('.install-card');
     await expect(card).toBeVisible();
     await expect(card).toContainText('Add to Home Screen');
-    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
+    await expect(page.locator('.stat-chip')).toBeVisible();
     await card.getByRole('button', { name: 'Dismiss' }).click();
     await expect(card).toBeHidden();
     await page.reload();
@@ -927,49 +984,57 @@ test.describe('Unfog real engines', () => {
     await expect(page.locator('.install-card')).toHaveCount(0);
   });
 
-  test('10. resume after process death: reload mid-recording offers Resume/Finish; Finish keeps the points', async ({ page, context }) => {
+  test('10. relaunch while tracking (feedback-2): no dialog — the previous session is saved as a track and a new one runs; midnight rollover splits the same way; off saves', async ({ page, context }) => {
     const b = await boot(page);
     await context.setGeolocation({ longitude: BEDFORD_N7[0], latitude: BEDFORD_N7[1], accuracy: 5 });
-    await page.getByRole('button', { name: 'Record', exact: true }).click();
-    await expect(page.locator('.rec-banner')).toBeVisible({ timeout: 20_000 });
+    await setTracking(page, true);
+    const pill = page.locator('.track-pill');
+    await expect(pill).toHaveText(PILL_ON, { timeout: 20_000 });
     await walk(context, page, BEDFORD_N7, [-0.0002, 0.00008], 5);
-    const persisted = await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.session') ?? 'null'));
-    expect(persisted?.points?.length).toBe(6);
+    const persisted = (await session(page))!;
+    expect(persisted.points.length).toBe(6);
 
-    await page.reload();
-    await waitReady(page);
-    const sheet = page.locator('.sheet.modal', { hasText: 'Unfinished recording' });
-    await expect(sheet).toBeVisible();
-    await expect(sheet).toContainText('6 GPS points');
-    await shot(page, 'resume');
-    // Resume continues the same session with the same points.
-    await sheet.getByRole('button', { name: 'Resume recording' }).click();
-    await expect(page.locator('.rec-banner')).toBeVisible({ timeout: 20_000 });
-    await walk(context, page, [BEDFORD_N7[0] - 5 * 0.0002, BEDFORD_N7[1] + 5 * 0.00008], [-0.0002, 0.00008], 3);
-    const resumed = await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.session') ?? 'null'));
-    expect(resumed.id).toBe(persisted.id);
-    expect(resumed.points.length).toBeGreaterThanOrEqual(9);
-
-    // Second "death": Finish and save keeps every point.
-    await page.reload();
-    await waitReady(page);
-    await expect(sheet).toBeVisible();
-    await sheet.getByRole('button', { name: 'Finish and save' }).click();
-    const summary = page.locator('.record-summary');
-    await expect(summary).toBeVisible({ timeout: 20_000 });
-    await expect(summary.locator('h2')).toHaveText('Walk recorded');
-    await summary.getByRole('button', { name: 'Done' }).click();
-    expect(await page.evaluate(() => localStorage.getItem('unfog.session'))).toBeNull();
-    const tracks = await page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.engines.grid.listTracks());
-    const sessions = tracks.filter((t) => t.source === 'session');
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0].id).toBe(persisted.id);
-    expect(sessions[0].points).toBe(resumed.points.length);
-    expect((await stats(page)).visitedCells).toBeGreaterThan(5);
-    // Nothing left to resume.
+    // "Process death": a reload. The switch is on, so tracking comes back by itself — no sheet,
+    // no Resume/Finish/Discard; what was persisted becomes a track, a fresh session runs.
     await page.reload();
     await waitReady(page);
     await expect(page.locator('.sheet.modal')).toHaveCount(0);
+    await expect(pill).toHaveText(PILL_ON, { timeout: 20_000 });
+    await shot(page, 'relaunch');
+    const fresh = (await session(page))!;
+    expect(fresh.id, 'a new session after the relaunch').not.toBe(persisted.id);
+    let sessions = await listSessions(page);
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].id).toBe(persisted.id);
+    expect(sessions[0].points).toBe(6);
+    expect((await stats(page)).visitedCells).toBeGreaterThan(5);
+
+    // Keep moving: the new session grows.
+    await walk(context, page, [BEDFORD_N7[0] - 5 * 0.0002, BEDFORD_N7[1] + 5 * 0.00008], [-0.0002, 0.00008], 3);
+    expect((await session(page))!.points.length).toBeGreaterThanOrEqual(4);
+
+    // Midnight rollover (the same path the 60 s timer takes, driven directly): the running
+    // session is saved, another starts, the pill never blinks out of "Tracking".
+    await page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.tracking.rollover());
+    await expect(pill).toHaveText(PILL_ON, { timeout: 20_000 });
+    const third = (await session(page))!;
+    expect(third.id).not.toBe(fresh.id);
+    sessions = await listSessions(page);
+    expect(sessions.map((s) => s.id).sort()).toEqual([persisted.id, fresh.id].sort());
+    await walk(context, page, [BEDFORD_N7[0] - 8 * 0.0002, BEDFORD_N7[1] + 8 * 0.00008], [-0.0002, 0.00008], 3);
+
+    // Off: the third session is saved too, quietly; nothing is left to resume.
+    await setTracking(page, false);
+    await expect(pill).toBeHidden();
+    expect(await session(page)).toBeNull();
+    sessions = await listSessions(page);
+    expect(sessions.map((s) => s.id).sort()).toEqual([persisted.id, fresh.id, third.id].sort());
+    await page.reload();
+    await waitReady(page);
+    await expect(page.locator('.sheet.modal')).toHaveCount(0);
+    await expect(pill).toBeHidden();
+    expect(await session(page)).toBeNull();
+    expect((await listSessions(page)).length).toBe(3);
     expect(b.errors).toEqual([]);
   });
 
@@ -977,7 +1042,8 @@ test.describe('Unfog real engines', () => {
     let blocked = true;
     await page.route('https://tiles.openfreemap.org/**', (route) => (blocked ? route.abort('failed') : route.continue()));
     const b = await boot(page, { readyTimeout: 60_000 });
-    const styleName = () => page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.map.map.getStyle().name);
+    // getStyle() is undefined for a moment while setStyle swaps the fallback for the real style (the poll below spans it).
+    const styleName = () => page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.map.map.getStyle()?.name);
     expect(await styleName()).toBe('unfog-fallback');
     await importFiles(page, FOW_FILES);
     await page.getByRole('tab', { name: 'Map' }).click();
@@ -1004,7 +1070,7 @@ test.describe('Unfog real engines', () => {
     expect(b.errors).toEqual([]);
   });
 
-  test('12. loop mode on the real NYC graph: 3 km walk from Bedford & N 7th → 1–3 loops within ±25 %, drawn above the sheet; chips, slider, mode, Go/End', async ({ page }) => {
+  test('12. loop mode on the real NYC graph: 3 km from Bedford & N 7th → 1–3 loops within ±25 %, drawn above the sheet; chips, slider, Go/End', async ({ page }) => {
     const b = await boot(page);
     // Entry point: the search panel's "Explore a loop from here" row.
     await page.getByRole('button', { name: 'Search destination' }).click();
@@ -1015,7 +1081,8 @@ test.describe('Unfog real engines', () => {
     await expect(sheet).toHaveAttribute('data-kind', 'loop');
     await expect(sheet.locator('h2')).toContainText('Explore from here');
     await expect(sheet.locator('.chips button.on')).toHaveText('3 km');
-    await expect(sheet.locator('.modes button.on')).toHaveText('Walk');
+    await expect(sheet.locator('.modes')).toHaveCount(0); // feedback-2: one mode, no chips
+    await expect(sheet.locator('.sheet-note')).toHaveText('Round trips on streets and paths, timed at walking pace.');
     await expect(page.locator('.search .val')).toHaveText('Loop from here');
     const loops = await waitRouted(page);
     test.info().annotations.push({ type: 'loops-3km-walk', description: loops.map((c) => `${c.name} ${c.lengthM} m ${c.pctNew}% new ${c.etaMin} min`).join(' | ') });
@@ -1047,6 +1114,7 @@ test.describe('Unfog real engines', () => {
     expect(routeFeatures).toBeGreaterThan(0);
     await expectLinesAboveSheet(page, ring.coords);
     await shot(page, 'loop');
+    await shotFb2(page, 'loop-sheet');
 
     // 5 km chip → every loop within ±25 % of 5 km; the choice persists.
     await sheet.getByRole('button', { name: '5 km' }).click();
@@ -1057,20 +1125,15 @@ test.describe('Unfog real engines', () => {
       return rows.length > 0 && rows.every((c) => c.lengthM >= lo && c.lengthM <= hi);
     };
     await expect.poll(inRange(3750, 6250), { timeout: 60_000 }).toBe(true);
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.routePrefs') ?? '{}'))).toMatchObject({ loopKm: 5, mode: 'walk' });
-    // Slider → 2 km (no chip lit).
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('unfog.routePrefs') ?? '{}'))).toMatchObject({ loopKm: 5 });
+    // Slider → 2 km (the chip lights up).
     await sheet.getByLabel('Loop length', { exact: true }).fill('2');
     await expect(sheet.locator('.slider-loop')).toContainText('2 km');
     await expect(sheet.locator('.chips button.on')).toHaveText('2 km');
     await expect.poll(inRange(1500, 2500), { timeout: 60_000 }).toBe(true);
     const walk2 = await readCands(page);
-    // Bike: the same length takes fewer minutes.
-    await sheet.getByRole('button', { name: 'Bike' }).click();
-    await expect(sheet.locator('.modes button.on')).toHaveText('Bike');
-    await expect.poll(inRange(1500, 2500), { timeout: 60_000 }).toBe(true);
-    const bike2 = await readCands(page);
-    expect(bike2[0].etaMin).toBeLessThan(walk2[0].etaMin);
-    await shot(page, 'loop-bike-2km');
+    expect(walk2[0].etaMin, 'walking pace').toBeGreaterThanOrEqual(Math.floor((walk2[0].lengthM / 1000 / 4.8) * 60));
+    await shot(page, 'loop-2km');
 
     // Go → follow bar names the loop; End restores the chrome and clears the lines.
     await sheet.getByRole('button', { name: 'Go' }).click();
@@ -1083,14 +1146,14 @@ test.describe('Unfog real engines', () => {
     await bar.getByRole('button', { name: 'End' }).click();
     await expect(bar).toBeHidden();
     await expect(page.locator('.search .ph')).toHaveText('Where to?');
-    await expect(page.getByRole('button', { name: 'Record', exact: true })).toBeVisible();
+    await expect(page.locator('.stat-chip')).toBeVisible();
     await expect
       .poll(() => page.evaluate(() => (window as unknown as { __unfog: { ctx: { map: { map: { querySourceFeatures(s: string): unknown[] } } } } }).__unfog.ctx.map.map.querySourceFeatures('unfog-routes').length))
       .toBe(0);
     expect(b.errors).toEqual([]);
   });
 
-  test('12b. a pin off the network is not an error: the route ends with an off-road leg (feedback-1 item 2)', async ({ page }) => {
+  test('12b. a pin off the network is not an error: the route ends with an off-path leg (feedback-1 item 2)', async ({ page }) => {
     const b = await boot(page);
     // A pin mid-East River (≈450 m from Kent Av and from the FDR greenway): used to be "no street
     // within 300 m" and an empty sheet; now the nearest street is snapped at any distance and the
@@ -1102,7 +1165,7 @@ test.describe('Unfog real engines', () => {
     const cands = await waitRouted(page);
     expect(cands[cands.length - 1].name).toBe('Direct');
     await expect(status.locator('.error')).toHaveCount(0);
-    await expect(status).toContainText(/off-road/);
+    await expect(status).toContainText(/off-path/);
     await expect(sheet.getByRole('button', { name: 'Go' })).toBeEnabled();
     await shot(page, 'route-error');
     await sheet.getByRole('button', { name: 'Close' }).click();

@@ -1,10 +1,14 @@
 /**
- * Route sheet (docs/mockups/route.jpg): destination title + direct distance, Walk/Bike/Drive,
- * detour slider, candidate rows, Go. Go = follow mode with a compact bar and End.
+ * Route sheet (docs/mockups/route.jpg): destination title + direct distance, a one-line note on
+ * what a route is, detour slider, candidate rows, Go. Go = follow mode with a compact bar and End.
  *
  * Loop mode ("Explore from here") is the same sheet with a loop-length row (2 / 3 / 5 / 8 km
  * chips + a 1–15 km slider) instead of the detour slider: `route.loop()` returns round trips from
  * the user's position (else the map centre), listed as Loop A / B / C and drawn like routes.
+ *
+ * One travel mode (feedback-2, data: "one mode, the most permissive"): every request goes to the
+ * engine as `walk` — footpaths, stairs, both directions of every street — and times are at
+ * walking pace. The Walk/Bike/Drive chips are gone; the engine keeps its Mode type for tools/tests.
  */
 import type { LonLat, RouteCandidate, RouteResult } from '../routing/api';
 import type { Mode } from '../routing/graph-format';
@@ -30,18 +34,13 @@ export interface RouteSheet {
 }
 
 interface Prefs {
-  mode: Mode;
   detour: number;
   /** Loop-mode target length, km. */
   loopKm: number;
 }
 
-const MODES: Array<[Mode, string, string]> = [
-  ['walk', 'Walk', icons.walk],
-  ['bike', 'Bike', icons.bike],
-  ['drive', 'Drive', icons.drive],
-];
-const MODE_NOUN: Record<Mode, string> = { walk: 'walking', bike: 'cycling', drive: 'driving' };
+/** The one mode the app asks for: the most permissive network the engine has. */
+export const TRAVEL_MODE: Mode = 'walk';
 
 export const LOOP_CHIPS_KM = [2, 3, 5, 8];
 export const LOOP_KM = { min: 1, max: 15, step: 0.5, default: 3 };
@@ -51,7 +50,6 @@ function loadPrefs(): Prefs {
   const p = readJSON<Partial<Prefs>>(ROUTE_PREFS_KEY, {});
   const num = (v: unknown, lo: number, hi: number, dflt: number) => (typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : dflt);
   return {
-    mode: p.mode === 'bike' || p.mode === 'drive' ? p.mode : 'walk',
     detour: num(p.detour, 0.1, 1, 0.25),
     loopKm: num(p.loopKm, LOOP_KM.min, LOOP_KM.max, LOOP_KM.default),
   };
@@ -74,13 +72,8 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   // ---- DOM
   const title = el('h2');
   const closeBtn = el('button', { class: 'icon-btn sheet-close', type: 'button', 'aria-label': 'Close', onclick: () => api.close() }, svg(icons.close));
-  const modeBtns = new Map<Mode, HTMLButtonElement>();
-  const modes = el('div', { class: 'modes' });
-  for (const [m, label, icon] of MODES) {
-    const b = el('button', { type: 'button', 'aria-pressed': 'false', onclick: () => setMode(m) }, svg(icon), label);
-    modeBtns.set(m, b);
-    modes.appendChild(b);
-  }
+  // What a route is, in one line (where the mode chips used to be). Off-path metres go in the status line.
+  const note = el('p', { class: 'sheet-note muted small' });
   // Route mode: detour budget.
   const detourLabel = el('b');
   const budgetLabel = el('span');
@@ -102,7 +95,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   const cands = el('div', { class: 'cands' });
   const status = el('div', { class: 'route-status' });
   const goBtn = el('button', { class: 'go', type: 'button', onclick: () => void go() }, 'Go');
-  const sheet = el('div', { class: 'sheet route', hidden: true }, el('div', { class: 'grab' }), closeBtn, title, modes, routeControls, loopControls, cands, status, goBtn);
+  const sheet = el('div', { class: 'sheet route', hidden: true }, el('div', { class: 'grab' }), closeBtn, title, note, routeControls, loopControls, cands, status, goBtn);
 
   const barText = el('div', { class: 't' });
   const barSwatch = el('div', { class: 'sw' });
@@ -126,14 +119,6 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     writeJSON(ROUTE_PREFS_KEY, prefs);
   }
 
-  function setMode(m: Mode): void {
-    if (prefs.mode === m) return;
-    prefs.mode = m;
-    savePrefs();
-    renderModes();
-    void run();
-  }
-
   function setLoopKm(k: number): void {
     if (prefs.loopKm === k) return;
     prefs.loopKm = k;
@@ -142,16 +127,13 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     void run();
   }
 
-  function renderModes(): void {
-    for (const [m, b] of modeBtns) {
-      b.classList.toggle('on', m === prefs.mode);
-      b.setAttribute('aria-pressed', String(m === prefs.mode));
-    }
-  }
-
   function renderControls(): void {
     routeControls.hidden = kind !== 'route';
     loopControls.hidden = kind !== 'loop';
+    note.textContent =
+      kind === 'loop'
+        ? 'Round trips on streets and paths, timed at walking pace.'
+        : 'Routes follow paths where they exist and straight lines where they don’t, timed at walking pace.';
     renderSlider();
     renderLoopControls();
   }
@@ -279,14 +261,14 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     try {
       const res =
         kind === 'loop'
-          ? await ctx.engines.route.loop({ from: origin, mode: prefs.mode, targetKm: prefs.loopKm })
-          : await ctx.engines.route.route({ from: origin, to: dest!.lonlat, mode: prefs.mode, detour: prefs.detour });
+          ? await ctx.engines.route.loop({ from: origin, mode: TRAVEL_MODE, targetKm: prefs.loopKm })
+          : await ctx.engines.route.route({ from: origin, to: dest!.lonlat, mode: TRAVEL_MODE, detour: prefs.detour });
       if (my !== seq) return;
       if (!res.candidates.length) {
         throw new Error(
           kind === 'loop'
-            ? `No loop of about ${target()} found from here. Try another length or mode.`
-            : 'No route found between these points. Try a closer destination or another mode.',
+            ? `No loop of about ${target()} found from here. Try another length.`
+            : 'No route found between these points. Try a closer destination.',
         );
       }
       showResult(res);
@@ -329,9 +311,9 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   }
 
   /**
-   * The off-road / straight parts every candidate shares (the snaps are the same for all): "Starts
-   * with 240 m off-road to the nearest street", "ends with …", "1.4 km straight across a gap the
-   * street map cannot join", or the whole trip as the crow flies. Short off-road legs (< 50 m: a
+   * The off-path / straight parts every candidate shares (the snaps are the same for all): "Starts
+   * with 240 m off-path to the nearest street", "ends with …", "1.4 km straight across a gap the
+   * street map cannot join", or the whole trip as the crow flies. Short off-path legs (< 50 m: a
    * sidewalk offset, a driveway) are not worth a line.
    */
   function describeLegs(res: RouteResult): string {
@@ -340,12 +322,12 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     const streetM = parts.filter((p) => p.kind === 'street').reduce((s, p) => s + p.lengthM, 0);
     const straight = parts.filter((p) => p.kind === 'straight');
     const straightM = straight.reduce((s, p) => s + p.lengthM, 0);
-    if (straightM > 0 && streetM === 0) return `No street data between these points — ${km(straightM)} as the crow flies. Fog clears wherever you actually walk.`;
+    if (straightM > 0 && streetM === 0) return `No street data between these points — ${km(straightM)} as the crow flies. Fog clears wherever you actually go.`;
     const bits: string[] = [];
     const first = parts[0], last = parts[parts.length - 1];
-    if (first.kind === 'offroad' && first.lengthM >= 50) bits.push(`starts with ${km(first.lengthM)} off-road to the nearest street`);
-    if (last.kind === 'offroad' && last.lengthM >= 50) bits.push(`ends with ${km(last.lengthM)} off-road`);
-    if (straightM > 0) bits.push(`${km(straightM)} straight across a gap the ${MODE_NOUN[prefs.mode]} map cannot join (dashed)`);
+    if (first.kind === 'offroad' && first.lengthM >= 50) bits.push(`starts with ${km(first.lengthM)} off-path to the nearest street`);
+    if (last.kind === 'offroad' && last.lengthM >= 50) bits.push(`ends with ${km(last.lengthM)} off-path`);
+    if (straightM > 0) bits.push(`${km(straightM)} straight across a gap the street map cannot join (dashed)`);
     if (!bits.length) return '';
     const s = bits.join(', ');
     return `${s.charAt(0).toUpperCase()}${s.slice(1)}.`;
@@ -365,8 +347,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
 
   function describeError(err: Error): string {
     const msg = String(err?.message ?? err);
-    const noun = MODE_NOUN[prefs.mode];
-    if (err?.name === 'SnapError') return `No ${noun} street within 5 km of your start. Move the map to a town and try again.`;
+    if (err?.name === 'SnapError') return 'No street or path within 5 km of your start. Move the map to a town and try again.';
     if (/timed out/i.test(msg)) return 'Routing took too long. Try a shorter distance or a smaller detour.';
     return msg;
   }
@@ -376,7 +357,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     const my = ++seq;
     setStatus(el('div', { class: 'spinner-row' }, el('span', { class: 'spinner' }), 'Drawing the straight line…'));
     try {
-      const res = await ctx.engines.route.directLine({ from, to, mode: prefs.mode, detour: prefs.detour });
+      const res = await ctx.engines.route.directLine({ from, to, mode: TRAVEL_MODE, detour: prefs.detour });
       if (my !== seq) return;
       showResult(res);
     } catch (e) {
@@ -508,7 +489,6 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     shell.searchText.className = 'val';
     shell.searchClear.hidden = false;
     map.setRouteMode(true);
-    renderModes();
     renderTitle();
     renderControls();
     renderCands();

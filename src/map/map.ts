@@ -16,7 +16,7 @@ import type { LonLat, RouteCandidate } from '../routing/api';
 import type { Basemap, OverlayLayer } from '../app/settings';
 import { readJSON, writeJSON } from '../app/settings';
 import { icons } from '../app/icons';
-import { overlayTileUrl, registerOverlayProtocols } from './overlay';
+import { overlayPerf, overlayTileUrl, registerOverlayProtocols } from './overlay';
 import { RouteLayers } from './routes';
 import { SATELLITE_GROUND, composeSatelliteStyle, hasSatelliteLabels, satelliteBaseStyle } from './satellite';
 import { overlayTileIdsFor } from './tile-ids';
@@ -63,6 +63,8 @@ const OVERLAY_SOURCE = 'unfog-overlay';
 const OVERLAY_LAYER = 'unfog-overlay';
 const OVERLAY_MIN_ZOOM = 2;
 const OVERLAY_MAX_ZOOM = 18;
+/** Camera ease when follow mode starts (locate button, Go). */
+const FOLLOW_EASE_MS = 600;
 /** More touched tiles than this since the last full reload → reload everything instead. */
 const MAX_PARTIAL_REFRESH = 48;
 const HIDE_SYMBOLS = /^poi|transit|housenumber|airport|station/;
@@ -187,6 +189,14 @@ export class UnfogMap {
       this.readyCbs = [];
     });
     map.on('moveend', () => this.saveCamera());
+    // A partial overlay refresh asked for while overlay tiles were still loading missed them
+    // (see refreshOverlay): repeat it once the source has settled.
+    map.on('sourcedata', (e) => {
+      if (this.refreshAgain && e.sourceId === OVERLAY_SOURCE && e.isSourceLoaded) {
+        this.refreshAgain = false;
+        this.refreshPending();
+      }
+    });
     map.on('dragstart', () => this.userMoved());
     map.on('wheel', () => this.userMoved());
     map.on('error', (e) => {
@@ -314,6 +324,24 @@ export class UnfogMap {
       this.bumpOverlay();
       return;
     }
+    this.refreshPending();
+  }
+
+  /**
+   * `map.refreshTiles` only reloads tiles that are renderable right now (MapLibre 6.6
+   * SourceCache.refreshTiles): a tile still loading — follow mode just moved the camera, or the
+   * previous refresh has not landed — is skipped, and its in-flight render predates the
+   * checkpoint, so the last stretch of a walk stayed under fog until another checkpoint came
+   * (seen under a cold dev server, tests/e2e/fb1.spec.ts). When the source is not settled at
+   * refresh time, refresh once more on the next `sourcedata` that says it is.
+   */
+  private refreshPending(): void {
+    if (!this.pendingTouched.size) return;
+    overlayPerf.refresh++;
+    if (!this.map.isSourceLoaded(OVERLAY_SOURCE)) {
+      this.refreshAgain = true;
+      overlayPerf.refreshRepeat++;
+    }
     this.map.refreshTiles(OVERLAY_SOURCE, overlayTileIdsFor(this.pendingTouched.values(), OVERLAY_MIN_ZOOM, OVERLAY_MAX_ZOOM));
   }
 
@@ -321,12 +349,15 @@ export class UnfogMap {
   private tileMode: OverlayMode = 'fog';
   /** z14 tiles changed since the last full overlay reload (see refreshOverlay). */
   private readonly pendingTouched = new Map<string, { tx: number; ty: number }>();
+  /** A partial refresh was asked for while overlay tiles were loading: repeat it once they settle. */
+  private refreshAgain = false;
 
   private reloadOverlay(): void {
     const src = this.map.getSource(OVERLAY_SOURCE) as RasterTileSource | undefined;
     if (!src) return;
     this.tileMode = this.overlayMode();
     this.pendingTouched.clear();
+    this.refreshAgain = false;
     src.setTiles([overlayTileUrl(this.tileMode, this.version)]);
   }
 
@@ -364,19 +395,41 @@ export class UnfogMap {
     this.userMarker.setLngLat([fix.lon, fix.lat]);
     if (!this.userEl.isConnected) this.userMarker.addTo(this.map);
     this.userEl.classList.toggle('coarse', fix.accuracy > 100);
-    if (this.follow) this.map.easeTo({ center: [fix.lon, fix.lat], duration: 700, essential: true });
+    if (this.follow) {
+      // A fix that lands while setFollow's zoom ease is still running would restart the ease at the
+      // current, intermediate zoom and leave the map stuck there (15.2 instead of 16): carry the
+      // target zoom, ease after ease, until it is reached or fixes stop arriving mid-ease.
+      let zoom: number | undefined;
+      if (performance.now() < this.followZoomUntil) {
+        if (Math.abs(this.map.getZoom() - this.followZoom) < 0.01) this.followZoomUntil = 0;
+        else {
+          zoom = this.followZoom;
+          this.followZoomUntil = performance.now() + FOLLOW_EASE_MS + 200;
+        }
+      }
+      this.map.easeTo({ center: [fix.lon, fix.lat], zoom, duration: 700, essential: true });
+    }
   }
 
   setFollow(on: boolean, zoomTo?: number): void {
     if (this.follow === on) {
-      if (on && this.lastFix) this.map.easeTo({ center: [this.lastFix.lon, this.lastFix.lat], zoom: zoomTo ?? this.map.getZoom(), duration: 600 });
+      if (on && this.lastFix) this.followEase(zoomTo ?? this.map.getZoom());
       return;
     }
     this.follow = on;
-    if (on && this.lastFix) {
-      this.map.easeTo({ center: [this.lastFix.lon, this.lastFix.lat], zoom: zoomTo ?? Math.max(this.map.getZoom(), 15), duration: 600 });
-    }
+    if (on && this.lastFix) this.followEase(zoomTo ?? Math.max(this.map.getZoom(), 15));
     this.followCb?.(on);
+  }
+
+  /** The zoom setFollow eased towards, kept for fixes that arrive before the ease has finished. */
+  private followZoom = 0;
+  private followZoomUntil = 0;
+
+  private followEase(zoom: number): void {
+    const fix = this.lastFix as Fix;
+    this.followZoom = zoom;
+    this.followZoomUntil = performance.now() + FOLLOW_EASE_MS + 100;
+    this.map.easeTo({ center: [fix.lon, fix.lat], zoom, duration: FOLLOW_EASE_MS });
   }
 
   onFollowChange(cb: (on: boolean) => void): void {

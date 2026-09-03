@@ -1,4 +1,4 @@
-/** Help screen (FoW export, install, location, how routes work), settings, and the iOS install card. */
+/** Help screen (FoW export, install, tracking, location, how routes work), settings, and the iOS install card. */
 import type { AppContext, HelpSection } from './context';
 import { icons } from './icons';
 import { getSettings, readJSON, updateSettings, writeJSON, type AppSettings } from './settings';
@@ -28,6 +28,10 @@ function p(text: string, cls = ''): HTMLElement {
   return el('p', { class: cls, text });
 }
 
+function bullets(items: Array<string | HTMLElement>): HTMLElement {
+  return el('ul', { class: 'plain bullets' }, items.map((i) => el('li', typeof i === 'string' ? { text: i } : {}, typeof i === 'string' ? null : i)));
+}
+
 export function createHelpScreen(ctx: AppContext): HelpScreen {
   const host = ctx.shell.screens.help;
   const settingsBody = el('div', { class: 'settings' });
@@ -35,6 +39,15 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
   function renderSettings(): void {
     const s = getSettings();
     settingsBody.replaceChildren(
+      // The once-a-year switch (feedback-2). The prompt for location comes from this tap the first time.
+      switchRow('Track my movement', s.tracking, (on) => ctx.tracking.setEnabled(on)),
+      el(
+        'p',
+        { class: 'muted small setting-note' },
+        'Clears the fog as you move, whenever Unfog is open and on screen — nothing to start or stop. iOS only lets a web app record while it is open and the screen is on; for the rest of the day see ',
+        el('button', { class: 'text-link', type: 'button', onclick: () => ctx.openHelp('always') }, 'Always recording'),
+        '.',
+      ),
       segRow('Basemap', [['bright', 'Map'], ['dark', 'Dark'], ['satellite', 'Satellite']], s.basemap, (v) => updateSettings({ basemap: v as AppSettings['basemap'] })),
       segRow('Units', [['metric', 'km'], ['imperial', 'miles']], s.units, (v) => updateSettings({ units: v as AppSettings['units'] })),
       segRow('Cleared core', [['1', 'Normal (≈20 m)'], ['0', 'Tight (≈7 m)']], String(s.coreRadius), (v) => updateSettings({ coreRadius: v === '0' ? 0 : 1 })),
@@ -43,6 +56,22 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
       rangeRow('Reveal (halo)', 0, 0.8, 0.05, s.halo, (v) => `${Math.round(v * 100)}%`, (v) => updateSettings({ halo: v })),
       rangeRow('Fog strength', 0.5, 0.95, 0.05, s.fogAlpha, (v) => `${Math.round(v * 100)}%`, (v) => updateSettings({ fogAlpha: v })),
     );
+  }
+
+  /** An iOS-style switch; `onChange` resolves to the state that actually took (location may be refused). */
+  function switchRow(label: string, checked: boolean, onChange: (on: boolean) => Promise<boolean>): HTMLElement {
+    const sw = el('button', { class: 'switch', type: 'button', role: 'switch', 'aria-checked': String(checked), 'aria-label': label }, el('span', { class: 'knob' }));
+    sw.addEventListener('click', async () => {
+      const want = sw.getAttribute('aria-checked') !== 'true';
+      sw.disabled = true;
+      sw.setAttribute('aria-checked', String(want));
+      try {
+        sw.setAttribute('aria-checked', String(await onChange(want)));
+      } finally {
+        sw.disabled = false;
+      }
+    });
+    return el('div', { class: 'setting' }, el('label', { text: label }), sw);
   }
 
   function segRow(label: string, options: Array<[string, string]>, value: string, onChange: (v: string) => void): HTMLElement {
@@ -100,10 +129,32 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
       ]),
       p('The installed app keeps its own data and permissions — import your history and allow location once inside it. Deleting the icon deletes its data, so export a backup from Data now and then.', 'muted small'),
     ),
+    tracking: section(
+      'tracking',
+      'Tracking',
+      p('Turn on Track my movement (Settings, below) and Unfog clears the fog as you move, whenever it is open and on screen. There is nothing to start or stop; a small "Tracking" pill on the map is the only sign.'),
+      bullets([
+        'Unfog keeps the screen awake while it tracks (except in Low Power Mode). Lock the phone or switch apps and the trail pauses until you come back — see Always recording for why.',
+        'GPS fixes worse than 50 m are skipped, so indoors or just after launch the pill may say "waiting for GPS" until you are outside.',
+        'Each day the app is open is one session (a fresh launch starts a new one). Data → Sessions lists them with GPX export for Fog of World’s Import folder.',
+        'Location is asked for when you flip the switch. If iOS says no, see Location not working.',
+      ]),
+    ),
+    always: section(
+      'always',
+      'Always recording',
+      p('iOS only lets a web app record while it is open and the screen is on. Lock the phone or switch apps and the trail pauses until you come back. No web app can do better, and Unfog will not pretend to.'),
+      p('For a record of everywhere you go:'),
+      bullets([
+        'Fog of World records in the background. Keep it as your recorder and import its Sync.zip now and then (Get your history out of Fog of World, above) — the map lines up exactly.',
+        'Overland, a free iOS app that logs your location in the background, is next: an import path for its logs is coming.',
+      ]),
+      p('Either way nothing needs an account: you hand Unfog a file, and it reads it on the phone.', 'muted small'),
+    ),
     location: section(
       'location',
       'Location not working',
-      p('Location only starts when you tap the locate button, Record or Go. If iOS says location is denied:'),
+      p('Location only starts from a tap: the locate button, Go, or the Track my movement switch. If iOS says location is denied:'),
       steps([
         'Settings › Privacy & Security › Location Services — on',
         'Same screen → Safari Websites → "While Using the App", and Precise Location on',
@@ -111,22 +162,20 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
         'In Safari (before installing): tap "AA" / page menu → Website Settings → Location → Allow',
       ]),
       p('iOS 26.0–26.0.1 had a bug where an installed web app got "denied" while the same site worked in Safari. Fix: Settings › General › Transfer or Reset iPhone › Reset › Reset Location & Privacy, then open Unfog and allow again.', 'muted small'),
-      p('If accuracy is in kilometres, Precise Location is off. If your position stops updating when the screen locks, that is iOS — web apps cannot track in the background; keep the screen on while recording (Unfog keeps it awake, except in Low Power Mode).', 'muted small'),
+      p('If accuracy is in kilometres, Precise Location is off. If your position stops updating when the screen locks, that is iOS — web apps cannot track in the background; keep the screen on while tracking (Unfog keeps it awake, except in Low Power Mode).', 'muted small'),
     ),
     routes: section(
       'routes',
       'What the routes do',
       p('Pick a destination, and Unfog searches the street map for routes that spend as much distance as possible on streets you have never been on — within the detour budget you set.'),
-      el(
-        'ul',
-        { class: 'plain bullets' },
-        el('li', { text: 'Detour budget: +25% means any candidate may be up to 25% longer than the shortest route.' }),
-        el('li', { text: '"% new" is the share of the route on never-visited streets; "unexplored" is that distance.' }),
-        el('li', { text: 'Most new maximises unexplored distance; Balanced trades a little; Direct is the shortest and is always shown.' }),
-        el('li', { text: 'Walk ignores one-way streets and allows steps; Bike follows one-way rules; Drive skips footpaths.' }),
-        el('li', { text: 'No destination in mind? "Where to?" → "Explore a loop from here" gives round trips of a length you choose.' }),
-        el('li', { text: 'Routing needs street data: prebuilt regions (Data → Routing data) or "Download this area" when you plan a route somewhere new (needs a connection once).' }),
-      ),
+      bullets([
+        'Routes follow paths where they exist — streets, footpaths, stairs, park paths, in either direction — and straight lines where they don’t (drawn dashed, with the off-path distance noted). Times are at walking pace.',
+        'Detour budget: +25% means any candidate may be up to 25% longer than the shortest route.',
+        '"% new" is the share of the route on never-visited streets; "unexplored" is that distance.',
+        'Most new maximises unexplored distance; Balanced trades a little; Direct is the shortest and is always shown.',
+        'No destination in mind? "Where to?" → "Explore a loop from here" gives round trips of a length you choose.',
+        'Routing needs street data: prebuilt regions (Data → Routing data) or "Download this area" when you plan a route somewhere new (needs a connection once).',
+      ]),
     ),
     settings: section('settings', 'Settings', settingsBody),
   };
@@ -138,6 +187,8 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
       { class: 'screen-body' },
       sections.export,
       sections.install,
+      sections.tracking,
+      sections.always,
       sections.location,
       sections.routes,
       sections.settings,
@@ -157,17 +208,21 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
       renderSettings();
     },
     show(id) {
+      renderSettings();
       for (const [k, d] of Object.entries(sections)) d.open = k === id;
       sections[id].scrollIntoView({ block: 'start' });
     },
   };
 }
 
-/** Bottom card on iOS Safari when not installed: Share → Add to Home Screen → Add. */
-export function showInstallCardIfNeeded(ctx: AppContext): void {
-  if (!isIOS() || isStandalone()) return;
+/**
+ * Bottom card on iOS Safari when not installed: Share → Add to Home Screen → Add. Returns whether
+ * it was shown; `onDismiss` runs when the user closes it (the tracking offer waits for that).
+ */
+export function showInstallCardIfNeeded(ctx: AppContext, onDismiss?: () => void): boolean {
+  if (!isIOS() || isStandalone()) return false;
   const dismissedAt = readJSON<number>(INSTALL_DISMISS_KEY, 0);
-  if (Date.now() - dismissedAt < 7 * 86_400_000) return;
+  if (Date.now() - dismissedAt < 7 * 86_400_000) return false;
   const card = el(
     'div',
     { class: 'install-card', role: 'region', 'aria-label': 'Install Unfog' },
@@ -186,6 +241,8 @@ export function showInstallCardIfNeeded(ctx: AppContext): void {
   function dismiss(): void {
     writeJSON(INSTALL_DISMISS_KEY, Date.now());
     card.remove();
+    onDismiss?.();
   }
   ctx.shell.sheetHost.appendChild(card);
+  return true;
 }

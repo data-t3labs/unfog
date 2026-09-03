@@ -22,11 +22,14 @@ Screenshots are the real app over sample walks in Williamsburg, Brooklyn (captur
   Google Timeline exports, and Unfog backups
 - Fog and heat layers over an OpenFreeMap basemap, rendered smoothly at full resolution from
   Fog of World's own cell grid (so re-imports line up exactly)
-- Novelty routing: walk / bike / drive, detour budget, 2–3 candidate routes with "% new"
+- Novelty routing: a detour budget and 2–3 candidate routes with "% new"; routes follow paths
+  where they exist (streets, footpaths, stairs, either direction) and straight lines where they
+  don't, timed at walking pace
 - Loop mode ("Explore from here"): pick 2 / 3 / 5 / 8 km (or 1–15 km on the slider) and get up to
   three round trips from where you stand, sorted by unexplored distance
 - Prebuilt routing graphs for New York City and Metro Vancouver; download any other area on demand
-- Record walks in the foreground (screen stays on); export them as GPX for Fog of World's Import folder
+- Track my movement: one switch in Settings, then Unfog clears the fog as you move whenever it is
+  open and on screen (the screen stays awake); sessions export as GPX for Fog of World's Import folder
 - Backup / restore through the iOS share sheet; works offline once installed
 
 ## Development

@@ -11,8 +11,10 @@
  *   B. Service-worker update (prompt mode) — a v1 build is served by a tiny static server in this
  *      file, a v2 build (different `UNFOG_BUILD` stamp, see vite.config.ts) is swapped in, and the
  *      update must show "Update available — Reload" while the new worker WAITS: no reload, no
- *      takeover (v1's chunks still come from the old worker's precache), a recording in progress
- *      keeps going and refuses the Reload; then Reload lands on v2, once, with a clean precache.
+ *      takeover (v1's chunks still come from the old worker's precache), a tracking session in
+ *      progress keeps going; then Reload lands on v2, once, with a clean precache, the session so
+ *      far saved as a track and a new one running (feedback-2: tracking is always on, so an update
+ *      is never refused for it).
  *   C. A 5 MB Apple-Health-style GPX set imported while OFFLINE through the Data screen
  *      (production build + service worker on the preview server, like real.spec's offline block).
  *
@@ -127,6 +129,7 @@ async function prepare(page: Page, opts: BootOptions = {}): Promise<Booted> {
   });
   await page.addInitScript(() => {
     localStorage.setItem('unfog.installDismissed', String(Date.now()));
+    localStorage.setItem('unfog.trackingOffered', String(Date.now())); // no first-run "Track my movement?" card
     // Every toast text, in order (toasts fade after 3.5 s; the log outlives them).
     const w = window as unknown as UnfogWindow;
     w.__toasts = [];
@@ -172,6 +175,21 @@ async function waitReady(page: Page, timeout = 90_000): Promise<void> {
   const mock = await page.evaluate(() => (window as unknown as UnfogWindow).__unfog?.mock);
   expect(mock, 'real engines (not mock mode)').toBe(false);
 }
+
+/** Help → Settings → the "Track my movement" switch (feedback-2: tracking is a switch, not a map button). */
+async function setTracking(page: Page, on: boolean): Promise<void> {
+  await page.getByRole('tab', { name: 'Help' }).click();
+  const settings = page.locator('#help-settings');
+  if ((await settings.getAttribute('open')) === null) await settings.locator('summary').click(); // <details open=""> → ''
+  const sw = settings.getByRole('switch', { name: 'Track my movement' });
+  await expect(sw).toHaveAttribute('aria-checked', String(!on));
+  await sw.click();
+  await expect(sw).toHaveAttribute('aria-checked', String(on), { timeout: 20_000 });
+  await page.getByRole('tab', { name: 'Map' }).click();
+}
+
+/** The persisted session (localStorage `unfog.session`), or null. */
+const session = (page: Page) => page.evaluate(() => JSON.parse(localStorage.getItem('unfog.session') ?? 'null') as { id: string; points: unknown[] } | null);
 
 async function boot(page: Page, opts: BootOptions = {}): Promise<Booted> {
   const b = await prepare(page, opts);
@@ -690,7 +708,7 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     test.skip(Boolean(process.env.PW_NO_PREVIEW), 'PW_NO_PREVIEW set: production builds skipped');
   });
 
-  test('B1. v2 deploy → "Update available — Reload" toast, the new worker waits (v1 chunks still served), a recording keeps going and refuses Reload; Reload → v2 once, clean precache', async ({ page, context }) => {
+  test('B1. v2 deploy → "Update available — Reload" toast, the new worker waits (v1 chunks still served), a tracking session keeps going; Reload → v2 once, clean precache, the session saved and a new one running', async ({ page, context }) => {
     test.setTimeout(240_000);
     test.info().annotations.push({ type: 'builds', description: buildNote });
     const loads = () => page.evaluate(() => Number(sessionStorage.getItem('qa.loads') ?? 0));
@@ -730,15 +748,14 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     });
     expect(precacheBefore.keys).toContain('/unfog/' + v1Only[0]);
 
-    // A walk is being recorded when the deploy happens.
+    // A tracking session is running when the deploy happens.
     await context.setGeolocation({ longitude: -73.9568, latitude: 40.7176, accuracy: 5 });
-    await page.getByRole('button', { name: 'Record', exact: true }).click();
-    const banner = page.locator('.rec-banner');
-    await expect(banner).toBeVisible({ timeout: 20_000 });
-    const dist = banner.locator('.rec-main > span').nth(1);
+    await setTracking(page, true);
+    const pill = page.locator('.track-pill');
+    await expect(pill).toHaveText(/^Tracking/, { timeout: 20_000 });
     await walk(context, page, [-73.9568, 40.7176], [-0.0002, 0.00008], 4);
-    const distBefore = parseDistanceM((await dist.textContent()) ?? '');
-    expect(distBefore).toBeGreaterThan(30);
+    const before = (await session(page))!;
+    expect(before.points.length).toBeGreaterThanOrEqual(4);
 
     // Deploy v2 and let the (open) app check for an update, as a relaunch would.
     server!.setRoot(V2.dir);
@@ -752,13 +769,13 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     await expect(reloadBtn).toBeVisible();
     test.info().annotations.push({ type: 'update-toast-ms', description: `${toastMs} ms from registration.update() to the toast` });
     expect(toastMs).toBeLessThan(30_000);
-    // Nothing was interrupted: same document, recording still running and still counting fixes.
+    // Nothing was interrupted: same document, session still running and still counting fixes.
     expect(await page.evaluate(() => (window as unknown as UnfogWindow).__marker)).toBe(1);
-    await expect(banner).toBeVisible();
-    await expect(page.locator('.app')).toHaveClass(/recording/);
+    await expect(pill).toHaveText(/^Tracking/);
     await walk(context, page, [-73.9568 - 4 * 0.0002, 40.7176 + 4 * 0.00008], [-0.0002, 0.00008], 4);
-    const distAfter = parseDistanceM((await dist.textContent()) ?? '');
-    expect(distAfter).toBeGreaterThan(distBefore + 30);
+    const during = (await session(page))!;
+    expect(during.id).toBe(before.id);
+    expect(during.points.length).toBeGreaterThanOrEqual(before.points.length + 4);
     // Prompt mode: the new worker is installed and WAITING; the old one still controls the page.
     expect(await swEvents(), 'no takeover before Reload (registerType prompt, skipWaiting off)').not.toContain('controllerchange');
     const swStates = await page.evaluate(async () => {
@@ -794,32 +811,11 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     const serverHas = await new Promise<number>((resolve) => http.get(`${SW_URL}${v1Only[0]}`, (res) => { res.resume(); resolve(res.statusCode ?? 0); }).on('error', () => resolve(0)));
     expect(serverHas).toBe(404);
 
-    // Reload while recording: refused — a note, the offer stays, nothing reloads or takes over.
+    // Reload mid-session is not refused (tracking is always on): SKIP_WAITING → the new worker
+    // activates + claims → controllerchange → one reload → v2. The session so far is saved as a
+    // track at the new boot and a fresh session is running, with no dialog.
     const loadsBefore = await loads();
     await reloadBtn.click();
-    await expect(page.locator('.toast', { hasText: 'Stop the recording first' })).toBeVisible();
-    await expect(swToast).toBeVisible({ timeout: 10_000 }); // the sticky toast comes back after the note
-    await expect(swToast.getByRole('button', { name: 'Reload' })).toBeVisible();
-    await page.waitForTimeout(1500);
-    expect(await page.evaluate(() => (window as unknown as UnfogWindow).__marker)).toBe(1);
-    expect(await loads()).toBe(loadsBefore);
-    expect(await swEvents()).not.toContain('controllerchange');
-    expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting?.state ?? null)).toBe('installed');
-    await expect(banner).toBeVisible();
-
-    // Stop the walk: summary as usual, session stored — the update did not touch it.
-    await page.getByRole('button', { name: 'Stop recording' }).click();
-    const summary = page.locator('.record-summary');
-    await expect(summary).toBeVisible({ timeout: 20_000 });
-    await expect(summary.locator('h2')).toHaveText('Walk recorded');
-    await expect(summary.locator('p')).toContainText(/9 GPS points/);
-    await summary.getByRole('button', { name: 'Done' }).click();
-    await expect(summary).toBeHidden();
-    // The sticky toast is still offered after the modal.
-    await expect(swToast).toBeVisible();
-
-    // Reload → SKIP_WAITING → the new worker activates + claims → controllerchange → one reload → v2, data intact.
-    await swToast.getByRole('button', { name: 'Reload' }).click();
     await page.waitForFunction((n) => Number(sessionStorage.getItem('qa.loads') ?? 0) > n, loadsBefore, { timeout: 60_000 });
     await waitReady(page, 120_000);
     expect(await page.evaluate(() => (window as unknown as UnfogWindow).__marker)).toBeUndefined();
@@ -827,11 +823,18 @@ test.describe('B. Service-worker update (v1 → v2 deploy)', () => {
     expect(await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())?.waiting ?? null), 'nothing left waiting').toBeNull();
     await page.waitForTimeout(3000);
     expect(await loads(), 'exactly one reload').toBe(loadsBefore + 1);
+    await expect(page.locator('.sheet.modal')).toHaveCount(0);
+    await expect(pill).toHaveText(/^Tracking/, { timeout: 20_000 });
+    const relaunched = (await session(page))!;
+    expect(relaunched.id, 'a new session after the relaunch').not.toBe(before.id);
     await page.getByRole('tab', { name: 'Help' }).click();
     await expect(buildLine.locator('.build')).toHaveText(V2.stamp);
     await shot(page, 'sw-updated');
     const tracks = await page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.engines.grid.listTracks());
-    expect(tracks.filter((t) => t.source === 'session')).toHaveLength(1);
+    const saved = tracks.filter((t) => t.source === 'session');
+    expect(saved).toHaveLength(1);
+    expect(saved[0].id).toBe(before.id);
+    expect(saved[0].points).toBe(during.points.length);
 
     // Precache integrity: exactly the v2 manifest, every precachable v2 file, nothing from v1.
     const manifest = precacheManifest(V2.dir);

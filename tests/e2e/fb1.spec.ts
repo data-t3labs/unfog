@@ -42,6 +42,7 @@ type UnfogWindow = {
       };
       map: {
         lastFix: { lon: number; lat: number } | null;
+        setFollow(on: boolean, zoomTo?: number): void;
         map: {
           loaded(): boolean;
           isMoving(): boolean;
@@ -50,6 +51,7 @@ type UnfogWindow = {
           getSource(id: string): { tiles?: string[] } | undefined;
           getLayer(id: string): unknown;
           getStyle(): { name?: string; layers: Array<{ id: string; type: string }>; sources: Record<string, { type: string; tiles?: string[]; attribution?: string }> };
+          setLayoutProperty(id: string, prop: string, value: string): unknown;
           areTilesLoaded(): boolean;
           project(ll: [number, number]): { x: number; y: number };
           getZoom(): number;
@@ -62,12 +64,42 @@ type UnfogWindow = {
 async function boot(page: Page, init?: () => void): Promise<{ errors: string[] }> {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.addInitScript(() => localStorage.setItem('unfog.installDismissed', String(Date.now())));
+  // Pre-dismiss the install card and the first-run tracking offer so the chrome is unobstructed.
+  await page.addInitScript(() => {
+    localStorage.setItem('unfog.installDismissed', String(Date.now()));
+    localStorage.setItem('unfog.trackingOffered', String(Date.now()));
+  });
   if (init) await page.addInitScript(init);
   await page.goto('');
   await page.waitForFunction(() => (window as unknown as UnfogWindow).__unfog?.ready === true, null, { timeout: 90_000 });
   expect(await page.evaluate(() => (window as unknown as UnfogWindow).__unfog?.mock), 'real engines').toBe(false);
   return { errors };
+}
+
+/**
+ * Hide the basemap's symbol layers for pixel probes. Street names are drawn ABOVE the fog, along the
+ * street centreline — exactly where a walk's fixes are — so a 1-px luma sample can land on a dark
+ * glyph and read "still foggy" on a cleared street (feedback-2 diagnosis: the second-stretch probe
+ * read 112–118 on "North 7th Street" letters where the fog tile itself was fully transparent).
+ * The tests here are about the fog tiles, not the labels.
+ */
+async function hideLabels(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const map = (window as unknown as UnfogWindow).__unfog!.ctx!.map.map;
+    for (const l of map.getStyle().layers) if (l.type === 'symbol') map.setLayoutProperty(l.id, 'visibility', 'none');
+  });
+}
+
+/** Help → Settings → the "Track my movement" switch (feedback-2: tracking is a switch, not a map button). */
+async function setTracking(page: Page, on: boolean): Promise<void> {
+  await page.getByRole('tab', { name: 'Help' }).click();
+  const settings = page.locator('#help-settings');
+  if ((await settings.getAttribute('open')) === null) await settings.locator('summary').click(); // <details open=""> → ''
+  const sw = settings.getByRole('switch', { name: 'Track my movement' });
+  await expect(sw).toHaveAttribute('aria-checked', String(!on));
+  await sw.click();
+  await expect(sw).toHaveAttribute('aria-checked', String(on), { timeout: 20_000 });
+  await page.getByRole('tab', { name: 'Map' }).click();
 }
 
 async function idle(page: Page): Promise<void> {
@@ -166,14 +198,17 @@ test.use({ locale: 'en-US' });
 for (const layer of ['fog', 'heat'] as const) {
   test(`1. ${layer} follows a recording live: the trail clears within seconds, without Stop or a layer toggle`, async ({ page, context }) => {
     const b = await boot(page, layer === 'heat' ? () => localStorage.setItem('unfog.settings', JSON.stringify({ layer: 'heat' })) : undefined);
-    await expect(page.locator('.seg button.on')).toHaveText(layer === 'heat' ? 'Heat' : 'Fog');
+    await expect(page.locator('.top .seg button.on')).toHaveText(layer === 'heat' ? 'Heat' : 'Fog');
     await context.setGeolocation({ longitude: BEDFORD_N7[0], latitude: BEDFORD_N7[1], accuracy: 5 });
-    await page.getByRole('button', { name: 'Record', exact: true }).click();
-    await expect(page.locator('.rec-banner')).toBeVisible({ timeout: 20_000 });
+    await hideLabels(page);
+    await setTracking(page, true);
+    await expect(page.locator('.track-pill')).toHaveText(/^Tracking/, { timeout: 20_000 });
     // Six fixes along N 7th St (~115 m); follow mode keeps the walker centred at zoom 16, so the
     // start point ends up ~130 px from the centre — on screen, away from the user dot.
+    await page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.map.setFollow(true, 16));
     await walk(context, page, BEDFORD_N7, N7_STEP, 6);
     await tilesSettled(page);
+    expect(await page.evaluate(() => (window as unknown as UnfogWindow).__unfog!.ctx!.map.map.getZoom()), 'follow zoom reached 16 (a fix mid-ease no longer cuts the zoom short)').toBeCloseTo(16, 1);
     const url0 = await overlayUrl(page);
     expect(url0).toMatch(new RegExp(`^${layer}://`));
     const start = await project(page, BEDFORD_N7);
@@ -201,11 +236,12 @@ for (const layer of ['fog', 'heat'] as const) {
     expect(await perfRequested(page), 'overlay tiles were re-requested').toBeGreaterThan(req0);
     expect(await isMoving(page)).toBe(false);
     expect(await overlayUrl(page), 'a partial refresh, not a full reload (same tile URL)').toBe(url0);
-    await expect(page.locator('.seg button.on')).toHaveText(layer === 'heat' ? 'Heat' : 'Fog');
+    await expect(page.locator('.top .seg button.on')).toHaveText(layer === 'heat' ? 'Heat' : 'Fog');
     await shot(page, `live-${layer}`);
 
     // Keep walking: the next checkpoint clears the next stretch too. Sample a point 3 fixes ahead
-    // while it is still untouched, walk past it, and expect it to change.
+    // while it is still untouched, walk past it, and expect it to clear to the same degree as
+    // the first stretch (same threshold as above, then within a step of the first stretch's level).
     const mid: [number, number] = [BEDFORD_N7[0] + 6 * N7_STEP[0], BEDFORD_N7[1] + 6 * N7_STEP[1]];
     const ahead: [number, number] = [mid[0] + 3 * N7_STEP[0], mid[1] + 3 * N7_STEP[1]];
     const pA = await project(page, ahead);
@@ -213,10 +249,15 @@ for (const layer of ['fog', 'heat'] as const) {
     await walk(context, page, mid, N7_STEP, 5);
     await tilesSettled(page);
     const pA2 = await project(page, ahead);
-    await expect.poll(async () => Math.abs((await pixelLuma(page, pA2.x, pA2.y)) - lumaA0), { timeout: 15_000, message: 'second stretch changes too' }).toBeGreaterThan(20);
-    await page.getByRole('button', { name: 'Stop recording' }).click();
-    await expect(page.locator('.record-summary')).toBeVisible({ timeout: 20_000 });
-    await page.locator('.record-summary').getByRole('button', { name: 'Done' }).click();
+    await expect.poll(async () => Math.abs((await pixelLuma(page, pA2.x, pA2.y)) - lumaA0), { timeout: 15_000, message: 'second stretch changes too' }).toBeGreaterThan(25);
+    const lumaA1 = await pixelLuma(page, pA2.x, pA2.y);
+    test.info().annotations.push({ type: `${layer}-second-stretch`, description: `ahead ${lumaA0.toFixed(0)} → ${lumaA1.toFixed(0)} (first stretch ${luma0.toFixed(0)} → ${luma1.toFixed(0)})` });
+    if (layer === 'fog') expect(lumaA1, 'the second stretch is cleared like the first (not a halo)').toBeGreaterThan(luma1 - 25);
+    else expect(lumaA1, 'the second stretch glows like the first').toBeGreaterThan(luma1 - 25);
+    // Off: the session is saved quietly (no summary sheet), the pill goes.
+    await setTracking(page, false);
+    await expect(page.locator('.track-pill')).toBeHidden();
+    await expect(page.locator('.sheet.modal')).toHaveCount(0);
     expect(b.errors).toEqual([]);
   });
 }
@@ -234,7 +275,7 @@ test('1b. fog redraws after an import while the map already shows the area (no t
   expect(summary).toMatch(/new cells/);
   await page.getByRole('tab', { name: 'Map' }).click();
   await expect.poll(() => pixelLuma(page, centre.x, centre.y), { timeout: 15_000, message: 'the imported street is cleared' }).toBeGreaterThan(luma0 + 25);
-  await expect(page.locator('.seg button.on')).toHaveText('Fog');
+  await expect(page.locator('.top .seg button.on')).toHaveText('Fog');
   await shot(page, 'import-redraw');
   expect(b.errors).toEqual([]);
 });
@@ -270,7 +311,7 @@ const routeFeatures = (page: Page) =>
     return { total: f.length, dashed: f.filter((x) => x.properties.dash).length };
   });
 
-test('2. a pin in the river: no "no street within 300 m" — the route snaps to the shore and ends with a dashed off-road leg', async ({ page }) => {
+test('2. a pin in the river: no "no street within 300 m" — the route snaps to the shore and ends with a dashed off-path leg', async ({ page }) => {
   const b = await boot(page);
   const res = await page.evaluate((req) => (window as unknown as UnfogWindow).__unfog!.ctx!.engines.route.route(req), { from: BEDFORD_N7, to: EAST_RIVER.lonlat, mode: 'walk', detour: 0.25 });
   const direct = res.candidates[res.candidates.length - 1];
@@ -287,7 +328,7 @@ test('2. a pin in the river: no "no street within 300 m" — the route snaps to 
   const cands = await waitRouted(page);
   expect(cands[cands.length - 1].name).toBe('Direct');
   const status = sheet.locator('.route-status');
-  await expect(status).toContainText(/[Ee]nds with \d[\d.,]* (m|km) off-road/);
+  await expect(status).toContainText(/[Ee]nds with \d[\d.,]* (m|km) off-path/); // "off-path" since feedback-2 (paths, not roads)
   await expect(status.locator('.error')).toHaveCount(0);
   await expect(sheet.getByRole('button', { name: 'Go' })).toBeEnabled();
   await expect.poll(async () => (await routeFeatures(page)).dashed).toBeGreaterThan(0);

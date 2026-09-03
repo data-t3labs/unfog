@@ -1,5 +1,5 @@
 /**
- * Foreground recording session: geolocation watch + Screen Wake Lock, fix filtering, continuous
+ * Foreground tracking session: geolocation watch + Screen Wake Lock, fix filtering, continuous
  * persistence to localStorage (process death is normal on iOS), checkpoints every few seconds
  * and a final grid.markTrack under ONE track id so the store counts the session as a single visit.
  *
@@ -7,6 +7,12 @@
  * version already counted (src/grid/store.ts), so it costs milliseconds however long the walk is.
  * Each checkpoint that changed cells is reported through `onData` so the map can re-render the
  * touched tiles live (feedback-1 item 1: the fog only redrew on Stop or a layer toggle).
+ *
+ * Since feedback-2 the session is passive (src/app/tracking.ts owns start/stop): it runs whenever
+ * "Track my movement" is on and the app is open. A session left behind by a previous run (iOS
+ * killed the app, an update reloaded it) is saved as a track at the next boot — `saveUnfinishedSession`.
+ * The location watch pauses while the page is hidden (src/map/location.ts) and the grid breaks a
+ * track on gaps > 500 m (src/grid/cell.ts), so a pause never draws a straight line.
  */
 import type { ApplyResult, GridApi } from '../grid/api';
 import { cellsAlong, cellToTile, cellIndex, distanceM } from '../grid/cell';
@@ -29,7 +35,7 @@ export interface SessionState {
   /** Approximate count of cells first visited in this session. */
   newCells: number;
   lastCheckpointMs: number;
-  /** Fixes dropped (accuracy / speed) — shown in the summary as an honesty signal. */
+  /** Fixes dropped (accuracy / speed). */
   dropped: number;
 }
 
@@ -54,7 +60,34 @@ export function sessionTrack(state: SessionState): Track {
 
 export function sessionName(state: SessionState): string {
   const d = new Date(state.startMs);
-  return `Walk ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+  return `Tracked ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+/** Sessions roll over at local midnight: true when both instants fall on the same local calendar day. */
+export function isSameLocalDay(a: number, b: number): boolean {
+  const x = new Date(a), y = new Date(b);
+  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
+}
+
+/**
+ * Save the session a previous run left behind (crash, iOS kill, update reload): marked under its
+ * own id like a Stop would (the checkpoints already counted most of it — the store is incremental),
+ * then forgotten. Returns the track, or null when there was nothing (or too little) to keep.
+ */
+export async function saveUnfinishedSession(grid: GridApi): Promise<Track | null> {
+  const s = loadUnfinishedSession();
+  if (!s) return null;
+  const track = sessionTrack(s);
+  if (track.points.length >= 2) {
+    try {
+      await grid.markTrack(track);
+    } catch (e) {
+      console.warn('[record] saving the unfinished session failed', e);
+      return null; // keep it for the next boot
+    }
+  }
+  removeKey(SESSION_KEY);
+  return track.points.length >= 2 ? track : null;
 }
 
 export class Recorder {
@@ -64,7 +97,6 @@ export class Recorder {
   private lock: WakeLockSentinel | null = null;
   private unsubFix: (() => void) | null = null;
   private checkpointTimer = 0;
-  private tickTimer = 0;
   private sessionCells = new Set<number>();
   private tileSnapshots = new Map<string, Promise<Uint8Array | null>>();
   /** points.length the last checkpoint wrote; a checkpoint with nothing new is skipped. */
@@ -81,7 +113,10 @@ export class Recorder {
     });
   }
 
-  /** Start (or resume) a session. Call from a user gesture. */
+  /**
+   * Start (or resume) a session. The first time on a device this must come from a user gesture
+   * (the location prompt); once permission is granted, boot may call it too.
+   */
   async start(resume?: SessionState): Promise<void> {
     if (this.status !== 'idle') return;
     this.state = resume ?? {
@@ -103,7 +138,6 @@ export class Recorder {
     this.location.retain('record');
     await this.keepAwake();
     this.checkpointTimer = window.setInterval(() => void this.checkpoint(), CHECKPOINT_MS);
-    this.tickTimer = window.setInterval(() => this.emit(), 1000);
     this.emit();
   }
 
@@ -129,7 +163,7 @@ export class Recorder {
     return { track, state };
   }
 
-  /** Throw the session away (asked from the resume dialog). */
+  /** Throw the running session away without saving it. */
   discard(): void {
     this.teardown();
     removeKey(SESSION_KEY);
@@ -142,9 +176,7 @@ export class Recorder {
     this.unsubFix = null;
     this.location.release('record');
     window.clearInterval(this.checkpointTimer);
-    window.clearInterval(this.tickTimer);
     this.checkpointTimer = 0;
-    this.tickTimer = 0;
     void this.lock?.release().catch(() => undefined);
     this.lock = null;
     this.wakeLockOk = false;
@@ -167,7 +199,7 @@ export class Recorder {
     } catch (e) {
       this.wakeLockOk = false;
       const name = (e as Error)?.name;
-      this.events.onWakeLock(false, name === 'NotAllowedError' ? 'Screen may sleep (Low Power Mode?). Keep the screen on while recording.' : 'Screen may sleep — keep the screen on while recording.');
+      this.events.onWakeLock(false, name === 'NotAllowedError' ? 'Screen may sleep (Low Power Mode?). Keep the screen on while tracking.' : 'Screen may sleep — keep the screen on while tracking.');
     }
   }
 

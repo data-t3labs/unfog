@@ -1,6 +1,6 @@
 /**
  * Data screen: import (file picker → import worker → grid), export backup (share sheet / download),
- * backup-age nag, prebuilt regions + downloaded areas, recorded sessions (GPX export / delete),
+ * backup-age nag, prebuilt regions + downloaded areas, tracked sessions (GPX export / delete),
  * delete everything.
  */
 import * as Comlink from 'comlink';
@@ -14,7 +14,7 @@ import { GREYED_OUT_HINT } from './help';
 import { icons } from './icons';
 import type { ImportOutcome, ImportProgress } from './import-types';
 import { requestPersistentStorage } from './pwa';
-import { exportTrackGpx, shareOrDownload } from './record-ui';
+import { exportTrackGpx, shareOrDownload } from './share';
 import { readJSON, writeJSON } from './settings';
 import { BACKUP_NAG_KEY, LAST_BACKUP_KEY, LAST_IMPORT_KEY, REGION_DL_KEY, type LastBackup, type LastImport, type RegionDownloads } from './store-keys';
 import { clear, confirmSheet, el, svg, toast } from './ui';
@@ -254,7 +254,15 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       return;
     }
     if (!tracks.length) {
-      sessionsList.appendChild(el('p', { class: 'muted', text: 'No recorded sessions yet. Tap Record on the map to start one.' }));
+      sessionsList.appendChild(
+        el(
+          'p',
+          { class: 'muted' },
+          'No sessions yet. Turn on ',
+          el('button', { class: 'text-link', type: 'button', onclick: () => ctx.openHelp('settings') }, 'Track my movement'),
+          ' in Settings and Unfog keeps one for each day it is open.',
+        ),
+      );
       return;
     }
     for (const t of tracks.slice(0, 50)) {
@@ -317,7 +325,8 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       backupInfo,
       el('h3', { text: 'Routing data' }),
       regionsList,
-      el('h3', { text: 'Recorded sessions' }),
+      el('h3', { text: 'Sessions' }),
+      el('p', { class: 'muted small', text: 'What Track my movement recorded: one session per day the app was open (or per launch). Export one as GPX for Fog of World’s Import folder.' }),
       sessionsList,
       el('h3', { text: 'Danger zone' }),
       deleteBtn,

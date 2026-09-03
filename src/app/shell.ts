@@ -1,7 +1,7 @@
 /**
- * The app shell: full-bleed map, top chrome (search pill, Fog/Heat/Off, legend, locate), bottom
- * chrome (empty-state hint, stat chip, Record, tab bar), screen panels (Stats / Data / Help),
- * sheet + banner hosts. Layout and tokens follow docs/mockups/mockup.html.
+ * The app shell: full-bleed map, top chrome (search pill, tracking pill host, Fog/Heat/Off, legend,
+ * locate), bottom chrome (empty-state hint, stat chip, tab bar), screen panels (Stats / Data /
+ * Help), sheet + banner hosts. Layout and tokens follow docs/mockups/mockup.html.
  *
  * The bottom chrome's height is published as `--bottom-h` on <html> so things that float above it
  * (toasts, the map attribution) stay clear of the chip / sheet / tab bar in every state.
@@ -31,7 +31,6 @@ export interface Shell {
   statSub: HTMLElement;
   /** One-line hint shown while nothing has been explored yet; tapping opens Data. */
   hint: HTMLButtonElement;
-  recordBtn: HTMLButtonElement;
   sheetHost: HTMLElement;
   tabs: HTMLElement;
   screens: Record<Exclude<Tab, 'map'>, HTMLElement>;
@@ -41,10 +40,10 @@ export interface Shell {
   setLayer(layer: OverlayLayer): void;
   onLayer(cb: (layer: OverlayLayer) => void): void;
   setTheme(theme: 'light' | 'dark'): void;
-  /** Route sheet / recording: hide the stat chip + Record + tabs. */
+  /** Route sheet: hide the stat chip + tabs. */
   setMapChromeHidden(hidden: boolean): void;
   setLocateActive(on: boolean): void;
-  /** No visited cells yet → show the "import or record" hint under the map. */
+  /** No visited cells yet → show the "import or track" hint under the map. */
   setEmptyState(on: boolean): void;
 }
 
@@ -86,12 +85,11 @@ export function createShell(mount: HTMLElement): Shell {
   const statChip = el('div', { class: 'chip stat-chip' }, el('div', { class: 'big' }, statBig, ' ', el('span', { class: 'lbl', text: 'explored' })), statSub);
   const hint = el(
     'button',
-    { class: 'hint', type: 'button', hidden: true, 'aria-label': 'Import your Fog of World history or tap Record. Opens Data.' },
+    { class: 'hint', type: 'button', hidden: true, 'aria-label': 'Import your Fog of World history, or turn on tracking in Settings. Opens Data.' },
     svg(icons.upload, 'ic dim'),
-    el('span', { text: 'Import your Fog of World history or tap Record' }),
+    el('span', { text: 'Import your Fog of World history, or turn on tracking in Settings' }),
   );
-  const recordBtn = el('button', { class: 'record', type: 'button' }, el('span', { class: 'dot' }), 'Record');
-  const floatRow = el('div', { class: 'float' }, statChip, recordBtn);
+  const floatRow = el('div', { class: 'float' }, statChip);
   const sheetHost = el('div', { class: 'sheet-host' });
 
   const tabDefs: Array<[Tab, string, string]> = [
@@ -143,7 +141,7 @@ export function createShell(mount: HTMLElement): Shell {
 
   const shell: Shell = {
     root, mapEl, top, searchPill, searchText, searchClear, seg, legend, locateBtn, bannerHost, bottom, floatRow,
-    statBig, statSub, hint, recordBtn, sheetHost, tabs, screens,
+    statBig, statSub, hint, sheetHost, tabs, screens,
     get currentTab() { return currentTab; },
     showTab(tab) {
       currentTab = tab;

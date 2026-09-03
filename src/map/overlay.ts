@@ -19,7 +19,11 @@ let registered = false;
  * `window.__unfog.perf` for the perf scripts / e2e. `ms` is the sum of round-trip latencies of
  * completed tiles, so during a pan `ms / done` is the average wait per tile including queueing.
  */
-export const overlayPerf = { requested: 0, done: 0, aborted: 0, cancelled: 0, errors: 0, ms: 0, maxMs: 0 };
+export const overlayPerf = {
+  requested: 0, done: 0, aborted: 0, cancelled: 0, errors: 0, ms: 0, maxMs: 0,
+  /** Partial refreshes (a checkpoint's touched tiles, map.ts refreshPending) and how many were repeated because tiles were still loading. */
+  refresh: 0, refreshRepeat: 0,
+};
 let nextRenderId = 1;
 
 export function registerOverlayProtocols(grid: GridApi, settings: () => RenderSettings): void {

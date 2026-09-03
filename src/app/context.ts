@@ -2,6 +2,7 @@
 import type { Engines } from './engines';
 import type { Shell } from './shell';
 import type { AppSettings } from './settings';
+import type { TrackingController } from './tracking';
 import type { UnfogMap } from '../map/map';
 import type { LocationManager } from '../map/location';
 import type { Recorder } from '../record/session';
@@ -16,7 +17,7 @@ export interface Destination {
 }
 
 /** The collapsible sections of the Help screen (src/app/help.ts). */
-export type HelpSection = 'export' | 'install' | 'location' | 'routes' | 'settings';
+export type HelpSection = 'export' | 'install' | 'tracking' | 'always' | 'location' | 'routes' | 'settings';
 
 export interface AppContext {
   engines: Engines;
@@ -24,8 +25,10 @@ export interface AppContext {
   shell: Shell;
   location: LocationManager;
   recorder: Recorder;
+  /** "Track my movement": the switch, the passive session and the status pill (src/app/tracking.ts). */
+  tracking: TrackingController;
   settings(): AppSettings;
-  /** The cell store changed (import, recording checkpoint, delete): refresh overlays, novelty cache, stat chip. */
+  /** The cell store changed (import, tracking checkpoint, delete): refresh overlays, novelty cache, stat chip. */
   dataChanged(): Promise<void>;
   /** Re-render overlay tiles (settings change) without touching the route cache. */
   overlayChanged(): void;

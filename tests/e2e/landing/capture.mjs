@@ -72,6 +72,8 @@ async function bootApp(page, { dismissInstallCard = true } = {}) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   if (dismissInstallCard) await page.addInitScript(() => localStorage.setItem('unfog.installDismissed', String(Date.now())));
+  // The first-run "Track my movement?" card would sit in every frame otherwise.
+  await page.addInitScript(() => localStorage.setItem('unfog.trackingOffered', String(Date.now())));
   await page.goto(BASE, { waitUntil: 'load' });
   await page.waitForFunction(() => window.__unfog?.ready === true, null, { timeout: 120_000 });
   const mock = await page.evaluate(() => window.__unfog.mock);

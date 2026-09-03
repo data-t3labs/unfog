@@ -21,6 +21,11 @@ export interface AppSettings {
   coreRadius: 0 | 1;
   /** Fog strength over never-visited ground, 0.5..0.95. */
   fogAlpha: number;
+  /**
+   * "Track my movement" (feedback-2): a once-a-year switch. While on, a session runs whenever the
+   * app is open and on screen — no Start/Stop. See src/app/tracking.ts.
+   */
+  tracking: boolean;
 }
 
 const KEY = 'unfog.settings';
@@ -33,6 +38,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   halo: DEFAULT_RENDER_SETTINGS.halo,
   coreRadius: DEFAULT_RENDER_SETTINGS.coreRadius,
   fogAlpha: DEFAULT_RENDER_SETTINGS.fogAlpha,
+  tracking: false,
 };
 
 type Listener = (s: AppSettings, changed: Array<keyof AppSettings>) => void;
@@ -64,6 +70,7 @@ function sanitize(s: AppSettings): AppSettings {
     halo: clamp(s.halo, 0, 0.8, DEFAULT_SETTINGS.halo),
     coreRadius: s.coreRadius === 0 ? 0 : 1,
     fogAlpha: clamp(s.fogAlpha, 0.5, 0.95, DEFAULT_SETTINGS.fogAlpha),
+    tracking: s.tracking === true,
   };
 }
 

@@ -41,7 +41,7 @@ export function createStatsScreen(ctx: AppContext): StatsScreen {
             'div',
             { class: 'empty-state' },
             el('div', { class: 'name', text: 'Nothing explored yet' }),
-            el('p', { class: 'muted', text: 'Import your Fog of World history (or GPX / Google Timeline) from Data, or tap Record on the map and take a walk.' }),
+            el('p', { class: 'muted', text: 'Import your Fog of World history (or GPX / Google Timeline) from Data, or turn on Track my movement in Settings and take a walk.' }),
             el('button', { class: 'btn primary small', type: 'button', onclick: () => ctx.shell.showTab('data') }, 'Go to Data'),
           ),
         );
@@ -53,8 +53,8 @@ export function createStatsScreen(ctx: AppContext): StatsScreen {
           'div',
           { class: 'stat-grid' },
           tile(fmtInt(tracks.length), 'tracks stored'),
-          tile(sessions ? fmtInt(sessions.n) : '0', 'recorded sessions'),
-          tile(sessions ? fmtDistance(sessions.m, units) : fmtDistance(0, units), 'recorded distance'),
+          tile(sessions ? fmtInt(sessions.n) : '0', 'tracked sessions'),
+          tile(sessions ? fmtDistance(sessions.m, units) : fmtDistance(0, units), 'tracked distance'),
         ),
         bySource.size
           ? el(
@@ -62,7 +62,7 @@ export function createStatsScreen(ctx: AppContext): StatsScreen {
               { class: 'plain' },
               [...bySource.entries()].map(([src, e]) => el('li', {}, el('span', { text: sourceLabel(src) }), el('span', { class: 'muted', text: `${e.n} · ${fmtDistance(e.m, units)}` }))),
             )
-          : el('p', { class: 'muted', text: 'No tracks yet. Import your history or record a walk.' }),
+          : el('p', { class: 'muted', text: 'No tracks yet. Import your history or turn on tracking.' }),
         el('h3', { text: 'Housekeeping' }),
         el(
           'ul',
@@ -89,7 +89,7 @@ export function createStatsScreen(ctx: AppContext): StatsScreen {
 function sourceLabel(src: string): string {
   switch (src) {
     case 'session':
-      return 'Recorded sessions';
+      return 'Tracked sessions';
     case 'gpx':
       return 'GPX imports';
     case 'timeline':

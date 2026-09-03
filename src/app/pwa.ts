@@ -6,23 +6,18 @@
  * Reload"); the page keeps running the old bundle under the old worker, whose precache is intact,
  * so lazy chunks (import worker, Overpass/graph-build inside the route worker) still load. Reload
  * sends SKIP_WAITING; the new worker activates, claims the page (workbox `clientsClaim`) and the
- * `controllerchange` below reloads exactly once. Nothing ever reloads on its own, and never while a
- * walk is being recorded.
+ * `controllerchange` below reloads exactly once. Nothing ever reloads on its own. A tracking
+ * session in progress is no reason to refuse (feedback-2: tracking is always on): it is persisted
+ * on every fix and saved as a track when the new version boots (src/app/tracking.ts).
  */
 /// <reference types="vite-plugin-pwa/client" />
 import { registerSW } from 'virtual:pwa-register';
 import { toast } from './ui';
 import { readJSON, writeJSON } from './settings';
 
-export interface PwaHandle {
-  /** Set by main.ts once the Recorder exists: while it returns true an update is offered, never applied. */
-  isRecording: () => boolean;
-}
-
-export function initPwa(): PwaHandle {
-  const handle: PwaHandle = { isRecording: () => false };
-  if (!('serviceWorker' in navigator)) return handle;
-  if (import.meta.env.DEV) return handle; // devOptions.enabled is false in vite.config.ts
+export function initPwa(): void {
+  if (!('serviceWorker' in navigator)) return;
+  if (import.meta.env.DEV) return; // devOptions.enabled is false in vite.config.ts
 
   let hadController = Boolean(navigator.serviceWorker.controller);
   let offered = false; // the toast is up (workbox-window reports a waiting worker through two events)
@@ -39,12 +34,6 @@ export function initPwa(): PwaHandle {
     toast('Update available', { id: 'sw', duration: 0, action: { label: 'Reload', onClick: onReloadTap } });
   };
   const onReloadTap = () => {
-    if (handle.isRecording()) {
-      // Never mid-walk: say so and keep the offer up (the action click dismisses the sticky toast).
-      toast('Stop the recording first — the update will wait');
-      showUpdateToast();
-      return;
-    }
     reloadRequested = true;
     if (updateControls) reloadNow();
     else void updateSW(true); // SKIP_WAITING → the waiting worker activates + claims → controllerchange → reload
@@ -75,11 +64,10 @@ export function initPwa(): PwaHandle {
       return;
     }
     updateControls = true;
-    if (reloadRequested && !handle.isRecording()) reloadNow();
-    // Otherwise (another window applied the update, or a walk is being recorded): keep offering.
+    if (reloadRequested) reloadNow();
+    // Otherwise (another window applied the update): keep offering.
     else showUpdateToast();
   });
-  return handle;
 }
 
 const PERSIST_KEY = 'unfog.persisted';

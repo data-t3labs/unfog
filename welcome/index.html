@@ -103,9 +103,9 @@
         <figure class="view">
           <picture>
             <source srcset="img/route.webp" type="image/webp">
-            <img src="img/route.jpg" width="786" height="1704" loading="lazy" alt="Route sheet for Domino Park: an orange Most new route that is 68 percent new, an amber Balanced route at 61 percent and a blue Direct route at 63 percent, with walk, bike and drive modes and a detour budget slider at plus 25 percent.">
+            <img src="img/route.jpg" width="786" height="1704" loading="lazy" alt="Route sheet for Domino Park: an orange Most new route that is 68 percent new, an amber Balanced route at 61 percent and a blue Direct route at 63 percent, with a detour budget slider at plus 25 percent.">
           </picture>
-          <figcaption><strong>Route</strong>Pick a destination and a detour budget; get up to three candidates, from Most new to Direct, each with its share of unexplored street.</figcaption>
+          <figcaption><strong>Route</strong>Pick a destination and a detour budget; get up to three candidates, from Most new to Direct, each with its share of unexplored street. Routes follow paths where they exist and straight lines where they don't.</figcaption>
         </figure>
       </div>
       <p class="fine views-note">Screenshots are the real app over sample walks in Williamsburg, Brooklyn, not a mockup.</p>
@@ -118,7 +118,7 @@
           <h2>Explore from here.</h2>
           <p class="lede">Pick a length and get up to three loops from where you stand, each one favouring streets you have never walked.</p>
           <ul class="loop-chips" aria-label="Loop length presets"><li>2 km</li><li class="on">3 km</li><li>5 km</li><li>8 km</li></ul>
-          <p>Tap <b>Where to?</b>, then <b>Explore a loop from here</b>. The presets run 2 to 8 km and the slider 1 to 15 km; walk, bike and drive apply just as they do for a destination. The loops come back as Loop A, B and C, sorted by unexplored distance, and Go follows the one you pick.</p>
+          <p>Tap <b>Where to?</b>, then <b>Explore a loop from here</b>. The presets run 2 to 8 km and the slider 1 to 15 km. The loops come back as Loop A, B and C, sorted by unexplored distance, and Go follows the one you pick.</p>
         </div>
         <figure class="loops-figure">
           <div class="phone">
@@ -127,7 +127,7 @@
               <img src="img/loop.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Explore from here sheet: three loops of about 3 km drawn from the user's position over the fogged map, length presets of 2, 3, 5 and 8 kilometres with 3 km selected, and Loop A at 67 percent new, Loop B at 65 percent and Loop C at 58 percent.">
             </picture>
           </div>
-          <figcaption class="fine">Three 3 km walking loops from Bedford Avenue and North 7th Street.</figcaption>
+          <figcaption class="fine">Three 3 km loops from Bedford Avenue and North 7th Street.</figcaption>
         </figure>
       </div>
     </section>
@@ -140,7 +140,7 @@
       <ol class="how">
         <li>
           <h3>Fog of World stays your recorder</h3>
-          <p>Keep recording there as always. It tracks in the background, which a web app cannot, and Unfog never touches its data. Copy your history out once, then again whenever you want the map caught up.</p>
+          <p>Keep recording there as always. It tracks in the background, which a web app cannot, and Unfog never touches its data. Copy your history out once, then again whenever you want the map caught up. Unfog also tracks on its own while it is open: one switch in Settings, and the fog clears as you move.</p>
         </li>
         <li>
           <h3>Unfog imports your history</h3>
@@ -148,7 +148,7 @@
         </li>
         <li>
           <h3>Routes maximise unexplored streets</h3>
-          <p>Choose walk, bike or drive and a detour budget from +10 % to +100 % (default +25 %). Unfog searches the street graph for routes that spend the most distance on streets you have never been on. Tap Go and follow along on the map. No destination in mind? Ask for a loop of 2 to 8 km from where you stand instead.</p>
+          <p>Set a detour budget from +10 % to +100 % (default +25 %). Unfog searches the street graph for routes that spend the most distance on streets you have never been on: they follow paths where they exist, footpaths and stairs included, and straight lines where they don't, timed at walking pace. Tap Go and follow along on the map. No destination in mind? Ask for a loop of 2 to 8 km from where you stand instead.</p>
         </li>
       </ol>
     </section>
@@ -174,7 +174,7 @@
           <div class="phone">
             <picture>
               <source srcset="img/data.webp" type="image/webp">
-              <img src="img/data.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Data screen: Import files, Export backup with the last backup date, prebuilt routing data for New York City and Metro Vancouver, recorded sessions and Delete all data.">
+              <img src="img/data.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Data screen: Import files, Export backup with the last backup date, prebuilt routing data for New York City and Metro Vancouver, sessions and Delete all data.">
             </picture>
           </div>
         </figure>
@@ -196,7 +196,7 @@
           </ol>
           <div class="aside">
             <h3>Why the Home Screen matters</h3>
-            <p>The installed app keeps its own data and permissions, so import your history and allow location once inside it. It runs full screen, works offline, and gets storage that iOS does not clear the way it can for a plain Safari tab. Keeping the screen awake while you record only works in a Home Screen app.</p>
+            <p>The installed app keeps its own data and permissions, so import your history and allow location once inside it. It runs full screen, works offline, and gets storage that iOS does not clear the way it can for a plain Safari tab. Keeping the screen awake while it tracks only works in a Home Screen app.</p>
             <p>Deleting the icon deletes its data, so export a backup from Data now and then.</p>
           </div>
         </div>
@@ -238,8 +238,8 @@
         <details>
           <summary>Can Unfog record in the background like Fog of World?</summary>
           <div>
-            <p>No. iOS does not let web apps track location in the background. Record sessions work in the foreground with the screen on; Unfog holds a wake lock so the screen stays awake, except in Low Power Mode. Locking the phone or switching apps pauses fixes, and long gaps are not bridged.</p>
-            <p>Keep Fog of World as your recorder, and fill any gaps with Apple Health or Strava GPX, or a Google Timeline export.</p>
+            <p>No. iOS does not let web apps track location in the background. Turn on Track my movement in Settings and Unfog clears the fog as you move whenever it is open and on screen; it holds a wake lock so the screen stays awake, except in Low Power Mode. Locking the phone or switching apps pauses the trail, and long gaps are not bridged.</p>
+            <p>Keep Fog of World as your recorder, and fill any gaps with Apple Health or Strava GPX, or a Google Timeline export. An import path for Overland, a free background GPS logger for iOS, is coming.</p>
           </div>
         </details>
         <details>
@@ -251,13 +251,13 @@
         <details>
           <summary>Do I need a destination?</summary>
           <div>
-            <p>No. Tap "Where to?", then "Explore a loop from here". Choose 2, 3, 5 or 8 km, or anything from 1 to 15 km on the slider, and Unfog finds up to three round trips from where you stand, listed as Loop A, B and C with their share of unexplored street. Loops use the same walk, bike and drive modes and the same routing data as a destination.</p>
+            <p>No. Tap "Where to?", then "Explore a loop from here". Choose 2, 3, 5 or 8 km, or anything from 1 to 15 km on the slider, and Unfog finds up to three round trips from where you stand, listed as Loop A, B and C with their share of unexplored street. Loops use the same routing data as a destination.</p>
           </div>
         </details>
         <details>
           <summary>Where do the heat counts come from?</summary>
           <div>
-            <p>Fog of World only stores visited or not visited for each pixel, with no counts and no dates. Heat counts come from tracks: each GPX track, Google Timeline day or recorded session counts one visit for every cell it touches. A Fog of World import counts as one visit everywhere it has been.</p>
+            <p>Fog of World only stores visited or not visited for each pixel, with no counts and no dates. Heat counts come from tracks: each GPX track, Google Timeline day or tracked session counts one visit for every cell it touches. A Fog of World import counts as one visit everywhere it has been.</p>
           </div>
         </details>
         <details>
@@ -269,7 +269,7 @@
         <details>
           <summary>Does Unfog change my Fog of World data?</summary>
           <div>
-            <p>No. It only reads the files you give it. If you want a recorded session in Fog of World too, export it as GPX from Data → Recorded sessions and drop it in Fog of World's Import folder.</p>
+            <p>No. It only reads the files you give it. If you want a tracked session in Fog of World too, export it as GPX from Data → Sessions and drop it in Fog of World's Import folder.</p>
           </div>
         </details>
         <details>
