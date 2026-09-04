@@ -9,9 +9,9 @@ choose. Everything stays on your device.
 
 Live: https://data-t3labs.github.io/unfog/ · About page: https://data-t3labs.github.io/unfog/welcome/
 
-| Fog | Heat | Route | Loop |
-|---|---|---|---|
-| ![Fog view](welcome/img/fog.jpg) | ![Heat view](welcome/img/heat.jpg) | ![Route sheet](welcome/img/route.jpg) | ![Explore from here: three 3 km loops](welcome/img/loop.jpg) |
+| Fog | Heat | Satellite | Route | Loop |
+|---|---|---|---|---|
+| ![Fog view](welcome/img/fog.jpg) | ![Heat view](welcome/img/heat.jpg) | ![Fog over satellite imagery](welcome/img/satellite.jpg) | ![Route sheet with the Google Maps row under Go](welcome/img/route.jpg) | ![Explore from here: three loops](welcome/img/loop.jpg) |
 
 Screenshots are the real app over sample walks in Williamsburg, Brooklyn (captured by
 `tests/e2e/landing/capture.mjs`).
@@ -20,8 +20,9 @@ Screenshots are the real app over sample walks in Williamsburg, Brooklyn (captur
 
 - Import Fog of World `Sync.zip` / raw Sync files / `.fwss` snapshots, GPX (Apple Health, Strava…),
   Google Timeline exports, and Unfog backups
-- Fog and heat layers over an OpenFreeMap basemap, rendered smoothly at full resolution from
-  Fog of World's own cell grid (so re-imports line up exactly)
+- Fog and heat layers rendered smoothly at full resolution from Fog of World's own cell grid (so
+  re-imports line up exactly), over a Map, Dark (night) or Satellite basemap (OpenFreeMap; Esri
+  imagery with street names kept)
 - Novelty routing: a detour budget and 2–3 candidate routes with "% new"; routes follow paths
   where they exist (streets, footpaths, stairs, either direction) and straight lines where they
   don't, timed at walking pace
@@ -30,7 +31,12 @@ Screenshots are the real app over sample walks in Williamsburg, Brooklyn (captur
 - Hand-off to Google Maps: one tap opens the chosen route or loop in the Google Maps app for
   turn-by-turn walking directions — its corners become checkpoints and long routes open in parts;
   Apple Maps (destination only) and Save GPX for any other app
-- Prebuilt routing graphs for New York City and Metro Vancouver; download any other area on demand
+- Street data that downloads itself: anywhere in North America the streets around you and along
+  each route arrive in the background (Wi-Fi or mobile, paused in Low Data Mode) and stay on the
+  phone for offline routes (Data → Routing data). Prebuilt regions for New York City, Metro
+  Vancouver and Salt Spring Island download whole in one tap; elsewhere in the world "Download
+  this area" fetches the streets from Overpass once. Where no streets are known, a route is a
+  straight line you can still follow
 - Track my movement: one switch in Settings, then Unfog clears the fog as you move whenever it is
   open and on screen (the screen stays awake); sessions export as GPX for Fog of World's Import folder
 - Backup / restore through the iOS share sheet; works offline once installed

@@ -4,14 +4,23 @@
  * Runs against a local preview of the built app (`npm run build && npx vite preview --port 4173 --strictPort`),
  * seeds the real grid store with tracks along real Williamsburg streets (tests/fixtures/osm/williamsburg.json.gz,
  * chosen with the same distance-decay probabilities as docs/mockups/mock.js so the fog looks lived-in), then
- * captures the Fog / Heat / Route / Data / Stats / Help screens at the iPhone 15 viewport (393×852, DPR 3)
- * plus a wide desktop fog view. Masters are PNG; tests/e2e/landing/make-images.sh derives the JPEGs in welcome/img/.
+ * captures the Fog / Heat / Route / Loop / Satellite / Night / Data / Stats / Help / Tracking / Settings screens at
+ * the iPhone 15 viewport (393×852, DPR 3) plus a wide desktop fog view. Masters are PNG; tests/e2e/landing/encode.mjs
+ * derives the WebP + JPEG pairs in welcome/img/.
+ *
+ * The Data screen shows the REAL automatic routing layer: build, then `node tools/build-graph/mirror-packs.mjs --out
+ * dist/graph/packs` (what deploy.yml does) so the preview serves the deployed packs-index.json and the app fetches
+ * real packs from the real shard sites. The prebuilt NYC region already covers Williamsburg, so the capture pans to
+ * eastern Long Island (outside the prebuilt tiles) and lets the prefetch driver pull the streets there by itself.
  *
  *   node tests/e2e/landing/capture.mjs app  [outDir]   # app screenshots (default out: tests/e2e/landing/out)
  *   node tests/e2e/landing/capture.mjs site [outDir]   # the landing page itself at 393 and 1280 px (review)
  *   node tests/e2e/landing/capture.mjs og   [outDir]   # 1200×630 Open Graph image from welcome/og.html
  *
- * Env: PW_CHROMIUM (browser binary), UNFOG_URL (default http://localhost:4173/unfog/).
+ * Env: PW_CHROMIUM (browser binary), UNFOG_URL (default http://localhost:4173/unfog/), UNFOG_PACKS_INDEX (a
+ * packs-index.json written by mirror-packs.mjs; when set, the app's request for graph/packs/packs-index.json is
+ * answered from that file, so a concurrent `npm run build` emptying dist/ cannot take the index away mid-capture),
+ * UNFOG_PACKS_DIR (a directory of `<cell>.ufp` packs curl'd from the shard sites — see bootApp for why).
  */
 import { chromium } from 'playwright-core';
 import fs from 'node:fs';
@@ -32,6 +41,9 @@ const executablePath =
 
 const HOME = [-73.9568, 40.7176]; // Bedford Av & N 7th St
 const DOMINO = { name: 'Domino Park', locality: 'Brooklyn', lonlat: [-73.9678, 40.7142] };
+// Westhampton Beach, NY: z12 tile 1220/1538 — outside the prebuilt NYC region (x 1201–1209) and inside the
+// "Geofabrik us/new-york" pack cell 6/19/24, so the automatic layer lists "Streets near New York (US)".
+const WESTHAMPTON = [-72.6451, 40.8051];
 const IPHONE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1';
 
@@ -71,9 +83,43 @@ function seedTracks(seed = 7) {
 async function bootApp(page, { dismissInstallCard = true } = {}) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  if (process.env.UNFOG_PACKS_INDEX) {
+    const body = fs.readFileSync(process.env.UNFOG_PACKS_INDEX);
+    await page.context().route('**/graph/packs/packs-index.json', (route) => route.fulfill({ status: 200, contentType: 'application/json', body }));
+  }
+  if (process.env.UNFOG_PACKS_DIR) {
+    // Headless Chromium on the capture Mac cannot open a connection to *.github.io (IPv6 dead, and the v4
+    // path hangs in Chromium while curl gets a 206 at once), so the shard packs named by the index are
+    // relayed from local copies fetched with curl: same bytes, same byte-range protocol (206 + Content-Range),
+    // same app code path (index → ranges → IndexedDB → Data rows). Packs not present locally fail fast.
+    const dir = process.env.UNFOG_PACKS_DIR;
+    await page.context().route(/https:\/\/data-t3labs\.github\.io\/unfog-graph-\d+\/packs\/.+\.ufp$/, (route) => {
+      const file = path.join(dir, route.request().url().split('/').pop());
+      if (!fs.existsSync(file)) return route.abort('failed');
+      const all = fs.readFileSync(file);
+      const m = /^bytes=(\d+)-(\d*)$/.exec(route.request().headers()['range'] ?? '');
+      const cors = { 'access-control-allow-origin': '*', 'accept-ranges': 'bytes', 'access-control-expose-headers': 'Content-Range, Content-Length, Accept-Ranges' };
+      if (!m) return route.fulfill({ status: 200, headers: { ...cors, 'content-type': 'application/octet-stream', 'content-length': String(all.length) }, body: all });
+      const start = Number(m[1]);
+      const end = m[2] === '' ? all.length - 1 : Math.min(Number(m[2]), all.length - 1);
+      const part = all.subarray(start, end + 1);
+      return route.fulfill({
+        status: 206,
+        headers: { ...cors, 'content-type': 'application/octet-stream', 'content-length': String(part.length), 'content-range': `bytes ${start}-${end}/${all.length}` },
+        body: part,
+      });
+    });
+  }
   if (dismissInstallCard) await page.addInitScript(() => localStorage.setItem('unfog.installDismissed', String(Date.now())));
   // The first-run "Track my movement?" card would sit in every frame otherwise.
   await page.addInitScript(() => localStorage.setItem('unfog.trackingOffered', String(Date.now())));
+  // Headless Chromium exposes navigator.wakeLock but refuses the request, which would make the tracking pill read
+  // "Tracking · keep the screen on"; a Home Screen app on iOS 18.4+ holds the lock, so the frame shows what the
+  // phone shows: the request always succeeds here.
+  await page.addInitScript(() => {
+    const lock = { released: false, type: 'screen', release: async () => {}, addEventListener() {}, removeEventListener() {} };
+    Object.defineProperty(navigator, 'wakeLock', { value: { request: async () => lock }, configurable: true });
+  });
   await page.goto(BASE, { waitUntil: 'load' });
   await page.waitForFunction(() => window.__unfog?.ready === true, null, { timeout: 120_000 });
   const mock = await page.evaluate(() => window.__unfog.mock);
@@ -139,6 +185,37 @@ async function shot(page, name, opts = {}) {
   return file;
 }
 
+/**
+ * Scroll a screen so `el` sits flush under its sticky header (scrollIntoView aligns to the scroll box, which
+ * runs under the header, so a sliver of the row above would show). Scrolls whichever ancestor scrolls.
+ */
+async function flushUnderHeader(page, screenId, elFn) {
+  await page.evaluate(
+    ({ screenId, src }) => {
+      const el = new Function('return (' + src + ')')()();
+      const head = document.querySelector(`#${screenId} .screen-head`);
+      el.scrollIntoView({ block: 'start' });
+      const d = el.getBoundingClientRect().top - head.getBoundingClientRect().bottom;
+      if (Math.abs(d) < 1) return;
+      let sc = el.parentElement;
+      while (sc && sc.scrollHeight <= sc.clientHeight + 1) sc = sc.parentElement;
+      (sc ?? window).scrollBy(0, d);
+    },
+    { screenId, src: elFn.toString() },
+  );
+}
+
+/** Help → Settings → Basemap: the same taps a user makes; leaves the app on the map tab. */
+async function setBasemap(page, label) {
+  await page.locator('.tab[data-tab="help"]').click();
+  await page.waitForSelector('#screen-help', { state: 'visible' });
+  const settings = page.locator('#help-settings');
+  if (!(await settings.evaluate((d) => d.open))) await settings.locator('summary').click();
+  await settings.locator('.seg.inline[aria-label="Basemap"] button', { hasText: new RegExp(`^${label}$`) }).click();
+  await settings.locator('summary').click();
+  await page.locator('.tab[data-tab="map"]').click();
+}
+
 // ---------------------------------------------------------------- modes
 async function captureApp(browser) {
   const ctx = await browser.newContext({
@@ -175,9 +252,12 @@ async function captureApp(browser) {
   const sheet = page.locator('.sheet.route');
   await sheet.waitFor({ state: 'visible' });
   await page.waitForFunction(() => document.querySelectorAll('.sheet.route .cand').length >= 2, null, { timeout: 60_000 });
+  // Feedback-3: the hand-off row under Go (Google Maps / Apple Maps / Save GPX) belongs in the frame.
+  await page.waitForSelector('.sheet.route .handoff:not([hidden]) a.gmaps', { state: 'visible', timeout: 20_000 });
   await idle(page, 1200);
   const cands = await page.$$eval('.sheet.route .cand', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
   console.log('  candidates:', cands);
+  console.log('  hand-off row:', await page.$eval('.sheet.route .handoff', (e) => e.textContent.replace(/\s+/g, ' ').trim()));
   await shot(page, 'route');
   await page.getByRole('button', { name: 'Clear destination' }).click();
   await idle(page, 300);
@@ -190,21 +270,86 @@ async function captureApp(browser) {
   await loopSheet.waitFor({ state: 'visible' });
   await page.locator('.sheet.route.loop .chips button', { hasText: /^3 km$/ }).click();
   await page.waitForFunction(() => document.querySelectorAll('.sheet.route.loop .cand').length >= 2, null, { timeout: 90_000 });
+  await page.waitForSelector('.sheet.route.loop .handoff:not([hidden]) a.gmaps', { state: 'visible', timeout: 20_000 });
   await idle(page, 1200);
   const loops = await page.$$eval('.sheet.route.loop .cand', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
   const loopTitle = await page.$eval('.sheet.route.loop h2', (e) => e.textContent.replace(/\s+/g, ' ').trim());
   const loopStatus = await page.$eval('.sheet.route.loop .route-status', (e) => e.textContent.trim());
   console.log('  loop title:', loopTitle, '| status:', JSON.stringify(loopStatus));
   console.log('  loops:', loops);
+  console.log('  hand-off row:', await page.$eval('.sheet.route.loop .handoff', (e) => e.textContent.replace(/\s+/g, ' ').trim()));
   await shot(page, 'loop');
+  // A 3 km loop already needs two Google Maps parts, and the taller sheet leaves the map strip ~120 px; the 2 km
+  // preset (one tap away) is captured too so the page can use whichever frame reads better.
+  await page.locator('.sheet.route.loop .chips button', { hasText: /^2 km$/ }).click();
+  await page.waitForFunction(() => /about 2 km/.test(document.querySelector('.sheet.route.loop h2')?.textContent ?? '') && document.querySelectorAll('.sheet.route.loop .cand').length >= 2, null, { timeout: 90_000 });
+  await page.waitForSelector('.sheet.route.loop .handoff:not([hidden]) a.gmaps', { state: 'visible', timeout: 20_000 });
+  await idle(page, 1200);
+  console.log('  loops 2 km:', await page.$$eval('.sheet.route.loop .cand', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim())));
+  console.log('  hand-off row:', await page.$eval('.sheet.route.loop .handoff', (e) => e.textContent.replace(/\s+/g, ' ').trim()));
+  await shot(page, 'loop-2km');
+  await page.locator('.sheet.route.loop .chips button', { hasText: /^3 km$/ }).click();
+  await page.waitForFunction(() => /about 3 km/.test(document.querySelector('.sheet.route.loop h2')?.textContent ?? ''), null, { timeout: 90_000 });
   await page.getByRole('button', { name: 'Clear destination' }).click();
   await idle(page, 300);
 
-  // 4. Data screen.
+  // 3c. Basemaps (feedback-1): Satellite (Esri imagery under the same fog, labels kept) and the Dark "night" map —
+  // switched in Help → Settings → Basemap, the same taps a user makes. Over dark rooftops the fog only reads where
+  // whole blocks are unexplored, so the frame is a little wider than Fog (z14.6) and centred ~600 m south-east of
+  // home: the walked blocks form a lighter island upper-left with lit street corridors, deep fog around them.
+  await page.evaluate((c) => window.__unfog.ctx.map.map.jumpTo({ center: [c[0] + 0.003, c[1] - 0.005], zoom: 14.6 }), HOME);
+  await setBasemap(page, 'Satellite');
+  await page.waitForFunction(
+    () => {
+      const m = window.__unfog.ctx.map.map;
+      const style = m.getStyle();
+      return style?.name === 'unfog-satellite' && style.layers.some((l) => l.type === 'symbol') && m.isStyleLoaded() && m.areTilesLoaded();
+    },
+    null,
+    { timeout: 120_000 },
+  );
+  await idle(page, 2500);
+  await shot(page, 'satellite');
+  await page.evaluate((c) => window.__unfog.ctx.map.map.jumpTo({ center: c, zoom: 15.3 }), HOME);
+  await setBasemap(page, 'Dark');
+  await page.waitForFunction(() => document.documentElement.classList.contains('dark') && window.__unfog.ctx.map.map.getStyle()?.name !== 'unfog-satellite' && window.__unfog.ctx.map.map.isStyleLoaded() && window.__unfog.ctx.map.map.areTilesLoaded(), null, { timeout: 120_000 });
+  await idle(page, 2500);
+  await shot(page, 'night');
+  await setBasemap(page, 'Map');
+  await page.waitForFunction(() => !document.documentElement.classList.contains('dark') && window.__unfog.ctx.map.map.isStyleLoaded() && window.__unfog.ctx.map.map.areTilesLoaded(), null, { timeout: 120_000 });
+  await idle(page, 1500);
+
+  // 3d. Coverage v2: pan to eastern Long Island (no prebuilt tiles there) and let the prefetch driver fetch the
+  // streets around the map centre from the real packs, so Data → Routing data has something to list.
+  // The prefetch policy ignores map moves for 60 s after a position fix (positionPriorityMs), and resolving a
+  // route/loop origin just produced one — so pan, let that window pass, then move once more so a fresh
+  // moveend is the notification that counts.
+  await page.evaluate((c) => window.__unfog.ctx.map.map.jumpTo({ center: c, zoom: 14 }), WESTHAMPTON);
+  await page.waitForTimeout(61_000);
+  await page.evaluate((c) => window.__unfog.ctx.map.map.jumpTo({ center: [c[0] + 0.002, c[1]], zoom: 14 }), WESTHAMPTON);
+  // Poll the engine (index → byte ranges → IndexedDB); the driver's own throttle is 5 s.
+  let packs = await page.evaluate(() => window.__unfog.ctx.engines.route.packsStatus());
+  const t1 = Date.now();
+  while (packs.totalTiles === 0 && Date.now() - t1 < 180_000) {
+    await page.waitForTimeout(3000);
+    packs = await page.evaluate(() => window.__unfog.ctx.engines.route.packsStatus());
+  }
+  const packsOk = packs.totalTiles > 0;
+  console.log(`  packs after the pan: ${packsOk ? 'fetched' : 'NOT fetched (timeout)'} — ${packs.totalTiles} tiles, ${Math.round(packs.totalBytes / 1024)} KB, cells:`, packs.cells.map((c) => `${c.cell} ${c.source ?? ''}`));
+  await page.evaluate((c) => window.__unfog.ctx.map.map.jumpTo({ center: c, zoom: 15.3 }), HOME);
+  await idle(page, 600);
+
+  // 4. Data screen, framed on Backup + Routing data (the automatic rows + the prebuilt Regions list): the
+  // Sources cards above them show set-up state, which is not a landing-page subject.
   await page.locator('.tab[data-tab="data"]').click();
   await page.waitForSelector('#screen-data .row-item', { state: 'visible', timeout: 20_000 });
+  if (packsOk) await page.waitForSelector('#screen-data .packs-cell', { state: 'visible', timeout: 20_000 });
   await page.waitForTimeout(400);
+  console.log('  routing data rows:', await page.$$eval('#screen-data .packs-cell, #screen-data .packs-total', (els) => els.map((e) => e.textContent.replace(/\s+/g, ' ').trim())));
+  await flushUnderHeader(page, 'screen-data', () => [...document.querySelectorAll('#screen-data h3')].find((h) => h.textContent.trim() === 'Backup'));
+  await page.waitForTimeout(350);
   await shot(page, 'data');
+  await page.evaluate(() => document.querySelector('#screen-data .screen-body')?.scrollTo(0, 0));
 
   // 5. Stats.
   await page.locator('.tab[data-tab="stats"]').click();
@@ -223,6 +368,33 @@ async function captureApp(browser) {
   await sections.nth(1).locator('summary').click();
   await page.waitForTimeout(350);
   await shot(page, 'help-install');
+  await sections.nth(1).locator('summary').click();
+
+  // 7. Tracking (feedback-2): the switch goes on (the location permission is already granted in this context),
+  // the map shows only the quiet "Tracking" pill top-left; then Help → Settings with the switch on.
+  // The emulated position fires once; minutes later the app's cached fix is stale and it asks for a fresh one.
+  // A nudged position = the fresh fix a phone would have, and the fix the new session's pill waits for.
+  await ctx.setGeolocation({ longitude: HOME[0] + 0.00001, latitude: HOME[1], accuracy: 8 });
+  await page.waitForTimeout(500);
+  const trackingOn = await page.evaluate(() => window.__unfog.ctx.tracking.setEnabled(true));
+  console.log('  tracking switch →', trackingOn, trackingOn ? '' : JSON.stringify(await page.$eval('.toasts', (e) => e.textContent.trim()).catch(() => '')));
+  await ctx.setGeolocation({ longitude: HOME[0] + 0.00002, latitude: HOME[1], accuracy: 8 });
+  await page.locator('.tab[data-tab="map"]').click();
+  await page.evaluate((c) => window.__unfog.ctx.map.map.jumpTo({ center: c, zoom: 16 }), HOME);
+  await page.waitForSelector('.track-pill:not([hidden])', { state: 'visible', timeout: 20_000 });
+  await page.waitForFunction(() => document.querySelector('.track-pill .t')?.textContent === 'Tracking', null, { timeout: 30_000 }).catch(() => {});
+  await idle(page, 900);
+  console.log('  pill:', JSON.stringify(await page.$eval('.track-pill', (e) => e.textContent.trim())));
+  await shot(page, 'tracking');
+  await page.locator('.tab[data-tab="help"]').click();
+  const settings = page.locator('#help-settings');
+  if (!(await settings.evaluate((d) => d.open))) await settings.locator('summary').click();
+  // Settings is the last section, so the scroller cannot bring its row to the top: show the row above it in full
+  // instead (flush under the sticky Help header) rather than a sliver of it.
+  await flushUnderHeader(page, 'screen-help', () => document.getElementById('help-settings').previousElementSibling);
+  await page.waitForTimeout(350);
+  console.log('  switch aria-checked:', await settings.locator('.switch').getAttribute('aria-checked'));
+  await shot(page, 'settings');
   await page.locator('.tab[data-tab="map"]').click();
   await idle(page, 300);
   await ctx.close();
@@ -274,7 +446,7 @@ async function captureSite(browser) {
       if (scheme === 'light') {
         // Viewport close-ups at each section for review (full-page shots are too tall to read).
         await shot(page, `${name}-hero`);
-        for (const id of ['views', 'loops', 'how', 'export', 'install', 'privacy', 'faq']) {
+        for (const id of ['views', 'loops', 'tracking', 'how', 'export', 'install', 'privacy', 'faq']) {
           await page.evaluate((id) => document.getElementById(id).scrollIntoView({ block: 'start' }), id);
           await page.waitForTimeout(250);
           await shot(page, `${name}-${id}`);

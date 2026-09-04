@@ -69,7 +69,7 @@
         <div class="phone">
           <picture>
             <source srcset="img/route.webp" type="image/webp">
-            <img src="img/route.jpg" width="786" height="1704" alt="Unfog's route sheet for Domino Park over a fogged map of Williamsburg: an orange Most new route that is 68 percent unexplored, an amber Balanced route and a blue Direct route, with a detour budget of plus 25 percent." fetchpriority="high">
+            <img src="img/route.jpg" width="786" height="1704" alt="Unfog's route sheet for Domino Park over a fogged map of Williamsburg: an orange Most new route that is 68 percent unexplored, an amber Balanced route and a blue Direct route, a detour budget of plus 25 percent, the Go button and a row of Google Maps, Apple Maps and Save GPX buttons under it." fetchpriority="high">
           </picture>
         </div>
         <figcaption class="fine">The real app, routing to Domino Park over sample walks in Williamsburg, Brooklyn.</figcaption>
@@ -82,8 +82,8 @@
 
     <section class="wrap section" id="views">
       <div class="section-head">
-        <p class="eyebrow">Three views</p>
-        <h2>Fog, heat, route.</h2>
+        <p class="eyebrow">Four views</p>
+        <h2>Fog, heat, satellite, route.</h2>
       </div>
       <div class="views">
         <figure class="view">
@@ -102,10 +102,17 @@
         </figure>
         <figure class="view">
           <picture>
-            <source srcset="img/route.webp" type="image/webp">
-            <img src="img/route.jpg" width="786" height="1704" loading="lazy" alt="Route sheet for Domino Park: an orange Most new route that is 68 percent new, an amber Balanced route at 61 percent and a blue Direct route at 63 percent, with a detour budget slider at plus 25 percent.">
+            <source srcset="img/satellite.webp" type="image/webp">
+            <img src="img/satellite.jpg" width="786" height="1704" loading="lazy" alt="Satellite view: the same fog over aerial imagery of Williamsburg. The blocks walked around the blue position dot form a lighter island with bright street corridors, everything around them sits dimmed under the fog, and street names stay legible in white.">
           </picture>
-          <figcaption><strong>Route</strong>Pick a destination and a detour budget; get up to three candidates, from Most new to Direct, each with its share of unexplored street. Routes follow paths where they exist and straight lines where they don't.</figcaption>
+          <figcaption><strong>Satellite</strong>The same fog over aerial imagery, street names kept. Choose Map, Dark or Satellite in Settings; Dark is a night map with lit streets.</figcaption>
+        </figure>
+        <figure class="view">
+          <picture>
+            <source srcset="img/route.webp" type="image/webp">
+            <img src="img/route.jpg" width="786" height="1704" loading="lazy" alt="Route sheet for Domino Park: an orange Most new route that is 68 percent new, an amber Balanced route at 66 percent and a blue Direct route at 64 percent, a detour budget slider at plus 25 percent, the Go button and under it a row of Google Maps, Apple Maps and Save GPX buttons.">
+          </picture>
+          <figcaption><strong>Route</strong>Pick a destination and a detour budget; get up to three candidates, from Most new to Direct, each with its share of unexplored street. Routes follow paths where they exist and straight lines where they don't, and a Google Maps button under Go takes over with turn-by-turn.</figcaption>
         </figure>
       </div>
       <p class="fine views-note">Screenshots are the real app over sample walks in Williamsburg, Brooklyn, not a mockup.</p>
@@ -117,17 +124,37 @@
           <p class="eyebrow">No destination?</p>
           <h2>Explore from here.</h2>
           <p class="lede">Pick a length and get up to three loops from where you stand, each one favouring streets you have never walked.</p>
-          <ul class="loop-chips" aria-label="Loop length presets"><li>2 km</li><li class="on">3 km</li><li>5 km</li><li>8 km</li></ul>
-          <p>Tap <b>Where to?</b>, then <b>Explore a loop from here</b>. The presets run 2 to 8 km and the slider 1 to 15 km. The loops come back as Loop A, B and C, sorted by unexplored distance, and Go follows the one you pick.</p>
+          <ul class="loop-chips" aria-label="Loop length presets"><li class="on">2 km</li><li>3 km</li><li>5 km</li><li>8 km</li></ul>
+          <p>Tap <b>Where to?</b>, then <b>Explore a loop from here</b>. The presets run 2 to 8 km and the slider 1 to 15 km. The loops come back as Loop A, B and C, sorted by unexplored distance; Go follows the one you pick, or hand it to Google Maps from the row under Go.</p>
         </div>
         <figure class="loops-figure">
           <div class="phone">
             <picture>
               <source srcset="img/loop.webp" type="image/webp">
-              <img src="img/loop.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Explore from here sheet: three loops of about 3 km drawn from the user's position over the fogged map, length presets of 2, 3, 5 and 8 kilometres with 3 km selected, and Loop A at 67 percent new, Loop B at 65 percent and Loop C at 58 percent.">
+              <img src="img/loop.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Explore from here sheet: three loops of about 2 km drawn from the user's position over the fogged map, length presets of 2, 3, 5 and 8 kilometres with 2 km selected, Loop A at 53 percent new, Loop B at 49 percent and Loop C at 47 percent, the Go button and a Google Maps and Save GPX row under it.">
             </picture>
           </div>
-          <figcaption class="fine">Three 3 km loops from Bedford Avenue and North 7th Street.</figcaption>
+          <figcaption class="fine">Three 2 km loops from Bedford Avenue and North 7th Street.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="wrap section" id="tracking">
+      <div class="split tracking">
+        <div class="tracking-copy">
+          <p class="eyebrow">Track my movement</p>
+          <h2>Clears as you walk.</h2>
+          <p class="lede">One switch in Settings, and Unfog clears the fog as you move, whenever it is open and on screen.</p>
+          <p>Nothing to start or stop. A small Tracking pill on the map is the only sign, the screen stays awake, and each day you have it open is one session you can export as GPX. That is as far as iOS lets a web app go: lock the phone or switch apps and the trail pauses until you are back. Fog of World records in the background, so keep it as your recorder and import its history now and then.</p>
+        </div>
+        <figure class="tracking-figure">
+          <div class="phone">
+            <picture>
+              <source srcset="img/settings.webp" type="image/webp">
+              <img src="img/settings.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Settings in the Help screen: the Track my movement switch turned on with a note that iOS only lets a web app record while it is open, then Basemap with Map, Dark and Satellite, Units, Cleared core and the fog sliders.">
+            </picture>
+          </div>
+          <figcaption class="fine">Help → Settings: the switch, and the basemap choice underneath it.</figcaption>
         </figure>
       </div>
     </section>
@@ -140,7 +167,7 @@
       <ol class="how">
         <li>
           <h3>Fog of World stays your recorder</h3>
-          <p>Keep recording there as always. It tracks in the background, which a web app cannot, and Unfog never touches its data. Copy your history out once, then again whenever you want the map caught up. Unfog also tracks on its own while it is open: one switch in Settings, and the fog clears as you move.</p>
+          <p>Keep recording there as always. It tracks in the background, which a web app cannot, and Unfog never touches its data. Copy your history out once, then again whenever you want the map caught up. Unfog can track too: flip Track my movement once in Settings and the fog clears as you move, whenever the app is open and on screen.</p>
         </li>
         <li>
           <h3>Unfog imports your history</h3>
@@ -148,7 +175,7 @@
         </li>
         <li>
           <h3>Routes maximise unexplored streets</h3>
-          <p>Set a detour budget from +10 % to +100 % (default +25 %). Unfog searches the street graph for routes that spend the most distance on streets you have never been on: they follow paths where they exist, footpaths and stairs included, and straight lines where they don't, timed at walking pace. Tap Go and follow along on the map, or hand the route to Google Maps for turn-by-turn walking directions: one tap, the route's corners become checkpoints, and a long route opens in parts. No destination in mind? Ask for a loop of 2 to 8 km from where you stand instead.</p>
+          <p>Set a detour budget from +10 % to +100 % (default +25 %). Unfog searches the streets for routes that spend the most distance on ones you have never been on: they follow paths where they exist, footpaths and stairs included, and straight lines where they don't, timed at walking pace. The street data takes care of itself: anywhere in North America the streets around you download in the background and stay on the phone for offline routes. Tap Go and follow along on the map, or hand the route to Google Maps for turn-by-turn walking directions: one tap under Go, the route's corners become checkpoints, and a long route opens in parts of nine. No destination in mind? Ask for a loop of 2 to 8 km from where you stand instead.</p>
         </li>
       </ol>
     </section>
@@ -174,9 +201,10 @@
           <div class="phone">
             <picture>
               <source srcset="img/data.webp" type="image/webp">
-              <img src="img/data.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Data screen: Import files, Export backup with the last backup date, prebuilt routing data for New York City and Metro Vancouver, sessions and Delete all data.">
+              <img src="img/data.jpg" width="786" height="1704" loading="lazy" alt="Unfog's Data screen: Export backup with the last backup date, then Routing data with the automatic street downloads listed as Streets near New York (US) with their size, above the prebuilt regions for New York City, Salt Spring Island and Metro Vancouver.">
             </picture>
           </div>
+          <figcaption class="fine">Further down the same Data screen: your backup, and the streets that download by themselves.</figcaption>
         </figure>
       </div>
     </section>
@@ -219,12 +247,12 @@
       <div class="privacy">
         <div class="copy">
           <p>No accounts, no analytics, no server of ours. Your history lives in the app's own storage on the phone, and a backup is a zip you export through the share sheet to Files or iCloud Drive.</p>
-          <p>A few requests do go out, only when needed, and none of them carry your history. The app itself and the prebuilt routing graphs for New York City and Metro Vancouver download from this site.</p>
+          <p>A few requests do go out, only when needed, and none of them carry your history. The app, its prebuilt regions and its street data download from GitHub Pages, where this site lives.</p>
         </div>
         <dl class="leaves">
-          <div><dt>Map tiles</dt><dd>From OpenFreeMap as you pan. Tiles you have seen are kept for offline use.</dd></div>
+          <div><dt>Map tiles</dt><dd>From OpenFreeMap as you pan, or Esri for the satellite view. Tiles you have seen are kept for offline use.</dd></div>
           <div><dt>Place search</dt><dd>What you type in "Where to?" goes to Photon (komoot) to find the place.</dd></div>
-          <div><dt>Street data on demand</dt><dd>Planning a route outside a prebuilt region fetches the streets around you from Overpass once, then keeps them on the phone.</dd></div>
+          <div><dt>Street data</dt><dd>Across North America the streets around you download by themselves from this project's map data, a few megabytes at a time (Wi-Fi or mobile, paused in Low Data Mode). Elsewhere, "Download this area" fetches them from Overpass once. Either way they stay on the phone.</dd></div>
         </dl>
       </div>
     </section>
@@ -245,7 +273,7 @@
         <details>
           <summary>Where does routing work?</summary>
           <div>
-            <p>Prebuilt routing graphs cover New York City and Metro Vancouver. Download one from Data → Routing data to route offline. Anywhere else, Unfog offers "Download this area" when you plan a route: it fetches the streets around you from Overpass once (a few kilometres around the route), then keeps them on the phone.</p>
+            <p>Anywhere in North America, with no download step: the streets around you and along each route arrive by themselves and stay on the phone for offline routes. Data → Routing data shows what is there, and clearing it loses nothing. Prebuilt regions for New York City, Metro Vancouver and Salt Spring Island can be downloaded whole in one tap. Elsewhere in the world, Unfog offers "Download this area" when you plan a route: it fetches the streets from Overpass once, a few kilometres around the route. Where no streets are known yet, a route is a straight line you can still follow.</p>
           </div>
         </details>
         <details>

@@ -20,15 +20,23 @@ const executablePath =
   process.env.PW_CHROMIUM ??
   path.join(process.env.HOME ?? '', 'Library/Caches/ms-playwright/chromium_headless_shell-1237/chrome-headless-shell-mac-arm64/chrome-headless-shell');
 
-// name, output width (px), webp quality, jpeg quality
+// master name, output width (px), webp quality, jpeg quality, [output name when it differs]
 const JOBS = [
   ['fog', 786, 0.8, 0.8],
   ['heat', 786, 0.8, 0.8],
   ['route', 786, 0.8, 0.8],
-  ['loop', 786, 0.8, 0.8],
-  ['data', 786, 0.82, 0.82],
+  // The page's loop figure is the 2 km preset: a 3 km loop needs two Google Maps parts and the taller sheet
+  // leaves only ~120 px of map above it (see capture.mjs step 3b).
+  ['loop-2km', 786, 0.8, 0.8, 'loop'],
+  // Aerial imagery compresses poorly; 0.56 keeps the fog/cleared contrast and street names legible at 300 px.
+  ['satellite', 786, 0.56, 0.7],
+  ['night', 786, 0.8, 0.8],
+  ['tracking', 786, 0.8, 0.8],
+  // Flat UI screens: lower quality costs nothing visible and keeps the mobile page near its ~700 KB budget.
+  ['settings', 786, 0.74, 0.8],
+  ['data', 786, 0.72, 0.78],
   ['help-export', 786, 0.82, 0.82],
-  ['help-install', 786, 0.82, 0.82],
+  ['help-install', 786, 0.74, 0.8],
   ['stats', 786, 0.82, 0.82],
   ['fog-wide', 1600, 0.76, 0.78],
 ];
@@ -37,10 +45,11 @@ const browser = await chromium.launch({ executablePath, headless: true });
 const page = await browser.newPage();
 await page.setContent('<canvas id="c"></canvas>');
 const rows = [];
-for (const [name, width, qw, qj] of JOBS) {
-  const master = path.join(src, `${name}.png`);
+for (const [master0, width, qw, qj, outName] of JOBS) {
+  const name = outName ?? master0;
+  const master = path.join(src, `${master0}.png`);
   if (!fs.existsSync(master)) {
-    console.warn(`skip ${name}: no master`);
+    console.warn(`skip ${master0}: no master`);
     continue;
   }
   const dataUrl = `data:image/png;base64,${fs.readFileSync(master).toString('base64')}`;

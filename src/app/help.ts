@@ -174,7 +174,7 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
         '"% new" is the share of the route on never-visited streets; "unexplored" is that distance.',
         'Most new maximises unexplored distance; Balanced trades a little; Direct is the shortest and is always shown.',
         'No destination in mind? "Where to?" → "Explore a loop from here" gives round trips of a length you choose.',
-        'Routing needs street data: prebuilt regions (Data → Routing data) or "Download this area" when you plan a route somewhere new (needs a connection once).',
+        'Street data comes by itself: as you move around (and wherever you plan a route), Unfog downloads the streets of that area in the background — Wi-Fi or mobile, paused when Low Data Mode is on — and keeps them for routes offline. Data → Routing data shows what is on your phone; nothing is lost by clearing it. Where no streets are known yet, routes are straight lines you can still follow, and "Download this area" fetches a place outside the automatic coverage (North America today).',
       ]),
     ),
     navigate: section(
