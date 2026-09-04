@@ -194,6 +194,30 @@ export function splitIntoParts(input: LonLat[], opts: SplitOptions = {}): RouteP
   return parts;
 }
 
+/**
+ * Parts for a route candidate that may carry `straight` legs (RouteCandidate.parts): a straight
+ * leg — water, a void the street map has no way over — is not a walking route, so the route is
+ * cut there and each walkable run (street + off-road parts) is split on its own; consecutive
+ * parts either chain end to start or sit either side of a straight leg. A candidate that is
+ * nothing but straight legs (the "Route anyway" line) is handed over whole: Google routes it on
+ * its own network. Without parts (mock engine, loops) this is splitIntoParts.
+ */
+export function splitCandidate(c: { coords: LonLat[]; parts?: Array<{ kind: string; coords: LonLat[] }> }, opts: SplitOptions = {}): RoutePart[] {
+  if (!c.parts?.length || !c.parts.some((p) => p.kind === 'straight')) return splitIntoParts(c.coords, opts);
+  const out: RoutePart[] = [];
+  let run: LonLat[] = [];
+  const flush = () => {
+    if (run.length >= 2) out.push(...splitIntoParts(run, opts));
+    run = [];
+  };
+  for (const p of c.parts) {
+    if (p.kind === 'straight') flush();
+    else run.push(...p.coords);
+  }
+  flush();
+  return out.length ? out : splitIntoParts(c.coords, opts);
+}
+
 /** "Part 1 of 3" (i is zero-based). */
 export function partLabel(i: number, n: number): string {
   return `Part ${i + 1} of ${n}`;

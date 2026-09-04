@@ -27,6 +27,7 @@ import {
   routeGpxFileName,
   routeToGpx,
   significantCorners,
+  splitCandidate,
   splitIntoParts,
   type RoutePart,
 } from './handoff';
@@ -226,6 +227,43 @@ describe('splitIntoParts', () => {
     expect(parts).toHaveLength(1);
     expect(parts[0].corners).toHaveLength(3);
     expect(parts[0].start).toEqual(parts[0].end);
+  });
+
+  // Route-quality 4: the "Straight across" candidate (and the two-component gap) carry a straight
+  // leg Google would route round or refuse; no test fed a candidate with parts to the splitter.
+  it('splitCandidate cuts at straight legs: walking runs either side, nothing spans the water; a straight-only line goes whole', () => {
+    const west = polyline(gridWalk(20)).points; // a long grid walk: several parts on its own
+    const shore = west[west.length - 1];
+    const far: LonLat = [shore[0] + 1200 / KX, shore[1]];
+    const east = polyline([[0, 0], [300, 0], [300, 300]]).points.map(([lon, lat]) => [lon + (far[0] - LON0), lat + (far[1] - LAT0)] as LonLat);
+    const off: LonLat[] = [at(-80, 0), west[0]];
+    const c = {
+      coords: [...off, ...west, ...east],
+      parts: [
+        { kind: 'offroad', coords: off },
+        { kind: 'street', coords: west },
+        { kind: 'straight', coords: [shore, far] },
+        { kind: 'street', coords: east },
+      ],
+    };
+    const parts = splitCandidate(c, DEFAULT_SPLIT);
+    const westParts = splitIntoParts([...off, ...west], DEFAULT_SPLIT);
+    expect(westParts.length).toBeGreaterThanOrEqual(2);
+    expect(parts).toHaveLength(westParts.length + 1);
+    // The off-road leg joins the first walking run; the last west part ends at the shore, the east part starts across the water.
+    expect(parts[0].start).toEqual(off[0]);
+    expect(parts[westParts.length - 1].end).toEqual(shore);
+    expect(parts[westParts.length].start).toEqual(far);
+    expect(parts[westParts.length].end).toEqual(east[east.length - 1]);
+    expect(parts.slice(0, westParts.length)).toEqual(westParts);
+    expect(parts.filter((p) => p.points.includes(shore) && p.points.includes(far))).toEqual([]); // nothing spans the water
+    expect(parts.reduce((s, p) => s + p.lengthM, 0)).toBeCloseTo(splitIntoParts(c.coords, DEFAULT_SPLIT).reduce((s, p) => s + p.lengthM, 0) - 1200, -1);
+    // Without parts, or without a straight leg, it is splitIntoParts.
+    expect(splitCandidate({ coords: west }, DEFAULT_SPLIT)).toEqual(splitIntoParts(west, DEFAULT_SPLIT));
+    expect(splitCandidate({ coords: west, parts: [{ kind: 'street', coords: west }] }, DEFAULT_SPLIT)).toEqual(splitIntoParts(west, DEFAULT_SPLIT));
+    // A straight-only line (Route anyway) is handed over whole.
+    const line = [at(0, 0), at(1400, 0)];
+    expect(splitCandidate({ coords: line, parts: [{ kind: 'straight', coords: line }] }, DEFAULT_SPLIT)).toEqual(splitIntoParts(line, DEFAULT_SPLIT));
   });
 });
 

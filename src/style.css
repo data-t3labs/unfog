@@ -253,6 +253,8 @@ html.dark .chip, html.dark .hint, html.dark .track-pill { box-shadow: var(--shad
 .cand .t, .result .t, .row-item .t, .follow-bar .t { flex: 1; min-width: 0; }
 .cand .name, .result .name, .row-item .name, .follow-bar .name, .import-result .name, .download-offer .name { font-size: 0.941rem; font-weight: 600; }
 .cand .st, .result .st, .row-item .st, .follow-bar .st { font-size: 0.765rem; color: var(--fg-2); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "Straight across" row: its sub-line carries the straight distance too ("4.9 km · 61 min · 2.8 km straight") and may wrap. */
+.cand.gap .st { white-space: normal; }
 .cand .new { font-size: 0.882rem; font-weight: 700; text-align: right; flex: none; }
 .cand .new small { display: block; font-size: 0.647rem; font-weight: 500; color: var(--fg-2); }
 .go { display: flex; align-items: center; justify-content: center; min-height: 50px; width: 100%; border: 0; border-radius: 14px; background: var(--accent); color: var(--accent-ink); font-size: 1rem; font-weight: 700; }

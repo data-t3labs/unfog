@@ -15,12 +15,25 @@ interface LineFeature {
 }
 
 export const ROUTE_COLORS = ['#ff8a3d', '#ffc857', '#7fb2ff'] as const;
+/** The "Straight across" candidate (RouteCandidate.kind 'gap'): its own colour, the others keep theirs. */
+export const GAP_COLOR = '#2ec4a6';
 
 /** Colour of candidate i of n: 3 → orange/amber/blue, 2 → orange/blue, 1 → orange. */
 export function candidateColor(i: number, n: number): string {
   if (n <= 1) return ROUTE_COLORS[0];
   if (n === 2) return i === 0 ? ROUTE_COLORS[0] : ROUTE_COLORS[2];
   return ROUTE_COLORS[Math.min(i, 2)];
+}
+
+/**
+ * Colour per candidate: a `gap` candidate is GAP_COLOR and does not count for the others, so
+ * Most new / Balanced / Direct keep orange / amber / blue whether or not a "Straight across"
+ * row precedes them.
+ */
+export function candidateColors(candidates: ReadonlyArray<Pick<RouteCandidate, 'kind'>>): string[] {
+  const n = candidates.filter((c) => c.kind !== 'gap').length;
+  let j = 0;
+  return candidates.map((c) => (c.kind === 'gap' ? GAP_COLOR : candidateColor(j++, n)));
 }
 
 const SOURCE = 'unfog-routes';
@@ -69,12 +82,12 @@ export class RouteLayers {
   }
 
   set(candidates: RouteCandidate[], selected: number): void {
-    const n = candidates.length;
+    const colors = candidateColors(candidates);
     // Selected feature last so it draws on top of the alternatives within its own layers.
     const order = candidates.map((_, i) => i).sort((a, b) => Number(a === selected) - Number(b === selected));
     this.data = {
       type: 'FeatureCollection',
-      features: order.flatMap((i) => featuresOf(candidates[i], i, candidateColor(i, n), i === selected)),
+      features: order.flatMap((i) => featuresOf(candidates[i], i, colors[i], i === selected)),
     };
     this.push();
   }

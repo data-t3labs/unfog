@@ -54,6 +54,27 @@ export const TURN_PENALTY_M: Record<Mode, number> = { walk: 12, bike: 12, drive:
  */
 export const MIN_GAIN_M = 50;
 export const MIN_GAIN_FRAC = 0.01;
+/**
+ * "Straight across" (route-quality sweep 3, open item 2): when the street network goes round
+ * something the straight line crosses — Direct's street part longer than GAP_FACTOR × the
+ * crow-flies distance between the two snaps, that distance at least GAP_MIN_M — the sheet also
+ * gets the honest alternative: streets to an exit, a straight leg across, streets from the entry
+ * (`acrossCandidate`). Tottenville → a pin in New Jersey walked 72 km for 13.5 km (no walkway on
+ * the Outerbridge Crossing); Commercial Drive → Lonsdale Quay 12.3 km for 4.5 km (no SeaBus in the
+ * graph, 2.7×). No street grid makes a 2.5× detour on its own; ≥ 1 km keeps block-scale detours
+ * out. A straight metre weighs GAP_FACTOR walking metres in the choice of exit and entry.
+ */
+export const GAP_FACTOR = 2.5;
+export const GAP_MIN_M = 1000;
+/**
+ * Crossing points sampled along the straight line: one every GAP_SAMPLE_STEP_M, at most
+ * GAP_SAMPLES; then GAP_REFINE more along the winning straight leg (the shore path between two
+ * coarse samples — NYC pair 2 drew its leg from the pin across the Upper West Side to the Hudson
+ * because the Greenway fell between 400 m samples).
+ */
+export const GAP_SAMPLES = 22;
+export const GAP_SAMPLE_STEP_M = 200;
+export const GAP_REFINE = 8;
 
 /**
  * Search options for one λ of the sweep: the turn penalty applies to the penalised searches only,
@@ -476,6 +497,9 @@ export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteReque
       const { shortest, budgetM, feasible } = sw;
       const alts = selectAlternatives(shortest, feasible, max - 1);
       const candidates: RouteCandidate[] = [];
+      // The streets go round something the straight line crosses: the honest alternative first.
+      const across = isAbsurd(shortest.lengthM, origin, dest) ? acrossCandidate(graph, lookup, spatial, searcher, req, origin, dest, legs, shortest.lengthM) : null;
+      if (across) candidates.push(across);
       if (alts.length >= 1) candidates.push(toCandidate(graph, alts[0], 'Most new', mode, legs));
       for (let i = 1; i < alts.length; i++) candidates.push(toCandidate(graph, alts[i], 'Balanced', mode, legs));
       candidates.push(toCandidate(graph, shortest, 'Direct', mode, legs));
@@ -534,6 +558,116 @@ export function gapCandidate(graph: Graph, lookup: CellLookup, searcher: Searche
   if (dest && legs.end) parts.push(legs.end);
   if (parts.length === 0) parts.push({ kind: 'straight', coords: [req.from, req.to], lengthM: 0, newM: 0 });
   return assembleCandidate(parts, 'Direct', mode, 0, dismountM);
+}
+
+/** Whether a street path of `streetM` between two snaps is the absurd walk `acrossCandidate` answers. */
+export function isAbsurd(streetM: number, origin: Snap, dest: Snap): boolean {
+  const d = distanceM(origin.point[0], origin.point[1], dest.point[0], dest.point[1]);
+  return d >= GAP_MIN_M && streetM > GAP_FACTOR * d;
+}
+
+/**
+ * The "Straight across" candidate for two snaps the streets join only by going round: streets
+ * from the origin to an exit, a straight leg to an entry, streets from the entry to the
+ * destination. Exit and entry are chosen among the two snaps and the nearest connected street to
+ * each of ≤ GAP_SAMPLES points along the straight line (a sample in the water finds the shore
+ * street) to minimise streets + GAP_FACTOR × straight — a straight metre weighs what the trigger
+ * tolerates in walking, so the crossing is as short as walking to a better exit can make it. The
+ * origin–destination pair alone beats `directM` under the trigger, so a candidate always exists.
+ *
+ * Cost: one λ = 0 search per point and side, each bounded by what could still beat the best
+ * total (ellipse = best − crow-flies remainder); exits are searched nearest the origin first and
+ * entries nearest the destination first, pairs scored as soon as both sides are known, so the
+ * best drops to the shore crossing before the far-side searches run and those prune early.
+ *
+ * Novelty counts the walked parts only (the straight leg is not ground you explore): pctNew is
+ * new metres over the street + off-road length. The straight leg is timed at the mode's speed.
+ */
+export function acrossCandidate(graph: Graph, lookup: CellLookup, spatial: SpatialIndex, searcher: Searcher, req: RouteRequest, origin: Snap, dest: Snap, legs: EndLegs, directM: number): RouteCandidate | null {
+  const mode = req.mode, mask = MODE_BIT[mode], comp = graph.components(mask), want = comp[graph.arcFrom[origin.arc]];
+  const o = origin.point, d = dest.point;
+  const D = distanceM(o[0], o[1], d[0], d[1]);
+  if (D <= 0) return null;
+  const connected = (a: number) => comp[graph.arcFrom[a]] === want && canLeaveArc(graph, a, mask) && canEnterArc(graph, a, mask);
+  // Crossing points: the two snaps, then the nearest connected street to each sample (deduped by segment).
+  const pts: Snap[] = [origin, dest];
+  const seen = new Set<number>([graph.segmentId(origin.arc), graph.segmentId(dest.arc)]);
+  const sample = (p: LonLat, q: LonLat, n: number) => {
+    const reach = Math.min(SNAP_MAX_M, Math.max(GAP_SAMPLE_STEP_M, distanceM(p[0], p[1], q[0], q[1]) / 2));
+    for (let i = 1; i < n; i++) {
+      const t = i / n;
+      const s = spatial.nearestArc(p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, mask, reach, connected);
+      if (!s || seen.has(graph.segmentId(s.arc))) continue;
+      seen.add(graph.segmentId(s.arc));
+      pts.push(s);
+    }
+  };
+  // Position of a point along the origin → destination line (planar metres), for the search order.
+  const kx = 111_320 * Math.cos(o[1] * (Math.PI / 180)), ky = 110_574;
+  const ux = ((d[0] - o[0]) * kx) / D, uy = ((d[1] - o[1]) * ky) / D;
+  const along = (p: LonLat) => (p[0] - o[0]) * kx * ux + (p[1] - o[1]) * ky * uy;
+  const straight = (i: number, j: number) => distanceM(pts[i].point[0], pts[i].point[1], pts[j].point[0], pts[j].point[1]);
+  const zero: PathResult = { arcs: new Uint32Array(0), lengthM: 0, newM: 0, cost: 0, startFrac: 0, endFrac: 0, settled: 0 };
+  // Exit = origin / entry = destination cost nothing; exit = destination (or entry = origin) is Direct itself, never better.
+  const toExit: Array<PathResult | null | undefined> = [zero, null];
+  const fromEntry: Array<PathResult | null | undefined> = [null, zero];
+  const W = GAP_FACTOR;
+  let best = directM, bi = -1, bj = -1;
+  const consider = (i: number, j: number) => {
+    const a = toExit[i], b = fromEntry[j];
+    if (!a || !b) return;
+    const total = a.lengthM + W * straight(i, j) + b.lengthM;
+    if (total < best - 0.5) { best = total; bi = i; bj = j; }
+  };
+  const bounded = (bound: number): SearchOptions => ({ lambda: 0, mode, budget: bound, ellipseFactor: 1 });
+  /** Street distances for pts[from..]: exits nearest the origin first, entries nearest the destination first, pairs scored as they complete. */
+  const settle = (from: number) => {
+    const exits = pts.map((_, i) => i).filter((i) => i >= from).sort((i, j) => along(pts[i].point) - along(pts[j].point) || i - j);
+    const entries = [...exits].reverse();
+    for (let k = 0; k < exits.length; k++) {
+      const i = exits[k], j = entries[k];
+      if (toExit[i] === undefined) {
+        // Streets + straight + streets from here to the destination are at least the crow-flies remainder.
+        const bound = best - distanceM(pts[i].point[0], pts[i].point[1], d[0], d[1]);
+        toExit[i] = bound > 0 ? searcher.run(origin, pts[i], bounded(bound)) : null;
+        for (let jj = 0; jj < pts.length; jj++) consider(i, jj);
+      }
+      if (fromEntry[j] === undefined) {
+        const bound = best - distanceM(o[0], o[1], pts[j].point[0], pts[j].point[1]);
+        fromEntry[j] = bound > 0 ? searcher.run(pts[j], dest, bounded(bound)) : null;
+        for (let ii = 0; ii < pts.length; ii++) consider(ii, j);
+      }
+    }
+  };
+  consider(0, 1);
+  sample(o, d, Math.min(GAP_SAMPLES, Math.max(2, Math.round(D / GAP_SAMPLE_STEP_M))));
+  settle(0);
+  if (bi < 0) return null;
+  // Zoom in on the winning leg: the shore path may lie between two coarse samples.
+  const n0 = pts.length;
+  sample(pts[bi].point, pts[bj].point, GAP_REFINE);
+  settle(n0);
+  const a = toExit[bi]!, b = fromEntry[bj]!;
+  const parts: RoutePart[] = [];
+  let dismountM = 0;
+  if (legs.start) parts.push(legs.start);
+  if (a.arcs.length && a.lengthM > 0) {
+    parts.push(streetPart(graph, a));
+    dismountM += mode === 'bike' ? dismountMetres(graph, a) : 0;
+  }
+  const gapM = straight(bi, bj);
+  const gap: RoutePart = { kind: 'straight', coords: [pts[bi].point, pts[bj].point], lengthM: gapM, newM: 0 };
+  parts.push(gap);
+  if (b.arcs.length && b.lengthM > 0) {
+    parts.push(streetPart(graph, b));
+    dismountM += mode === 'bike' ? dismountMetres(graph, b) : 0;
+  }
+  if (legs.end) parts.push(legs.end);
+  const c = assembleCandidate(parts, 'Straight across', mode, 0, dismountM);
+  c.kind = 'gap';
+  const walkedM = c.lengthM - gapM;
+  c.pctNew = walkedM > 0 ? Math.round((100 * c.newM) / walkedM) : 0;
+  return c;
 }
 
 /** The straight line between the pins as one Direct candidate — "Route anyway" when no graph tile exists. */

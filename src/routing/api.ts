@@ -28,11 +28,15 @@ export interface RouteRequest {
 
 /**
  * A→B: "Most new" (newest distinct path within the budget), "Balanced" (best new metres per extra
- * metre), "Direct" (the shortest path, always present, always last). Loops: rank labels only —
- * loops are ranked by pctNew, the first is "Most new" and every other one "Balanced"; there is no
- * "Direct" loop. The app shows loops as "Loop A / B / C" and ignores these names in loop mode.
+ * metre), "Direct" (the shortest path, always present, always last). When the streets go round
+ * something the straight line crosses (Direct's street part > 2.5 × the crow-flies distance
+ * between the snaps, ≥ 1 km — a river without a walkway, an inlet the SeaBus crosses), a
+ * "Straight across" candidate comes FIRST (`kind: 'gap'`): streets to an exit, a `straight` leg
+ * across, streets from the entry. Loops: rank labels only — loops are ranked by pctNew, the first
+ * is "Most new" and every other one "Balanced"; there is no "Direct" loop. The app shows loops as
+ * "Loop A / B / C" and ignores these names in loop mode.
  */
-export type CandidateName = 'Most new' | 'Balanced' | 'Direct';
+export type CandidateName = 'Most new' | 'Balanced' | 'Direct' | 'Straight across';
 
 /**
  * A route is a sequence of parts: `street` = on the graph; `offroad` = the straight walk between
@@ -53,13 +57,19 @@ export interface RoutePart {
 
 export interface RouteCandidate {
   name: CandidateName;
+  /**
+   * `gap` = the "Straight across" alternative to a Direct that goes round: its middle `straight`
+   * part is not ground the route explores (newM 0, pctNew over the walked parts only) and not a
+   * walking route for a navigation app. Absent on ordinary candidates.
+   */
+  kind?: 'gap';
   /** Full geometry: every part concatenated, pin to pin. */
   coords: LonLat[];
   /** Metres, every part included. */
   lengthM: number;
-  /** Metres of never-visited ground along the route (Σ nov·len over every part). */
+  /** Metres of never-visited ground along the route (Σ nov·len over every part; 0 on a `gap` candidate's straight leg). */
   newM: number;
-  /** 0..100 */
+  /** 0..100 — share of the route on never-visited ground; for `kind: 'gap'` the share of the walked parts. */
   pctNew: number;
   lambda: number;
   /**

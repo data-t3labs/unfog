@@ -229,6 +229,8 @@ function parseMinutes(text: string): number {
 
 interface CandRow {
   name: string;
+  /** The raw sub-line, e.g. "5.3 km · 1 h 06 min · 2.8 km straight". */
+  st: string;
   lengthM: number;
   etaMin: number;
   pctNew: number;
@@ -248,6 +250,7 @@ async function readCands(page: Page): Promise<CandRow[]> {
   ).then((rows) =>
     rows.map((r) => ({
       name: r.name,
+      st: r.st,
       lengthM: parseDistanceM(r.st),
       etaMin: parseMinutes(r.st),
       pctNew: Number(/(\d+)% new/.exec(r.nu)?.[1] ?? NaN),
@@ -1205,6 +1208,52 @@ test.describe('Unfog real engines', () => {
     await shot(page, 'route-error');
     await sheet.getByRole('button', { name: 'Close' }).click();
     await expect(sheet).toBeHidden();
+
+    // Route-quality 4: an absurd walk the graph is right about — Commercial Drive → Lonsdale Quay on
+    // the Vancouver graph walks 12 km round Burrard Inlet (Second Narrows bridge; no SeaBus in the
+    // graph) for 4.5 km as the crow flies. The sheet also offers "Straight across" (first, selected):
+    // streets to the shore, a dashed straight leg over the inlet, streets on; the status line says
+    // so; Go draws the dashed leg; the Google Maps hand-off splits into the walking parts either side.
+    await openRoute(page, { name: 'Lonsdale Quay', locality: 'North Vancouver', lonlat: [-123.083, 49.31], origin: [-123.07, 49.27] });
+    const rows = await waitRouted(page);
+    test.info().annotations.push({ type: 'lonsdale', description: rows.map((r) => `${r.name}: ${r.st}`).join(' | ') });
+    expect(rows[0].name).toBe('Straight across');
+    expect(rows[0].st).toMatch(/\d[\d.,]*[\s ]km[\s ]straight$/);
+    expect(rows[rows.length - 1].name).toBe('Direct');
+    expect(rows.filter((r) => r.name === 'Straight across')).toHaveLength(1);
+    expect(rows[0].lengthM).toBeLessThan(rows[rows.length - 1].lengthM / 2); // ≈ 5 km vs ≈ 12 km
+    await expect(sheet.locator('.cand.on .name')).toHaveText('Straight across');
+    await expect(sheet.locator('.cand.gap')).toHaveCount(1);
+    await expect(status).toContainText(/Straight across crosses \d[\d.,]* km the street map has no way over \(dashed\); the walk round is \d+ km\./);
+    await expect(status.locator('.error')).toHaveCount(0);
+    // Hand-off: the walking parts either side of the water, and a note that the straight leg is not a walking route.
+    const handoff = sheet.locator('.handoff');
+    await expect(handoff.locator('a.gmaps, a.part')).toHaveCount(2);
+    await expect(handoff.locator('.note')).toHaveText(/Google Maps: 2 parts on streets; the \d[\d.,]* km straight leg is not a walking route\./);
+    const hrefs = await handoff.locator('a.gmaps, a.part').evaluateAll((as) => as.map((a) => (a as HTMLAnchorElement).href));
+    const dest1 = new URL(hrefs[0]).searchParams.get('destination'), origin2 = new URL(hrefs[1]).searchParams.get('origin');
+    expect(dest1).not.toBe(origin2); // the parts do not chain: the water lies between them
+    // The sheet fits every candidate: the dashed straight leg is rendered (fb1 spec 3a checks the same property on the two-component gap).
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { __unfog: { ctx: { map: { map: { querySourceFeatures(s: string): Array<{ properties: { dash: boolean } }> } } } } }).__unfog.ctx.map.map.querySourceFeatures('unfog-routes').filter((f) => f.properties.dash).length))
+      .toBeGreaterThan(0);
+    await idle(page);
+    await page.screenshot({ path: path.join(shots, 'q4-gap.png'), fullPage: false });
+    // Go: the follow bar names it with the straight distance; only the chosen route is drawn, its straight leg dashed.
+    // Read the source's data, not the rendered tiles: follow mode flies to the (NYC) test position, out of view.
+    await sheet.getByRole('button', { name: 'Go' }).click();
+    const bar = page.locator('.follow-bar');
+    await expect(bar).toBeVisible();
+    await expect(bar).toContainText(/Straight across · \d[\d.,]* km · .+ min · \d[\d.,]*[\s ]km[\s ]straight/);
+    const drawn = () =>
+      page.evaluate(() => {
+        const src = (window as unknown as { __unfog: { ctx: { map: { map: { getSource(id: string): { serialize(): { data: { features: Array<{ properties: { dash: boolean; i: number } }> } } } } } } } }).__unfog.ctx.map.map.getSource('unfog-routes');
+        const f = src.serialize().data.features;
+        return { dashed: f.filter((x) => x.properties.dash).length, solid: f.filter((x) => !x.properties.dash).length, others: f.filter((x) => x.properties.i !== 0).length };
+      });
+    await expect.poll(async () => { const d = await drawn(); return d.others === 0 && d.dashed >= 1 && d.solid >= 1; }).toBe(true);
+    await bar.getByRole('button', { name: 'End' }).click();
+    await expect(bar).toBeHidden();
     expect(b.errors).toEqual([]);
   });
 

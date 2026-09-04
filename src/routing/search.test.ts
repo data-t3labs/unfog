@@ -7,7 +7,7 @@ import { Graph } from './graph';
 import { MapCellLookup } from './cells';
 import { NoveltyScorer } from './novelty';
 import { Searcher, TURN_MIN_DEG, hasImmediateUTurn } from './search';
-import { LAMBDA_SWEEP, MIN_GAIN_M, TURN_PENALTY_M, etaMinutes, findCandidates, selectAlternatives, snapPoint, straightLineResult, sweep, type ScoredPath } from './candidates';
+import { LAMBDA_SWEEP, MIN_GAIN_M, TURN_PENALTY_M, etaMinutes, findCandidates, isAbsurd, selectAlternatives, snapPoint, straightLineResult, sweep, type ScoredPath } from './candidates';
 import { SpatialIndex } from './spatial';
 import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, cyclicComponents, findLoops, loopCoords, loopPct, offsetPoint, rankLoops, routeLoop } from './loop';
 
@@ -612,6 +612,84 @@ describe('off-road legs and straight gaps', () => {
     const back = findCandidates(g, lookup, { from: to, to: from, mode: 'walk', detour: 0.25 }, { spatial: sp, scorer: sc, searcher: se });
     expect(back.candidates[0].parts!.map((p) => p.kind)).toEqual(['street', 'straight', 'street']);
     expect(back.candidates[0].lengthM).toBeCloseTo(4600, 0);
+  });
+
+  // Route-quality sweep 3, open item 2: Tottenville → a pin in New Jersey walked 72 km for 13.5 km
+  // (no walkway on the Outerbridge), Commercial Drive → Lonsdale Quay 12.3 km for 4.5 km (no SeaBus
+  // in the graph). The graph is right and the walk is absurd; the sheet now also offers the honest
+  // alternative. No test had a network that joins two banks only by a distant bridge.
+  it('a river with one far bridge: "Straight across" comes first — streets to the bank, a straight leg, streets on — with novelty on the walked parts only; a near bridge gets no such candidate', () => {
+    // West bank: a 16 × 16 lattice (100 m). East bank: another, 1,000 m of river east of column 15,
+    // built as extra ways (node ids 100000+). One bridge joins them at the given row.
+    const size = 16, spacingM = 100;
+    const kx0 = kx(), ky = 110_574;
+    const build = (bridgeRow: number) => {
+      const west = makeLattice({ size, spacingM });
+      const eastOrigin: [number, number] = [west.at(size - 1, 0)[0] + 1000 / kx0, west.at(size - 1, 0)[1]];
+      const east = makeLattice({ size, spacingM, origin: eastOrigin });
+      const eid = (c: number, r: number) => 100_000 + r * size + c;
+      const ways: TestWay[] = [];
+      for (let r = 0; r < size; r++) ways.push({ id: 0, refs: Array.from({ length: size }, (_, c) => eid(c, r)), coords: Array.from({ length: size }, (_, c) => east.at(c, r)), fwd: ALL_MODES, rev: ALL_MODES });
+      for (let c = 0; c < size; c++) ways.push({ id: 0, refs: Array.from({ length: size }, (_, r) => eid(c, r)), coords: Array.from({ length: size }, (_, r) => east.at(c, r)), fwd: ALL_MODES, rev: ALL_MODES });
+      ways.push({ id: 0, refs: [west.id(size - 1, bridgeRow), eid(0, bridgeRow)], coords: [west.at(size - 1, bridgeRow), east.at(0, bridgeRow)], fwd: ALL_MODES, rev: ALL_MODES });
+      const both = makeLattice({ size, spacingM, extraWays: ways });
+      const g = new Graph([...both.tiles.values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+      expect(g.nodeCount).toBe(2 * size * size);
+      expect(g.components(ArcFlag.WALK)[g.nodeCount - 1]).toBe(g.components(ArcFlag.WALK)[0]); // one component: the bridge joins the banks
+      // Row 0 of the west bank is visited (3 cells wide), nothing else (every node of the row: cellsAlong does not interpolate legs > 500 m).
+      const seen = new MapCellLookup();
+      for (const [cx, cy] of cellsAlong(Array.from({ length: size }, (_, c) => west.at(c, 0)), { stepM: 3 })) seen.mark(cx, cy, 1, 1);
+      const sp = new SpatialIndex(g), sc = new NoveltyScorer(g, seen), se = new Searcher(g, sc);
+      return { g, seen, sp, sc, se, from: west.at(size - 2, 0), to: east.at(1, 0), bank: west.at(size - 1, 0), far: east.at(0, 0) };
+    };
+    // Far bridge (row 15): Direct = 100 + 1,500 + 1,000 + 1,500 + 100 = 4,200 m for 1,200 m as the crow flies (3.5×).
+    const far = build(size - 1);
+    const res = findCandidates(far.g, far.seen, { from: far.from, to: far.to, mode: 'walk', detour: 0.25 }, { spatial: far.sp, scorer: far.sc, searcher: far.se });
+    const direct = res.candidates[res.candidates.length - 1];
+    expect(direct.name).toBe('Direct');
+    expect(direct.lengthM).toBeCloseTo(4200, 0);
+    expect(res.shortestM).toBe(direct.lengthM); // the budget and the title still follow Direct
+    const across = res.candidates[0];
+    expect(across.name).toBe('Straight across');
+    expect(across.kind).toBe('gap');
+    expect(res.candidates.filter((c) => c.kind === 'gap')).toHaveLength(1);
+    // 100 m to the bank, 1,000 m straight across the river, 100 m on: the exits are the banks, not the pins.
+    expect(across.parts!.map((p) => p.kind)).toEqual(['street', 'straight', 'street']);
+    expect(across.parts![0].lengthM).toBeCloseTo(100, 0);
+    expect(across.parts![1].lengthM).toBeCloseTo(1000, 0);
+    expect(across.parts![1].coords[0][0]).toBeCloseTo(far.bank[0], 7);
+    expect(across.parts![1].coords[1][0]).toBeCloseTo(far.far[0], 7);
+    expect(across.parts![2].lengthM).toBeCloseTo(100, 0);
+    expect(across.lengthM).toBeCloseTo(1200, 0);
+    expect(across.coords[0][0]).toBeCloseTo(far.from[0], 7);
+    expect(across.coords[across.coords.length - 1][0]).toBeCloseTo(far.to[0], 7);
+    expect(across.lambda).toBe(0);
+    // Novelty on the walked parts only: the west 100 m is visited, the east 100 m new, the river counts for nothing.
+    expect(across.parts![1].newM).toBe(0);
+    expect(across.newM).toBeGreaterThanOrEqual(80);
+    expect(across.newM).toBeLessThanOrEqual(110);
+    expect(across.pctNew).toBeGreaterThanOrEqual(40); // ≈ 50 % of the 200 m walked, not 8 % of 1,200 m
+    expect(across.pctNew).toBeLessThanOrEqual(55);
+    // The straight leg is walked, not teleported: 1.2 km at 4.8 km/h.
+    expect(across.etaMin).toBe(etaMinutes(200, 'walk', 0, 0, 1000));
+    expect(across.etaMin).toBe(15);
+    // Both directions.
+    const back = findCandidates(far.g, far.seen, { from: far.to, to: far.from, mode: 'walk', detour: 0.25 }, { spatial: far.sp, scorer: far.sc, searcher: far.se });
+    expect(back.candidates[0].kind).toBe('gap');
+    expect(back.candidates[0].parts!.map((p) => p.kind)).toEqual(['street', 'straight', 'street']);
+    expect(back.candidates[0].lengthM).toBeCloseTo(1200, 0);
+    expect(back.candidates[back.candidates.length - 1].name).toBe('Direct');
+    // Near bridge (row 1): Direct = 100 + 100 + 1,000 + 100 + 100 = 1,400 m (1.17×) — the usual candidates, nothing across.
+    const near = build(1);
+    const plain = findCandidates(near.g, near.seen, { from: near.from, to: near.to, mode: 'walk', detour: 0.25 }, { spatial: near.sp, scorer: near.sc, searcher: near.se });
+    expect(plain.candidates.some((c) => c.kind === 'gap' || c.name === 'Straight across')).toBe(false);
+    expect(plain.candidates[plain.candidates.length - 1].name).toBe('Direct');
+    expect(plain.candidates[plain.candidates.length - 1].lengthM).toBeCloseTo(1400, 0);
+    for (const c of plain.candidates) expect(c.parts!.every((p) => p.kind === 'street')).toBe(true);
+    // Short trips never qualify, however round the streets go: a 2,000 m × … no — the crow-flies floor is 1 km.
+    expect(isAbsurd(4000, { arc: 0, t: 0, point: far.from, distM: 0 }, { arc: 0, t: 0, point: [far.from[0] + 900 / kx0, far.from[1]], distM: 0 })).toBe(false);
+    expect(isAbsurd(4000, { arc: 0, t: 0, point: far.from, distM: 0 }, { arc: 0, t: 0, point: [far.from[0] + 1100 / kx0, far.from[1]], distM: 0 })).toBe(true);
+    expect(isAbsurd(2700, { arc: 0, t: 0, point: far.from, distM: 0 }, { arc: 0, t: 0, point: [far.from[0] + 1100 / kx0, far.from[1]], distM: 0 })).toBe(false);
   });
 
   it('an end with no street within 5 km is joined to the network by a straight part; no coverage at all is the pure straight line', () => {

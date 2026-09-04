@@ -119,6 +119,23 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   distance gives the shortest walk + street path to the other end (the nearest as the crow flies may be across a river). A loop
   start whose nearest road is an island without a cycle moves to the nearest cyclic street within 300 m. Sweep tool:
   `tools/route-sweep/` (single mode, 3 regions, named cases, loop seeds, flags); results under the task artifact route-quality-3/.
+- **"Straight across" (route-quality 4, 2026-09-03):** when Direct's street part is > 2.5× the crow-flies distance between the two
+  snaps and that distance is ≥ 1 km (Tottenville → NJ: 72 km for 13.5 km, no walkway on the Outerbridge; Commercial Drive →
+  Lonsdale Quay: 12.3 km for 4.5 km, no SeaBus in the graph; a fifth of the NYC sweep's box-uniform pairs — Hudson / East River
+  crossings), `acrossCandidate` adds a first candidate `Straight across` (`RouteCandidate.kind: 'gap'`): streets to an exit, a
+  `straight` leg, streets from an entry. Exit/entry are chosen among the two snaps plus the nearest connected street to each of
+  ≤ 22 samples (every 200 m) along the straight line, then 8 more along the winning leg, minimising streets + 2.5 × straight
+  (a straight metre weighs what the trigger tolerates in walking, so the leg is as short as walking to a better exit can make it
+  and the pin-to-pin line always beats Direct); every search is a λ=0 A* bounded by best − crow-flies remainder, exits searched
+  nearest-the-origin-first and entries nearest-the-destination-first (≤ 32 points, 2–30 ms on the M2 where the sweep's own
+  searches take 70–190). Novelty on the walked parts only (pctNew = new / (length − straight)); the straight leg is timed at
+  walking pace. Direct stays last (and the budget/title still follow it); Most new / Balanced keep their slots; nothing changes
+  for routes under the trigger, for two-component gaps or for loops. Sheet: teal row "Straight across · 5.3 km · 66 min ·
+  2.8 km straight", status "Straight across crosses 2.8 km the street map has no way over (dashed); the walk round is 12 km.";
+  Google Maps hand-off cuts at straight legs (`handoff.ts splitCandidate`)
+  and says the straight leg is not a walking route. Trade-off, documented in the route-quality-4 report: with the weight at 2.5 an
+  exit whose walk costs more than 2.5× the straight it saves is not taken (NYC pair 2: the leg starts 250 m from the pin and
+  crosses Riverside Park because the Greenway there is a 2 km walk away in the graph).
 
 ### 2.4 Graph build (`tools/build-graph`, `src/routing/graph-build.ts`)
 - Inputs: OSM PBF (BBBike extracts: `NewYork.osm.pbf` 153 MB bbox −74.36,40.48,−73.67,40.96; `Vancouver.osm.pbf` 65 MB bbox

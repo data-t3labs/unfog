@@ -17,10 +17,10 @@
 import type { LonLat, RouteCandidate, RouteResult } from '../routing/api';
 import type { Mode } from '../routing/graph-format';
 import { distanceM } from '../grid/cell';
-import { candidateColor } from '../map/routes';
+import { candidateColors } from '../map/routes';
 import type { AppContext, Destination } from './context';
 import { fmtDistance, fmtDistanceTidy, fmtMinutes } from './format';
-import { DEFAULT_SPLIT, appleMapsUrl, googleMapsUrl, partLabel, routeGpxFileName, routeToGpx, splitIntoParts } from './handoff';
+import { DEFAULT_SPLIT, appleMapsUrl, googleMapsUrl, partLabel, routeGpxFileName, routeToGpx, splitCandidate } from './handoff';
 import { icons } from './icons';
 import { readJSON, writeJSON } from './settings';
 import { shareOrDownload } from './share';
@@ -127,6 +127,10 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   /** Loop target as a label: "3 km", "4.5 km". */
   const target = () => fmtDistanceTidy(prefs.loopKm * 1000, units());
   const candName = (c: RouteCandidate, i: number) => (kind === 'loop' ? `Loop ${LOOP_LABELS[i] ?? i + 1}` : c.name);
+  /** Metres of `straight` parts (the crow-flies legs the street map has no way over). */
+  const straightM = (c: RouteCandidate) => (c.parts ?? []).filter((p) => p.kind === 'straight').reduce((s, p) => s + p.lengthM, 0);
+  /** "4.9 km · 61 min", plus "· 2.8 km straight" on a "Straight across" candidate (non-breaking, so the row wraps before it, not inside it). */
+  const candStats = (c: RouteCandidate) => `${km(c.lengthM)} · ${fmtMinutes(c.etaMin)}${c.kind === 'gap' ? ` · ${km(straightM(c)).replace(' ', ' ')} straight` : ''}`;
 
   function savePrefs(): void {
     writeJSON(ROUTE_PREFS_KEY, prefs);
@@ -192,12 +196,13 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
       return;
     }
     const n = result.candidates.length;
+    const colors = candidateColors(result.candidates);
     result.candidates.forEach((c, i) => {
       const row = el(
         'button',
-        { class: `cand ${i === selected ? 'on' : ''}`, type: 'button', 'aria-pressed': String(i === selected), onclick: () => select(i) },
-        el('div', { class: 'sw', style: `background:${candidateColor(i, n)}` }),
-        el('div', { class: 't' }, el('div', { class: 'name', text: candName(c, i) }), el('div', { class: 'st', text: `${km(c.lengthM)} · ${fmtMinutes(c.etaMin)}` })),
+        { class: `cand ${i === selected ? 'on' : ''}${c.kind === 'gap' ? ' gap' : ''}`, type: 'button', 'aria-pressed': String(i === selected), onclick: () => select(i) },
+        el('div', { class: 'sw', style: `background:${colors[i]}` }),
+        el('div', { class: 't' }, el('div', { class: 'name', text: candName(c, i) }), el('div', { class: 'st', text: candStats(c) })),
         el('div', { class: 'new' }, `${Math.round(c.pctNew)}% new`, el('small', { text: `${km(c.newM)} unexplored` })),
       );
       cands.appendChild(row);
@@ -225,8 +230,12 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     }
     handoff.hidden = false;
     const fromDevice = !fromMapCentre();
-    const parts = splitIntoParts(c.coords, DEFAULT_SPLIT);
+    // A straight leg (across the water, a void the street map has no way over) is not a walking
+    // route: the parts sit either side of it and the note says so.
+    const parts = splitCandidate(c, DEFAULT_SPLIT);
     const n = parts.length;
+    const walkable = (c.parts ?? []).some((p) => p.kind !== 'straight');
+    const gapM = walkable ? straightM(c) : 0;
     const link = (href: string, cls: string, attrs: Record<string, string>, ...children: Array<Node | string | null>) => el('a', { class: `btn small ${cls}`, href, target: '_blank', rel: 'noopener', ...attrs }, ...children);
     // One "Google Maps" button, or one per part — "1 of 2 · 5.7 km", "2 of 2 · 7.2 km" (two to a line; the
     // arrow and the note name the app) — with the full words in the accessible name.
@@ -241,8 +250,10 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
         ? link(appleMapsUrl(dest.lonlat, fromDevice ? undefined : origin ?? undefined), 'amaps', { title: 'Walking directions to the destination only — Apple Maps takes no checkpoints' }, 'Apple Maps')
         : null;
     const gpx = el('button', { class: 'btn small gpx', type: 'button', onclick: () => void saveGpx(c) }, 'Save GPX');
+    const note = gapM > 0 ? `Google Maps: ${n} part${n === 1 ? '' : 's'} on streets; the ${km(gapM)} straight leg is not a walking route.` : n > 1 ? `Google Maps: ${n} parts (9 checkpoints per trip).` : '';
     if (n === 1) handoff.appendChild(el('div', { class: 'row' }, google[0], apple, gpx));
-    else handoff.append(el('div', { class: 'row' }, ...google), el('div', { class: 'row' }, apple, gpx), el('p', { class: 'muted small note', text: `Google Maps: ${n} parts (9 checkpoints per trip).` }));
+    else handoff.append(el('div', { class: 'row' }, ...google), el('div', { class: 'row' }, apple, gpx));
+    if (note) handoff.appendChild(el('p', { class: 'muted small note', text: note }));
   }
 
   /** The route as a GPX track through the share sheet (or a download), named after the place / loop. */
@@ -374,26 +385,34 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   }
 
   /**
-   * The off-path / straight parts every candidate shares (the snaps are the same for all): "Starts
-   * with 240 m off-path to the nearest street", "ends with …", "1.4 km straight across a gap the
-   * street map cannot join", or the whole trip as the crow flies. Short off-path legs (< 50 m: a
-   * sidewalk offset, a driveway) are not worth a line.
+   * The off-path / straight parts every candidate shares (the snaps are the same for all, so
+   * Direct — always last — is the reference): "Starts with 240 m off-path to the nearest street",
+   * "ends with …", "1.4 km straight across a gap the street map cannot join", or the whole trip
+   * as the crow flies. Short off-path legs (< 50 m: a sidewalk offset, a driveway) are not worth
+   * a line. A "Straight across" candidate (its own straight leg, not shared) gets a second
+   * sentence that says what it is and what the walk round costs.
    */
   function describeLegs(res: RouteResult): string {
-    const parts = res.candidates[0]?.parts;
+    const direct = res.candidates[res.candidates.length - 1];
+    const parts = direct?.parts;
     if (!parts?.length) return '';
     const streetM = parts.filter((p) => p.kind === 'street').reduce((s, p) => s + p.lengthM, 0);
-    const straight = parts.filter((p) => p.kind === 'straight');
-    const straightM = straight.reduce((s, p) => s + p.lengthM, 0);
-    if (straightM > 0 && streetM === 0) return `No street data between these points — ${km(straightM)} as the crow flies. Fog clears wherever you actually go.`;
+    const sharedStraightM = straightM(direct);
+    if (sharedStraightM > 0 && streetM === 0) return `No street data between these points — ${km(sharedStraightM)} as the crow flies. Fog clears wherever you actually go.`;
     const bits: string[] = [];
     const first = parts[0], last = parts[parts.length - 1];
     if (first.kind === 'offroad' && first.lengthM >= 50) bits.push(`starts with ${km(first.lengthM)} off-path to the nearest street`);
     if (last.kind === 'offroad' && last.lengthM >= 50) bits.push(`ends with ${km(last.lengthM)} off-path`);
-    if (straightM > 0) bits.push(`${km(straightM)} straight across a gap the street map cannot join (dashed)`);
-    if (!bits.length) return '';
-    const s = bits.join(', ');
-    return `${s.charAt(0).toUpperCase()}${s.slice(1)}.`;
+    if (sharedStraightM > 0) bits.push(`${km(sharedStraightM)} straight across a gap the street map cannot join (dashed)`);
+    const lines: string[] = [];
+    if (bits.length) {
+      const s = bits.join(', ');
+      lines.push(`${s.charAt(0).toUpperCase()}${s.slice(1)}.`);
+    }
+    const across = res.candidates.find((c) => c.kind === 'gap');
+    // Short: the status line sits above the candidate list, which the sheet's 55 % cap already squeezes.
+    if (across) lines.push(`Straight across crosses ${km(straightM(across))} the street map has no way over (dashed); the walk round is ${km(direct.lengthM)}.`);
+    return lines.join(' ');
   }
 
   /**
@@ -508,10 +527,10 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     following = true;
     sheet.hidden = true;
     bar.hidden = false;
-    barSwatch.style.background = candidateColor(selected, result.candidates.length);
+    barSwatch.style.background = candidateColors(result.candidates)[selected];
     clear(barText);
     barText.append(
-      el('div', { class: 'name', text: `${candName(c, selected)} · ${km(c.lengthM)} · ${fmtMinutes(c.etaMin)}` }),
+      el('div', { class: 'name', text: `${candName(c, selected)} · ${candStats(c)}` }),
       el('div', { class: 'st', text: `${Math.round(c.pctNew)}% new · ${kind === 'loop' ? 'round trip from here' : dest?.name ?? ''}` }),
     );
     map.showRoutes([c], 0);
