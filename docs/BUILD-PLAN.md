@@ -114,6 +114,12 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
 - Loop mode ("Explore from here", shipped 2026-09-02): heading fan of 8, 2 via-points on a circle of radius ~0.22·T, own-route arcs ×5, ±25 % length window, keep 3 best; UI chips 2/3/5/8 km + 1–15 km slider.
 - Budget: < 2 s for a 10 km city route on an iPhone; graphs never materialise per-edge objects.
 
+- Route joins (sweep round 3, 2026-09-03): a cut within 1 cm of a shape point is that point (no duplicate vertices or a→b→a at
+  the off-road join). A pin > 300 m off the network snaps to whichever of the 3 nearest connected streets within 1.5× the nearest
+  distance gives the shortest walk + street path to the other end (the nearest as the crow flies may be across a river). A loop
+  start whose nearest road is an island without a cycle moves to the nearest cyclic street within 300 m. Sweep tool:
+  `tools/route-sweep/` (single mode, 3 regions, named cases, loop seeds, flags); results under the task artifact route-quality-3/.
+
 ### 2.4 Graph build (`tools/build-graph`, `src/routing/graph-build.ts`)
 - Inputs: OSM PBF (BBBike extracts: `NewYork.osm.pbf` 153 MB bbox −74.36,40.48,−73.67,40.96; `Vancouver.osm.pbf` 65 MB bbox
   −123.31,49.00,−122.67,49.42) via a pure-JS PBF reader (`pbf` + hand-written decoders for BlobHeader/Blob/PrimitiveBlock/DenseNodes/Way,

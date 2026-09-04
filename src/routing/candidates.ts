@@ -143,6 +143,60 @@ export function sameComponent(graph: Graph, a: Snap, b: Snap, mode: Mode): boole
   return comp[graph.arcFrom[a.arc]] === comp[graph.arcFrom[b.arc]];
 }
 
+/**
+ * A pin further than this from the network walks to the nearby street that gets it there soonest
+ * (`chooseSnaps`); nearer, the nearest street is the obvious one and is kept.
+ */
+export const SNAP_CHOICE_MIN_M = RESNAP_MAX_M;
+/** Streets considered for a far-off pin: the nearest SNAP_CHOICE_K within SNAP_CHOICE_FACTOR × the nearest distance. */
+export const SNAP_CHOICE_K = 3;
+export const SNAP_CHOICE_FACTOR = 1.5;
+
+/** The `k` nearest distinct usable segments within `maxM` that `accept` allows, nearest first. */
+export function nearestArcs(spatial: SpatialIndex, p: LonLat, mask: number, maxM: number, k: number, accept: (arc: number) => boolean): Snap[] {
+  const graph = spatial.graph, seen = new Set<number>(), out: Snap[] = [];
+  for (let i = 0; i < k; i++) {
+    const s = spatial.nearestArc(p[0], p[1], mask, maxM, (a) => !seen.has(graph.segmentId(a)) && accept(a));
+    if (!s) break;
+    seen.add(graph.segmentId(s.arc));
+    out.push(s);
+  }
+  return out;
+}
+
+/**
+ * An end more than SNAP_CHOICE_MIN_M off the network is re-snapped to whichever of the nearby
+ * streets (the SNAP_CHOICE_K nearest connected arcs of the other end's component within
+ * SNAP_CHOICE_FACTOR × the nearest distance) gives the shortest leg + street path to the other
+ * end — the nearest street as the crow flies may lie across a river. Route-quality sweep 3: a pin
+ * 2 km north of the NYC region edge snapped to the Palisades across the Hudson (2.7 km) instead of
+ * the Yonkers road (3.0 km) and Direct walked 26 km — over the George Washington Bridge and back
+ * up New Jersey — for a 12.6 km trip. The origin is chosen against the destination, then the
+ * destination against the chosen origin; an end on the street (≤ SNAP_CHOICE_MIN_M) is never moved.
+ */
+export function chooseSnaps(spatial: SpatialIndex, searcher: Searcher, from: LonLat, to: LonLat, mode: Mode, origin: Snap | null, dest: Snap | null): [origin: Snap | null, dest: Snap | null] {
+  if (!origin || !dest) return [origin, dest];
+  const graph = spatial.graph, mask = MODE_BIT[mode], comp = graph.components(mask);
+  const noPenalty = searchOptions(mode, 0);
+  const pick = (p: LonLat, snap: Snap, which: 'origin' | 'destination', other: Snap): Snap => {
+    if (snap.distM <= SNAP_CHOICE_MIN_M) return snap;
+    const want = comp[graph.arcFrom[other.arc]];
+    const connected = which === 'origin' ? (a: number) => canLeaveArc(graph, a, mask) : (a: number) => canEnterArc(graph, a, mask);
+    const alts = nearestArcs(spatial, p, mask, Math.min(SNAP_MAX_M, snap.distM * SNAP_CHOICE_FACTOR), SNAP_CHOICE_K, (a) => comp[graph.arcFrom[a]] === want && connected(a));
+    let best = snap, bestTotal = Infinity;
+    for (const s of alts) {
+      const path = which === 'origin' ? searcher.run(s, other, noPenalty) : searcher.run(other, s, noPenalty);
+      if (!path) continue;
+      const total = s.distM + path.lengthM;
+      if (total < bestTotal - 0.5) { best = s; bestTotal = total; }
+    }
+    return best;
+  };
+  const o = pick(from, origin, 'origin', dest);
+  const d = pick(to, dest, 'destination', o);
+  return [o, d];
+}
+
 /** A straight part between two points, scored like an arc; null when shorter than OFFROAD_MIN_M. */
 export function straightPart(a: LonLat, b: LonLat, kind: 'offroad' | 'straight', lookup: CellLookup): RoutePart | null {
   const lengthM = distanceM(a[0], a[1], b[0], b[1]);
@@ -193,12 +247,23 @@ export function sharedFraction(a: Set<number>, b: Set<number>): number {
   return inter / small.size;
 }
 
+/**
+ * Two points closer than this (degrees, ≈ 0.1 mm) are the same point: a snap point, a trimmed
+ * cut point and a shape vertex meet at a route's joins within floating-point noise, never exactly.
+ */
+export const SAME_POINT_DEG = 1e-9;
+export function samePoint(a: LonLat, b: LonLat): boolean {
+  return Math.abs(a[0] - b[0]) < SAME_POINT_DEG && Math.abs(a[1] - b[1]) < SAME_POINT_DEG;
+}
+/** A cut within this of a shape point IS that point (a pin snapped onto a vertex lands there within noise). */
+const TRIM_EPS_M = 0.01;
+
 /** Coordinates of a path, with the partial first/last arcs trimmed to the snap points. */
 export function pathCoords(graph: Graph, path: PathResult): LonLat[] {
   const out: LonLat[] = [];
   const push = (p: LonLat) => {
     const last = out[out.length - 1];
-    if (last && last[0] === p[0] && last[1] === p[1]) return;
+    if (last && samePoint(last, p)) return;
     out.push(p);
   };
   const n = path.arcs.length;
@@ -211,7 +276,12 @@ export function pathCoords(graph: Graph, path: PathResult): LonLat[] {
   return out;
 }
 
-/** Part of a polyline between two length fractions (0..1), interpolating the cut points. */
+/**
+ * Part of a polyline between two length fractions (0..1), interpolating the cut points. A cut
+ * within TRIM_EPS_M of a shape point is that point, and the point is not emitted a second time —
+ * a pin that snapped onto a vertex cuts the arc there within floating-point noise, and the route
+ * used to carry the cut point AND the vertex: two zero-length steps and an a→b→a at the join.
+ */
 export function trimGeometry(geom: LonLat[], from: number, to: number): LonLat[] {
   if (from <= 0 && to >= 1) return geom;
   if (geom.length < 2) return geom;
@@ -228,12 +298,14 @@ export function trimGeometry(geom: LonLat[], from: number, to: number): LonLat[]
   const at = (d: number): LonLat => {
     let i = 1;
     while (i < cum.length - 1 && cum[i] < d) i++;
+    if (Math.abs(cum[i] - d) <= TRIM_EPS_M) return geom[i];
+    if (Math.abs(cum[i - 1] - d) <= TRIM_EPS_M) return geom[i - 1];
     const seg = cum[i] - cum[i - 1];
     const u = seg > 0 ? Math.max(0, Math.min(1, (d - cum[i - 1]) / seg)) : 0;
     return [geom[i - 1][0] + (geom[i][0] - geom[i - 1][0]) * u, geom[i - 1][1] + (geom[i][1] - geom[i - 1][1]) * u];
   };
   const out: LonLat[] = [at(lo)];
-  for (let i = 0; i < geom.length; i++) if (cum[i] > lo && cum[i] < hi) out.push(geom[i]);
+  for (let i = 0; i < geom.length; i++) if (cum[i] > lo + TRIM_EPS_M && cum[i] < hi - TRIM_EPS_M) out.push(geom[i]);
   out.push(at(hi));
   return from <= to ? out : out.reverse();
 }
@@ -281,7 +353,7 @@ export function assembleCandidate(parts: RoutePart[], name: RouteCandidate['name
   for (const p of parts) {
     for (const c of p.coords) {
       const last = coords[coords.length - 1];
-      if (last && last[0] === c[0] && last[1] === c[1]) continue;
+      if (last && samePoint(last, c)) continue;
       coords.push(c);
     }
     lengthM += p.lengthM;
@@ -384,7 +456,7 @@ export function findCandidates(graph: Graph, lookup: CellLookup, req: RouteReque
   const scorer = ctx.scorer ?? new NoveltyScorer(graph, lookup);
   const searcher = ctx.searcher ?? new Searcher(graph, scorer);
   const mode = req.mode;
-  const [origin, dest] = snapPair(spatial, req.from, req.to, mode);
+  const [origin, dest] = chooseSnaps(spatial, searcher, req.from, req.to, mode, ...snapPair(spatial, req.from, req.to, mode));
   const legs: EndLegs = {
     start: origin ? straightPart(req.from, origin.point, 'offroad', lookup) : null,
     end: dest ? straightPart(dest.point, req.to, 'offroad', lookup) : null,

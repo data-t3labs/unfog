@@ -321,5 +321,15 @@ describe('trimGeometry', () => {
     expect(part[1]).toEqual(B);
     expect(part[2][1]).toBeCloseTo(B[1] - DLAT * 0.5, 6);
     expect(trimGeometry(geom, 0, 1)).toBe(geom);
+    // Route-quality sweep 3: a pin that snaps onto a shape point cuts the arc within floating-point
+    // noise of that vertex; the interpolated cut point AND the vertex were both emitted — two
+    // zero-length steps and an a→b→a in the route (nyc #37, vancouver #4 / #25, saltspring #2 / #505).
+    // B sits at exactly half the length: a cut a hair below, at, or above it is the vertex itself.
+    for (const from of [0.5 - 1e-12, 0.5, 0.5 + 1e-12]) {
+      const cut = trimGeometry(geom, from, 1);
+      expect(cut.map((p) => [p[0].toFixed(9), p[1].toFixed(9)])).toEqual([B, C].map((p) => [p[0].toFixed(9), p[1].toFixed(9)]));
+      const back = trimGeometry(geom, 0, from);
+      expect(back.map((p) => [p[0].toFixed(9), p[1].toFixed(9)])).toEqual([A, B].map((p) => [p[0].toFixed(9), p[1].toFixed(9)]));
+    }
   });
 });

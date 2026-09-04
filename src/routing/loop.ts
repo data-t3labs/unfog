@@ -9,7 +9,7 @@
 import type { LonLat, LoopRequest, RouteCandidate, RouteResult } from './api';
 import type { CellLookup } from './cells';
 import {
-  dismountMetres, etaMinutes, now, pathCoords, pickDistinct, searchOptions, snapPoint,
+  RESNAP_MAX_M, dismountMetres, etaMinutes, now, pathCoords, pickDistinct, samePoint, searchOptions, snapPoint,
   type CandidateContext, type ScoredPath,
 } from './candidates';
 import { MODE_BIT } from './graph-format';
@@ -145,6 +145,17 @@ export function routeLoop(searcher: Searcher, origin: Snap, vias: Snap[], mode: 
   };
 }
 
+/**
+ * 1 per component label (see `Graph.components`) whose network contains a cycle — some node
+ * outside every dead-end tree (`Graph.deadEnds`). A loop can only exist in such a component.
+ */
+export function cyclicComponents(graph: Graph, modeMask: number): Uint8Array {
+  const comp = graph.components(modeMask), dead = graph.deadEnds(modeMask);
+  const out = new Uint8Array(graph.nodeCount);
+  for (let n = 0; n < graph.nodeCount; n++) if (!dead[n]) out[comp[n]] = 1;
+  return out;
+}
+
 /** 4πA/L² of a closed polyline (1 = circle, 0.79 = square, 0 = out-and-back). */
 export function compactness(coords: LonLat[]): number {
   if (coords.length < 3) return 0;
@@ -180,7 +191,7 @@ export function loopCoords(graph: Graph, loop: LoopPath): LonLat[] {
   for (const leg of loop.legs) {
     for (const p of pathCoords(graph, leg)) {
       const last = out[out.length - 1];
-      if (last && last[0] === p[0] && last[1] === p[1]) continue;
+      if (last && samePoint(last, p)) continue;
       out.push(p);
     }
   }
@@ -192,16 +203,26 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
   const spatial = ctx.spatial ?? new SpatialIndex(graph);
   const scorer = ctx.scorer ?? new NoveltyScorer(graph, lookup);
   const searcher = ctx.searcher ?? new Searcher(graph, scorer);
-  const origin = snapPoint(spatial, req.from, req.mode, 'origin');
+  const modeMask = MODE_BIT[req.mode];
+  const comp = graph.components(modeMask);
+  let origin = snapPoint(spatial, req.from, req.mode, 'origin');
+  // A loop needs a cycle. When the nearest road is an island without one — a stub of two ways by a
+  // ferry dock (Salt Spring sweep: Vesuvius, no loop at any length), a pier — that the one-hop
+  // check accepts, the start moves to the nearest road of a component that has a cycle, within
+  // RESNAP_MAX_M; further than that the island stands and the result is honestly empty.
+  const cyclic = cyclicComponents(graph, modeMask);
+  if (!cyclic[comp[graph.arcFrom[origin.arc]]]) {
+    const moved = spatial.nearestArc(req.from[0], req.from[1], modeMask, RESNAP_MAX_M, (a) => cyclic[comp[graph.arcFrom[a]]] === 1 && canLeaveArc(graph, a, modeMask));
+    if (moved) origin = moved;
+  }
   const targetM = req.targetKm * 1000;
   const max = Math.max(1, req.maxCandidates ?? 3);
   const turnPenaltyM = req.turnPenaltyM ?? LOOP_TURN_PENALTY_M;
   const loops: LoopPath[] = [];
-  const modeMask = MODE_BIT[req.mode];
   // A via is arrived on and then left: skip island arcs that would sink a leg, anything the
   // origin's component cannot reach at all (a cemetery's or a park's own roads), and dead-end
   // segments (a stub path, the last block of a cul-de-sac) that force a walk-in-and-turn-round.
-  const comp = graph.components(modeMask), originComp = comp[graph.arcFrom[origin.arc]];
+  const originComp = comp[graph.arcFrom[origin.arc]];
   const viaOk = (a: number) => comp[graph.arcFrom[a]] === originComp && isThroughArc(graph, a, modeMask) && canEnterArc(graph, a, modeMask) && canLeaveArc(graph, a, modeMask);
   const inWindow = (l: LoopPath) => l.lengthM >= LOOP_LENGTH_WINDOW[0] * targetM && l.lengthM <= LOOP_LENGTH_WINDOW[1] * targetM;
   // A via whose only way on is back (a dead-end pocket the one-hop check cannot see: a pier, a

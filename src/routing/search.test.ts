@@ -9,7 +9,7 @@ import { NoveltyScorer } from './novelty';
 import { Searcher, TURN_MIN_DEG, hasImmediateUTurn } from './search';
 import { LAMBDA_SWEEP, MIN_GAIN_M, TURN_PENALTY_M, etaMinutes, findCandidates, selectAlternatives, snapPoint, straightLineResult, sweep, type ScoredPath } from './candidates';
 import { SpatialIndex } from './spatial';
-import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, findLoops, loopCoords, loopPct, offsetPoint, rankLoops, routeLoop } from './loop';
+import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, cyclicComponents, findLoops, loopCoords, loopPct, offsetPoint, rankLoops, routeLoop } from './loop';
 
 let lattice: Lattice;
 let tiles: GraphTile[];
@@ -379,6 +379,48 @@ describe('loop mode', () => {
     }
   });
 
+  // Route-quality sweep 3 (Salt Spring, Vesuvius ferry): the nearest road to the start was a
+  // 3-node stub in its own component — one-hop connected, so the snap took it — and every via was
+  // rejected as unreachable: no loop at any length. A loop needs a cycle; an origin on an island
+  // without one moves to the nearest road of a component that has one, within RESNAP_MAX_M.
+  it('a start whose nearest road is an island with no cycle moves to the street grid and still gets loops', () => {
+    const centre: [number, number] = [-73.9453125, 40.735];
+    const size = 11, spacingM = 100;
+    const kx0 = 111_320 * Math.cos(centre[1] * Math.PI / 180), ky = 110_574;
+    const origin: [number, number] = [centre[0] - 5 * (spacingM / kx0), centre[1] + 5 * (spacingM / ky)];
+    const plain = makeLattice({ size, spacingM, origin });
+    // Inside block (5,5)–(6,6): a 3-node island of two ways along y = 45 m south of row 5 (two arcs
+    // meeting at a node, so the one-hop connectivity check accepts it — the Vesuvius stub), and the
+    // pin 10 m south of it (45 m from the nearest street, row 6).
+    const n55 = plain.at(5, 5);
+    const y = n55[1] - 45 / ky;
+    const isle: Array<[number, number]> = [[n55[0] + 30 / kx0, y], [n55[0] + 50 / kx0, y], [n55[0] + 70 / kx0, y]];
+    const pin: [number, number] = [isle[1][0], y - 10 / ky];
+    const stub = makeLattice({ size, spacingM, origin, extraWays: [
+      { id: 0, refs: [100_000, 100_001], coords: [isle[0], isle[1]], fwd: ALL_MODES, rev: ALL_MODES },
+      { id: 0, refs: [100_001, 100_002], coords: [isle[1], isle[2]], fwd: ALL_MODES, rev: ALL_MODES },
+    ] });
+    const g = new Graph([...stub.tiles.values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+    const sp = new SpatialIndex(g), sc = new NoveltyScorer(g, new MapCellLookup()), se = new Searcher(g, sc);
+    const nearest = sp.nearestArc(pin[0], pin[1], ArcFlag.WALK)!;
+    expect(nearest.distM).toBeCloseTo(10, 0);
+    expect(g.components(ArcFlag.WALK)[g.arcFrom[nearest.arc]]).not.toBe(g.components(ArcFlag.WALK)[0]); // the island is its own component
+    expect(cyclicComponents(g, ArcFlag.WALK)[g.components(ArcFlag.WALK)[g.arcFrom[nearest.arc]]]).toBe(0);
+    for (const targetKm of [2, 3]) {
+      const res = findLoops(g, new MapCellLookup(), { from: pin, mode: 'walk', targetKm }, { spatial: sp, scorer: sc, searcher: se });
+      expect(res.candidates.length, `${targetKm} km`).toBeGreaterThanOrEqual(1);
+      for (const c of res.candidates) {
+        expect(distanceM(c.coords[0][0], c.coords[0][1], pin[0], pin[1])).toBeLessThan(100); // moved to row 6, not across the grid
+        expect(c.lengthM).toBeGreaterThanOrEqual(0.75 * targetKm * 1000);
+        expect(c.lengthM).toBeLessThanOrEqual(1.25 * targetKm * 1000);
+      }
+    }
+    // A start on the grid is untouched by the rule.
+    const onGrid = findLoops(g, new MapCellLookup(), { from: plain.at(5, 5), mode: 'walk', targetKm: 2 }, { spatial: sp, scorer: sc, searcher: se });
+    expect(onGrid.candidates.length).toBeGreaterThanOrEqual(1);
+    expect(distanceM(onGrid.candidates[0].coords[0][0], onGrid.candidates[0].coords[0][1], n55[0], n55[1])).toBeLessThan(1);
+  });
+
   // Sweep: a 5 km bike loop from the middle of Prospect Park found NO loop — every leg to a via
   // outside the park needs more than max(1.6·d, d + 400) m of winding path, so all 16 attempts
   // failed and the user got an empty sheet. No existing test has a leg longer than its ellipse.
@@ -454,6 +496,84 @@ describe('off-road legs and straight gaps', () => {
       expect(d.lengthM).toBeCloseTo(400 + 2900 + 250, 0);
       expect(d.coords[d.coords.length - 1]).toEqual(to2);
     }
+  });
+
+  // Route-quality sweep 3 (all three regions): a pin whose snap lands on a shape point of a bent
+  // arc joined the off-road leg to the street with a→b→a and two zero-length steps — the cut point
+  // and the vertex it is were both emitted (candidates.ts trimGeometry). No test had a pin off a
+  // bent arc; the lattice arcs are straight.
+  it('a pin that snaps onto a vertex of a bent path joins it without a→b→a or zero-length steps', () => {
+    // 200 m blocks so the pin (30 m off the kink) is farther from every street than from the kink.
+    const grid = makeLattice({ size: 12, spacingM: 200 });
+    const kx0 = kx(), ky = 110_574;
+    const O = grid.at(2, 2), P = grid.at(3, 3);
+    const K: [number, number] = [O[0] + 140 / kx0, O[1] - 80 / ky]; // the kink, inside the block
+    const bent = makeLattice({ size: 12, spacingM: 200, extraWays: [{ id: 0, refs: [grid.id(2, 2), 100_000, grid.id(3, 3)], coords: [O, K, P], fwd: ALL_MODES, rev: ALL_MODES }] });
+    const g = new Graph([...bent.tiles.values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+    const seen = new MapCellLookup();
+    const sp = new SpatialIndex(g), sc = new NoveltyScorer(g, seen), se = new Searcher(g, sc);
+    // A pin on the outside of the bend, 30 m out along the bisector of the two segments' outward normals: both
+    // segments' nearest point is the kink itself, so the snap is the vertex (t = the kink's length fraction).
+    const d1 = [140, -80], d2 = [60, -120];
+    const n = (v: number[]) => { const l = Math.hypot(v[0], v[1]); return [v[0] / l, v[1] / l]; };
+    const u1 = n(d1), u2 = n(d2), out = n([u1[0] - u2[0], u1[1] - u2[1]]);
+    const pin: [number, number] = [K[0] + (30 * out[0]) / kx0, K[1] + (30 * out[1]) / ky];
+    const snap = sp.nearestArc(pin[0], pin[1], ArcFlag.WALK)!;
+    expect(distanceM(snap.point[0], snap.point[1], K[0], K[1])).toBeLessThan(0.01);
+    expect(snap.distM).toBeCloseTo(30, 0);
+    const noWiggle = (coords: Array<[number, number]>) => {
+      for (let i = 1; i < coords.length; i++) expect(distanceM(coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]), `step ${i}`).toBeGreaterThan(0.001);
+      for (let i = 2; i < coords.length; i++) expect(coords[i][0] === coords[i - 2][0] && coords[i][1] === coords[i - 2][1], `a→b→a at ${i}`).toBe(false);
+    };
+    for (const [from, to] of [[pin, grid.at(8, 8)], [grid.at(8, 8), pin]] as Array<[[number, number], [number, number]]>) {
+      const res = findCandidates(g, seen, { from, to, mode: 'walk', detour: 0.25 }, { spatial: sp, scorer: sc, searcher: se });
+      for (const c of res.candidates) {
+        expect(c.parts!.some((p) => p.kind === 'offroad')).toBe(true);
+        noWiggle(c.coords);
+      }
+    }
+  });
+
+  // Route-quality sweep 3 (NYC, a pin 2 km outside coverage in Yonkers): the nearest usable arc
+  // as the crow flies was across the Hudson on the Palisades, 240 m nearer than the Yonkers-side
+  // road — Direct walked 26 km (over the George Washington Bridge and back up New Jersey) for a
+  // 12.6 km trip and then "crossed" the river on the dashed leg. A pin far off the network now
+  // snaps to whichever nearby street gets it there soonest, not the nearest one. No test had a
+  // far-off pin with two streets to choose from.
+  it('a pin far off the network snaps to the nearby street with the shortest walk to the other end, not the nearest street across the water', () => {
+    // West of column 0: a north–south road R 800 m out, joined to the grid only at its south end
+    // (a link from R's row-29 end to node (0,29)). The pin sits 330 m from R and 470 m from column 0.
+    const kx0 = kx(), ky = 110_574;
+    const c0 = (r: number) => lattice.at(0, r);
+    const rx = c0(0)[0] - 800 / kx0;
+    const R: Array<[number, number]> = [];
+    const refs: number[] = [];
+    for (let r = 0; r < 30; r++) { R.push([rx, c0(r)[1]]); refs.push(200_000 + r); }
+    const ways: TestWay[] = [
+      { id: 0, refs, coords: R, fwd: ALL_MODES, rev: ALL_MODES },
+      { id: 0, refs: [200_029, lattice.id(0, 29)], coords: [R[29], c0(29)], fwd: ALL_MODES, rev: ALL_MODES },
+    ];
+    const two = makeLattice({ size: 30, spacingM: 100, extraWays: ways });
+    const g = new Graph([...two.tiles.values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+    const seen = new MapCellLookup();
+    const sp = new SpatialIndex(g), sc = new NoveltyScorer(g, seen), se = new Searcher(g, sc);
+    const pin: [number, number] = [c0(5)[0] - 470 / kx0, c0(5)[1]];
+    expect(sp.nearestArc(pin[0], pin[1], ArcFlag.WALK, 5000)!.distM).toBeCloseTo(330, -1); // R is nearest (crow flies)
+    const to = two.at(15, 15);
+    // Via R: 330 m + 2,400 m south + 800 m link + 2,900 m ≈ 6.4 km. Via column 0: 470 m + 2,500 m ≈ 3.0 km.
+    for (const [a, b] of [[pin, to], [to, pin]] as Array<[[number, number], [number, number]]>) {
+      const res = findCandidates(g, seen, { from: a, to: b, mode: 'walk', detour: 0.25 }, { spatial: sp, scorer: sc, searcher: se });
+      const d = res.candidates[res.candidates.length - 1];
+      expect(d.name).toBe('Direct');
+      const off = d.parts!.find((p) => p.kind === 'offroad')!;
+      expect(off.lengthM).toBeCloseTo(470, 0);
+      expect(d.lengthM).toBeLessThan(3100);
+      expect(d.parts!.map((p) => p.kind)).toEqual(a === pin ? ['offroad', 'street'] : ['street', 'offroad']);
+    }
+    // A pin close to R (50 m) keeps the nearest street: the rule only applies far off the network.
+    const near: [number, number] = [rx + 50 / kx0, c0(5)[1]];
+    const nearRes = findCandidates(g, seen, { from: near, to, mode: 'walk', detour: 0.25 }, { spatial: sp, scorer: sc, searcher: se });
+    expect(nearRes.candidates[nearRes.candidates.length - 1].parts![0].lengthM).toBeCloseTo(50, 0);
   });
 
   it('two components → one Direct: streets to the nearest exit, a straight gap, streets from the entry (lattice + island 3 km east)', () => {
