@@ -26,7 +26,7 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { BBox, PackCacheCell, PackCacheStatus } from './api';
 import { GRAPH_ZOOM, lonLatToGraphTile, unpackGraphTile, type GraphTile } from './graph-format';
 import {
-  PACK_ZOOM, cellKey, cellOf, coalesceRanges, parsePackIndex, rangeHeader, sliceEntry,
+  LABEL_GRID_ZOOM, PACK_ZOOM, cellKey, cellOf, coalesceRanges, parsePackIndex, rangeHeader, sliceEntry,
   type ByteRange, type PackEntry, type PackInfo, type PacksIndex,
 } from './pack-format';
 
@@ -215,16 +215,28 @@ export class PackSource {
     return this.packFor(x, y) !== undefined;
   }
 
-  /** What the cache holds, grouped by cell, plus the index age (the Data screen's "Routing data"). */
+  /**
+   * What the cache holds, grouped by cell, plus the index age (the Data screen's "Routing data").
+   * Each cell also lists its tiles by z10 sub-cell (`sub`) so the Data screen can name the one
+   * region the cached streets are in (src/app/pack-label.ts) instead of every extract that
+   * touched the cell.
+   */
   async status(): Promise<PackCacheStatus> {
     const byCell = new Map<string, PackCacheCell>();
+    const subs = new Map<string, Map<string, [x: number, y: number, tiles: number, lastUsed: number]>>();
+    const shift = GRAPH_ZOOM - LABEL_GRID_ZOOM;
     let totalBytes = 0, totalTiles = 0;
     for (const t of await this.listCached()) {
       let c = byCell.get(t.cell);
-      if (!c) { c = { cell: t.cell, tiles: 0, bytes: 0, lastUsed: 0, source: this.index?.packs[t.cell]?.source }; byCell.set(t.cell, c); }
+      if (!c) { c = { cell: t.cell, tiles: 0, bytes: 0, lastUsed: 0, source: this.index?.packs[t.cell]?.source, sub: [] }; byCell.set(t.cell, c); subs.set(t.cell, new Map()); }
       c.tiles++; c.bytes += t.size; c.lastUsed = Math.max(c.lastUsed, t.lastUsed);
+      const sub = subs.get(t.cell)!;
+      const sx = t.x >> shift, sy = t.y >> shift, sk = `${sx}/${sy}`;
+      const s = sub.get(sk);
+      if (s) { s[2]++; s[3] = Math.max(s[3], t.lastUsed); } else sub.set(sk, [sx, sy, 1, t.lastUsed]);
       totalBytes += t.size; totalTiles++;
     }
+    for (const [cell, sub] of subs) byCell.get(cell)!.sub = [...sub.values()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
     const cells = [...byCell.values()].sort((a, b) => b.lastUsed - a.lastUsed);
     return { indexAgeMs: this.indexAgeMs, indexCells: this.index ? Object.keys(this.index.packs).length : 0, cells, totalBytes, totalTiles };
   }

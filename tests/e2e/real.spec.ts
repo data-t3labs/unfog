@@ -1116,6 +1116,41 @@ test.describe('Unfog real engines', () => {
     await shot(page, 'loop');
     await shotFb2(page, 'loop-sheet');
 
+    // Height budget (polish round 2): the sheet is capped at 55 % of the viewport, the map strip above it
+    // keeps ≥ 200 CSS px at 393×852, and the candidate list scrolls inside the sheet while Go and the
+    // hand-off row stay where they are. A 3 km loop needs two Google Maps parts — the tallest loop sheet.
+    const handoff = sheet.locator('.handoff');
+    await expect(handoff).toBeVisible();
+    expect(await handoff.locator('a.gmaps, a.part').count(), 'two Google Maps parts (the tallest hand-off block)').toBeGreaterThanOrEqual(2);
+    const budget = await page.evaluate(() => {
+      const box = (sel: string) => document.querySelector(sel)!.getBoundingClientRect();
+      const s = box('.sheet.route'), chrome = box('.top'), go = box('.sheet.route .go'), hand = box('.sheet.route .handoff');
+      const cands = document.querySelector('.sheet.route .cands') as HTMLElement;
+      const parts = [...document.querySelector('.sheet.route')!.children].filter((c) => !(c as HTMLElement).hidden).map((c) => `${c.className.split(' ')[0] || c.tagName.toLowerCase()} ${Math.round(c.getBoundingClientRect().height)}`);
+      return { sheetTop: s.top, sheetHeight: s.height, chromeBottom: chrome.bottom, goTop: go.top, goBottom: go.bottom, handBottom: hand.bottom, candsScroll: cands.scrollHeight, candsClient: cands.clientHeight, innerHeight: window.innerHeight, parts };
+    });
+    test.info().annotations.push({ type: 'sheet-budget', description: `sheet ${budget.sheetHeight.toFixed(0)} px (cap ${(0.55 * budget.innerHeight).toFixed(0)}), strip ${(budget.sheetTop - budget.chromeBottom).toFixed(0)} px, list ${budget.candsClient}/${budget.candsScroll}; ${budget.parts.join(', ')}` });
+    expect(budget.sheetHeight, 'sheet ≤ 55 % of the viewport').toBeLessThanOrEqual(0.55 * budget.innerHeight + 1);
+    expect(budget.sheetTop - budget.chromeBottom, 'map strip between the top chrome and the sheet').toBeGreaterThanOrEqual(200);
+    expect(budget.goBottom, 'Go on screen').toBeLessThanOrEqual(budget.innerHeight);
+    expect(budget.handBottom, 'the hand-off row on screen').toBeLessThanOrEqual(budget.innerHeight);
+    await page.screenshot({ path: path.join(shots, 'p2-loop-sheet.png'), fullPage: false });
+    // Every candidate row can be brought into view by scrolling the list — and only the list: Go does not move.
+    // While rows are below the fold the list fades at its foot (`.more`); at the bottom it does not.
+    const list = sheet.locator('.cands');
+    const candRows = sheet.locator('.cand');
+    const scrolls = budget.candsScroll > budget.candsClient;
+    await expect(list).toHaveClass(scrolls ? /\bmore\b/ : /^cands$/);
+    for (let i = 0; i < (await candRows.count()); i++) {
+      await candRows.nth(i).scrollIntoViewIfNeeded();
+      const row = (await candRows.nth(i).boundingBox())!, box = (await list.boundingBox())!, go = (await sheet.locator('.go').boundingBox())!;
+      expect(row.y, `loop row ${i} inside the list`).toBeGreaterThanOrEqual(box.y - 1);
+      expect(row.y + row.height, `loop row ${i} inside the list`).toBeLessThanOrEqual(box.y + box.height + 1);
+      expect(go.y, 'Go stays put while the list scrolls').toBeCloseTo(budget.goTop, 0);
+    }
+    await expect(list, 'no fade once the last row is in view').not.toHaveClass(/\bmore\b/);
+    await list.evaluate((e) => { e.scrollTop = 0; });
+
     // 5 km chip → every loop within ±25 % of 5 km; the choice persists.
     await sheet.getByRole('button', { name: '5 km' }).click();
     await expect(sheet.locator('.chips button.on')).toHaveText('5 km');

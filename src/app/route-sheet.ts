@@ -98,7 +98,12 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     chips.appendChild(b);
   }
   const loopControls = el('div', { class: 'controls', hidden: true }, loopRow, chips, loopSlider);
+  // The candidate list is the one part of the sheet that scrolls (style.css: the sheet is capped at 55 % of the
+  // viewport so the map keeps a strip); `.more` fades its foot while rows are below the fold.
   const cands = el('div', { class: 'cands' });
+  const updateMore = () => cands.classList.toggle('more', cands.scrollHeight - cands.scrollTop - cands.clientHeight > 2);
+  cands.addEventListener('scroll', updateMore, { passive: true });
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(updateMore).observe(cands);
   const status = el('div', { class: 'route-status' });
   const goBtn = el('button', { class: 'go', type: 'button', onclick: () => void go() }, 'Go');
   // Hand-off (feedback-3): the chosen route in Google Maps (turn-by-turn, in parts when long), Apple Maps (destination only), or as GPX.
@@ -198,6 +203,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
       cands.appendChild(row);
     });
     goBtn.disabled = n === 0;
+    updateMore();
   }
 
   /**
@@ -361,6 +367,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
     setStatus(lines.length ? el('div', { class: 'muted small', text: lines.join(' ') }) : null);
     renderTitle();
     renderSlider();
+    cands.scrollTop = 0; // a new result starts at the top of the list (the first candidate is the selected one)
     renderCands();
     map.showRoutes(res.candidates, selected);
     fit();

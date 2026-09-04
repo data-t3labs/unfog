@@ -3,16 +3,23 @@
  * the places you are — automatically, no clicks".
  *
  * Pure planner + a small driver (`Prefetcher`) over a PackSource-like cache:
- *   - when the user's position (or, idle, the map centre) enters a new z12 tile, prefetch the
+ *   - when the user's position (or the map centre) enters a new z12 tile, prefetch the
  *     (2·radius+1)² ring around it (5×5 by default), centre first;
  *   - throttled: a ring is planned at most once per `minIntervalMs` unless the centre tile changed;
- *     position fixes win over map moves for `positionPriorityMs` after the last fix;
+ *   - position fixes keep priority NEAR the user: for `positionPriorityMs` after a fix, a map
+ *     centre within `farPanM` of that fix is a glance around (the fix's own ring covers it) and is
+ *     ignored; a pan farther than that — a far city on a phone with a live watch — counts, so its
+ *     streets arrive as the user looks (the next fix re-centres the ring on the user again);
  *   - never on cellular data-saver (`navigator.connection?.saveData`) or offline;
  *   - size budget (150 MB default): after fetching, least-recently-used tiles outside the current
  *     ring are evicted until the cache fits.
  * The app drives it: geolocation → notify(lon, lat, 'position'); map idle → notify(c, 'map');
  * a timer / requestIdleCallback → tick(env). Nothing here touches the DOM.
+ *
+ * Invariant: prefetch NEVER moves the map. It only reads positions and map centres; no code in
+ * this file or in src/app/prefetch-driver.ts calls easeTo / flyTo / jumpTo / fitBounds / setCenter.
  */
+import { distanceM } from '../grid/cell';
 import { GRAPH_ZOOM, lonLatToGraphTile } from './graph-format';
 
 export interface PrefetchConfig {
@@ -20,8 +27,10 @@ export interface PrefetchConfig {
   radius: number;
   /** Minimum time between two prefetch rounds for the same centre tile. */
   minIntervalMs: number;
-  /** After a position fix, ignore map-centre notifications for this long. */
+  /** After a position fix, ignore map-centre notifications closer than `farPanM` to it for this long. */
   positionPriorityMs: number;
+  /** A map centre at least this far (metres) from the last fix counts even while fixes are fresh. */
+  farPanM: number;
   /** Cache budget in bytes; LRU eviction above it. */
   budgetBytes: number;
   /** Fetch at most this many tiles per round (the rest waits for the next tick). */
@@ -33,6 +42,7 @@ export const DEFAULT_PREFETCH: PrefetchConfig = {
   radius: 2,
   minIntervalMs: 5_000,
   positionPriorityMs: 60_000,
+  farPanM: 5_000,
   budgetBytes: 150 * 1024 * 1024,
   maxTilesPerRound: 25,
   zoom: GRAPH_ZOOM,
@@ -77,11 +87,24 @@ export interface PrefetchState {
   centre: [x: number, y: number] | null;
   lastRoundAt: number;
   lastPositionAt: number;
+  /** Where the last position fix was (the reference for the far-pan rule). */
+  lastPosition: [lon: number, lat: number] | null;
   /** The last round left tiles unfetched (failed / over maxTilesPerRound). */
   pending: boolean;
 }
 
-export const initialPrefetchState = (): PrefetchState => ({ centre: null, lastRoundAt: -Infinity, lastPositionAt: -Infinity, pending: false });
+export const initialPrefetchState = (): PrefetchState => ({ centre: null, lastRoundAt: -Infinity, lastPositionAt: -Infinity, lastPosition: null, pending: false });
+
+/**
+ * Does a map-centre notification count? Not while a position fix is fresh (< positionPriorityMs)
+ * AND the centre is within farPanM of it: the fix's ring already covers a glance around. A far pan
+ * (or no recent fix) counts.
+ */
+export function mapMoveCounts(state: Pick<PrefetchState, 'lastPositionAt' | 'lastPosition'>, lon: number, lat: number, now: number, cfg: Pick<PrefetchConfig, 'positionPriorityMs' | 'farPanM'>): boolean {
+  if (now - state.lastPositionAt >= cfg.positionPriorityMs) return true;
+  if (!state.lastPosition) return true;
+  return distanceM(lon, lat, state.lastPosition[0], state.lastPosition[1]) >= cfg.farPanM;
+}
 
 export type PrefetchDecision =
   | { action: 'skip'; reason: 'no-centre' | 'offline' | 'save-data' | 'throttled' | 'unchanged' }
@@ -125,8 +148,8 @@ export class Prefetcher {
 
   /** New position fix or map centre. Cheap; the work happens in tick(). Returns true when the centre tile changed. */
   notify(lon: number, lat: number, kind: 'position' | 'map', now = Date.now()): boolean {
-    if (kind === 'map' && now - this.state.lastPositionAt < this.cfg.positionPriorityMs) return false;
-    if (kind === 'position') this.state.lastPositionAt = now;
+    if (kind === 'map' && !mapMoveCounts(this.state, lon, lat, now, this.cfg)) return false;
+    if (kind === 'position') { this.state.lastPositionAt = now; this.state.lastPosition = [lon, lat]; }
     const c = lonLatToGraphTile(lon, lat, this.cfg.zoom);
     const changed = !this.state.centre || this.state.centre[0] !== c[0] || this.state.centre[1] !== c[1];
     if (changed) { this.state.centre = c; this.state.pending = true; }

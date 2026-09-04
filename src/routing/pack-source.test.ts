@@ -217,7 +217,8 @@ describe('PackSource', () => {
     expect(status.indexCells).toBe(2);
     expect(status.indexAgeMs).toBeLessThan(60_000);
     expect(status.totalTiles).toBe(1);
-    expect(status.cells).toEqual([{ cell: vanCell, tiles: 1, bytes: status.totalBytes, lastUsed: status.cells[0].lastUsed, source: 'Geofabrik us/new-york 2026-09-01' }]);
+    // `sub`: the cached tiles by z10 sub-cell (the Data screen's one-region label needs to know where in the cell they are).
+    expect(status.cells).toEqual([{ cell: vanCell, tiles: 1, bytes: status.totalBytes, lastUsed: status.cells[0].lastUsed, source: 'Geofabrik us/new-york 2026-09-01', sub: [[van[0].tx >> 2, van[0].ty >> 2, 1, status.cells[0].lastUsed]] }]);
     await src.clear();
     expect((await src.status()).cells).toEqual([]);
     await src.close();

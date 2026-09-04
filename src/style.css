@@ -236,6 +236,16 @@ html.dark .chip, html.dark .hint, html.dark .track-pill { box-shadow: var(--shad
 .range::-moz-range-track { height: 4px; border-radius: 2px; background: var(--bg-2); }
 .range::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--fg); }
 .range::-moz-range-thumb { width: 26px; height: 26px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35); border: 0; }
+/* Route / loop sheet height budget (polish round 2): never more than 55 % of the viewport (plus the home inset,
+   which is padding, not content), so the map strip above it keeps ≥ 200 px on an iPhone (a 3-loop sheet with two
+   Google Maps parts left ~32 px). The sheet is a flex column whose candidate list is the one part that gives — it
+   scrolls inside, with a fade at its foot while rows are below (`.more`, src/app/route-sheet.ts) — while the title,
+   controls, Go and the hand-off row stay put; the sheet's own scroll is the last resort on tiny viewports / huge text. */
+.sheet.route { display: flex; flex-direction: column; max-height: min(calc(55dvh + var(--sab)), calc(100dvh - var(--top-pad) - 8px - 48px - 48px)); }
+.sheet.route > * { flex: none; }
+.sheet.route .cands { flex: 0 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.sheet.route .cands.more { -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent); mask-image: linear-gradient(#000 calc(100% - 28px), transparent); }
+.sheet.route .route-status:empty { display: none; }
 .cands { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .cand { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 8px 12px; border-radius: 12px; border: 0; background: transparent; text-align: left; width: 100%; }
 .cand.on { background: var(--bg-2); }
@@ -314,6 +324,8 @@ ul.plain.small li { font-size: 0.765rem; display: block; }
 ul.plain.bullets li { display: list-item; list-style: disc; margin-left: 18px; border: 0; padding: 4px 0; }
 .list { display: flex; flex-direction: column; }
 .row-item { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+/* Routing data rows: one line ("Streets near New York (US)", src/app/pack-label.ts); the ellipsis covers large Dynamic Type. */
+.packs-cell .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .import-result { margin-top: 10px; }
 .import-note { margin-top: 10px; }
 .about { margin-top: 24px; }

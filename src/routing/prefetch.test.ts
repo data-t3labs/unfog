@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createPrefetchDriver } from '../app/prefetch-driver';
 import { graphTileBounds, lonLatToGraphTile } from './graph-format';
-import { DEFAULT_PREFETCH, Prefetcher, decidePrefetch, initialPrefetchState, planEviction, ringTiles, type PrefetchCache, type PrefetchEnv } from './prefetch';
+import { DEFAULT_PREFETCH, Prefetcher, decidePrefetch, initialPrefetchState, mapMoveCounts, planEviction, ringTiles, type PrefetchCache, type PrefetchEnv } from './prefetch';
 
 /** In-memory PrefetchCache: every tile in `covered` is fetchable at `tileBytes` each. */
 function fakeCache(covered: (x: number, y: number) => boolean, tileBytes = 1000) {
@@ -126,19 +126,43 @@ describe('Prefetcher', () => {
     expect(p.state.pending).toBe(false);
   });
 
-  it('map-centre moves are ignored shortly after a position fix, honoured when idle', async () => {
+  it('map-centre moves near a fresh position fix are ignored; a far pan counts at once; fixes keep priority nearby; idle pans always count', async () => {
     const cache = fakeCache(() => true);
     const p = new Prefetcher(cache);
-    const [lon, lat] = centreOf(500, 600);
+    // Bedford & N 7th (tile 1206/1539): a fix, then the ring.
+    const [lon, lat] = centreOf(1206, 1539);
     p.notify(lon, lat, 'position', 0);
     await p.tick(env({ now: 0 }));
-    const [lon2, lat2] = centreOf(900, 900);
-    expect(p.notify(lon2, lat2, 'map', 10_000)).toBe(false); // navigating: map pans do not steal the prefetch
-    expect(p.state.centre).toEqual([500, 600]);
-    expect(p.notify(lon2, lat2, 'map', 70_000)).toBe(true); // idle for > positionPriorityMs
-    const r = await p.tick(env({ now: 70_000 }));
-    expect(r.fetched).toBe(25);
-    expect(lonLatToGraphTile(lon2, lat2)).toEqual([900, 900]);
+    expect(p.state.lastPosition).toEqual([lon, lat]);
+    // A glance around: 0.02° ≈ 1.7 km east, inside the ring and within farPanM → ignored while the fix is fresh.
+    const near: [number, number] = [lon + 0.02, lat];
+    expect(mapMoveCounts(p.state, near[0], near[1], 10_000, DEFAULT_PREFETCH)).toBe(false);
+    expect(p.notify(near[0], near[1], 'map', 10_000)).toBe(false);
+    expect(p.state.centre).toEqual([1206, 1539]);
+    // Panning to Jamaica, Queens (≈ 13 km): farther than farPanM → counts even though the fix is 10 s old.
+    const [lon2, lat2] = centreOf(1208, 1540);
+    expect(mapMoveCounts(p.state, lon2, lat2, 10_000, DEFAULT_PREFETCH)).toBe(true);
+    expect(p.notify(lon2, lat2, 'map', 10_000)).toBe(true);
+    expect(p.state.centre).toEqual([1208, 1540]);
+    const r = await p.tick(env({ now: 10_000 }));
+    expect(r.decision.action).toBe('fetch');
+    expect(r.fetched).toBeGreaterThan(0);
+    expect(cache.tiles.has('1210/1542')).toBe(true); // the far ring's corner arrived
+    // The next fix (the user has not moved) re-centres the ring on the user: fixes keep priority.
+    expect(p.notify(lon, lat, 'position', 11_000)).toBe(true);
+    expect(p.state.centre).toEqual([1206, 1539]);
+    // A pan near the user right after that fix is a glance again.
+    expect(p.notify(near[0], near[1], 'map', 12_000)).toBe(false);
+    // Idle for > positionPriorityMs: any pan counts, near or far.
+    expect(mapMoveCounts(p.state, near[0], near[1], 80_000, DEFAULT_PREFETCH)).toBe(true);
+    const [lon3, lat3] = centreOf(900, 900);
+    expect(p.notify(lon3, lat3, 'map', 80_000)).toBe(true);
+    const r3 = await p.tick(env({ now: 80_000 }));
+    expect(r3.fetched).toBe(25);
+    expect(lonLatToGraphTile(lon3, lat3)).toEqual([900, 900]);
+    // No fix ever: map moves always count (a phone with location off).
+    const q = new Prefetcher(fakeCache(() => true));
+    expect(q.notify(lon, lat, 'map', 0)).toBe(true);
   });
 
   it('keeps the cache under the budget with LRU eviction that spares the current ring; uncovered tiles are reported', async () => {
@@ -178,13 +202,12 @@ describe('Prefetcher', () => {
 });
 
 describe('createPrefetchDriver (src/app/prefetch-driver.ts)', () => {
-  it('starts on the map centre, rounds at once on a fix in a new tile, ignores map moves while tracking, honours them idle, and stops cleanly', async () => {
+  it('starts on the map centre, rounds at once on a fix in a new tile, ignores a glance near a fresh fix, honours a far pan, and stops cleanly', async () => {
     const cache = fakeCache(() => true);
     const route = { packsHasTile: cache.hasTile, packsFetchTiles: cache.fetchTiles, packsListCached: cache.listCached, packsEvict: cache.evict };
     let fix: ((lon: number, lat: number) => void) | null = null;
     let move: (() => void) | null = null;
     let centre = centreOf(500, 600);
-    let tracking = false;
     let online = true;
     let unsubscribed = 0;
     const driver = createPrefetchDriver({
@@ -192,28 +215,28 @@ describe('createPrefetchDriver (src/app/prefetch-driver.ts)', () => {
       onFix: (cb) => { fix = cb; return () => { fix = null; unsubscribed++; }; },
       onMapMove: (cb) => { move = cb; return () => { move = null; unsubscribed++; }; },
       mapCentre: () => centre,
-      tracking: () => tracking,
       env: () => ({ online, saveData: false, now: Date.now() }),
       tickMs: 3_600_000,
       onlineTarget: null,
-      config: { ...DEFAULT_PREFETCH, minIntervalMs: 0, positionPriorityMs: 0 },
+      config: { ...DEFAULT_PREFETCH, minIntervalMs: 0 },
     });
     // The saved map centre is where the user was: its ring is fetched right away.
     await driver.tick();
     expect(driver.prefetcher.state.centre).toEqual([500, 600]);
     expect(cache.tiles.size).toBe(25);
     // A fix in another tile → a round at once (no wait for the timer).
-    fix!(...centreOf(700, 700));
+    const user = centreOf(700, 700);
+    fix!(...user);
     await driver.tick();
     expect(cache.tiles.size).toBe(50);
-    // Map moves while a tracking session runs do not move the ring; idle ones do.
-    tracking = true;
-    centre = centreOf(900, 900);
+    // A glance around right after the fix (≈ 2 km, inside the ring) does not move the ring — with or
+    // without a tracking session, the rule is distance, not mode; a far pan (another city) does.
+    centre = [user[0] + 0.02, user[1]];
     move!();
     await driver.tick();
     expect(driver.prefetcher.state.centre).toEqual([700, 700]);
     expect(cache.tiles.size).toBe(50);
-    tracking = false;
+    centre = centreOf(900, 900);
     move!();
     await driver.tick();
     expect(driver.prefetcher.state.centre).toEqual([900, 900]);

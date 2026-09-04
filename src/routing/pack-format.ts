@@ -75,6 +75,45 @@ export interface PacksIndex {
   packs: Record<string, PackInfo>;
 }
 
+/**
+ * Region table for the Data screen's "Streets near <region>" labels (src/app/pack-label.ts):
+ * generated at build time from the extract manifests (tools/build-graph/region-table.ts →
+ * src/routing/pack-regions.json). A pack's `source` lists every extract that touched the cell —
+ * up to nine on a border cell — so the client needs to know WHICH of them the user's cached
+ * tiles belong to: per multi-extract cell a z10 dominance grid (16×16 chars, row-major; each the
+ * extract with the most z12 tiles in that z10 tile), plus a name / country / bbox per extract.
+ */
+export const LABEL_GRID_ZOOM = 10;
+/** Grid character for a region index (≤ 36 regions per cell; the real maximum is nine). */
+export const GRID_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz';
+export const GRID_EMPTY = '.';
+
+export interface PackRegionInfo {
+  /** Display name, e.g. "New York", "British Columbia", "Washington, DC". */
+  name: string;
+  /** Country tag shown after the name ("US", "CA", "MX", "GL"); "" = none. */
+  cc: string;
+  bbox: [west: number, south: number, east: number, north: number];
+}
+
+export interface PackRegionCell {
+  /** Extract ids contributing to the cell, sorted (the order the grid characters index). */
+  regions: string[];
+  /** (2^(gridZoom−packZoom))² characters, row-major within the cell; GRID_EMPTY = no tile from any listed extract. */
+  grid: string;
+}
+
+export interface PackRegionTable {
+  version: 1;
+  zoom: number;
+  packZoom: number;
+  gridZoom: number;
+  builtAt: string;
+  regions: Record<string, PackRegionInfo>;
+  /** Only cells more than one extract contributes to; a single-extract cell needs no grid. */
+  cells: Record<string, PackRegionCell>;
+}
+
 /** Zoom-6 cell containing a zoom-12 tile. */
 export function cellOf(tx: number, ty: number, zoom = GRAPH_ZOOM, packZoom = PACK_ZOOM): [cx: number, cy: number] {
   const s = zoom - packZoom;

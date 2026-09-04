@@ -4,9 +4,10 @@
  * much is on the phone, grouped by the state / province it came from, and a Clear. The prebuilt
  * Regions and Downloaded areas lists that follow it are unchanged (src/app/data.ts).
  */
-import type { PackCacheCell, PackCacheStatus } from '../routing/api';
+import type { PackCacheStatus } from '../routing/api';
 import type { AppContext } from './context';
 import { fmtBytes, fmtRelative } from './format';
+import { packTitle } from './pack-label';
 import { clear, el, toast } from './ui';
 
 export interface PacksSection {
@@ -16,23 +17,8 @@ export interface PacksSection {
 
 export const AUTO_COPY = 'Automatic: the streets around you download as you go (Wi-Fi and mobile; paused on Low Data Mode). They stay on your phone for offline routes and make room for new places by themselves.';
 
-/**
- * "New York (US)" from a pack's source line, e.g. "Geofabrik us/new-york 2026-09-01" or
- * "Geofabrik us/washington, us/oregon (+ border merge)"; the cell key when there is no source.
- */
-export function packLabel(cell: PackCacheCell): string {
-  const names: string[] = [];
-  const seen = new Set<string>();
-  for (const m of (cell.source ?? '').matchAll(/(?:[a-z][a-z-]*\/)+[a-z][a-z-]*/g)) {
-    const parts = m[0].split('/');
-    const region = parts[parts.length - 1];
-    const country = parts.length >= 2 ? parts[parts.length - 2] : '';
-    const title = region.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-    const label = country ? `${title} (${country.length <= 3 ? country.toUpperCase() : country.charAt(0).toUpperCase() + country.slice(1)})` : title;
-    if (!seen.has(label)) { seen.add(label); names.push(label); }
-  }
-  return names.length ? names.join(', ') : `Map area ${cell.cell}`;
-}
+// Row titles ("Streets near New York (US)": one region, one line) come from ./pack-label.ts.
+export { packLabel, packTitle } from './pack-label';
 
 /** "coverage list updated 3 h ago" — hours below a day, days after, "not downloaded yet" when there is none. */
 export function indexAgeText(ageMs: number): string {
@@ -74,7 +60,7 @@ export function createPacksSection(ctx: AppContext): PacksSection {
         el(
           'div',
           { class: 'row-item packs-cell' },
-          el('div', { class: 't' }, el('div', { class: 'name', text: `Streets near ${packLabel(c)}` }), el('div', { class: 'st', text: `${fmtBytes(c.bytes)} · used ${fmtRelative(c.lastUsed)}` })),
+          el('div', { class: 't' }, el('div', { class: 'name', text: packTitle(c) }), el('div', { class: 'st', text: `${fmtBytes(c.bytes)} · used ${fmtRelative(c.lastUsed)}` })),
         ),
       );
     }

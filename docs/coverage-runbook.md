@@ -18,6 +18,10 @@ tools/build-graph/cache/north-america/
   merged/<cell>/             tiles of R rebuilt from the union of ways (exact at borders)
   packs/6-<x>-<y>.ufp        one pack per z6 cell (UFP1: index + deflated UFG1 tiles) — the release assets
   packs/packs-index.json     cells → asset URL, bytes, indexBytes, tiles, builtAt, source, sha256
+src/routing/pack-regions.json  (in git) the Data screen's region table from extracts/*/manifest.json: name / country /
+                             bbox per extract, a z10 grid per multi-extract cell naming the extract with the most street
+                             bytes in each z10 tile — how "Streets near New York (US)" is one region, not the nine the
+                             NYC cell's `source` lists (tools/build-graph/region-table.ts, src/app/pack-label.ts)
 ```
 Release: `https://github.com/data-t3labs/unfog/releases/tag/graphs-v1` (prerelease) — the
 **storage of record**. Asset URLs `https://github.com/data-t3labs/unfog/releases/download/graphs-v1/<name>`
@@ -55,7 +59,8 @@ node $C fetch    [--only us/washington,british-columbia]   # resume-safe curl -C
 node $C build    [--only …] [--jobs 3]           # cli.js per extract → extracts/<slug>/
 node $C borders  [--only …] [--jobs 2]           # plan.json over ALL built extracts, then per-extract way files
 node $C merge                                    # per border cell: union → rebuild → merged/<cell>/
-node $C pack                                     # packs/*.ufp + packs-index.json (merged tiles override extract tiles)
+node $C pack                                     # packs/*.ufp + packs-index.json (merged tiles override extract tiles); then `regions`
+node $C regions                                  # src/routing/pack-regions.json from the extract manifests — commit it with the pack run
 node $C publish  [--release graphs-v1] [--dry-run]   # gh release create (if needed) + upload, index last
 node $C mirror   [--no-wait] [--force] [--dry-run]   # shard plan → shard workflows → verify (§ Hosting)
 node $C all --publish                            # everything, in order (publish, then mirror)

@@ -7,13 +7,18 @@
  * Owns the `Prefetcher` (src/routing/prefetch.ts — the pure policy: 5×5 ring, throttle, budget,
  * LRU eviction) and feeds it:
  *   - every accepted geolocation fix → `notify(lon, lat, 'position')`;
- *   - the map centre after a pan/zoom while no tracking session runs → `notify(centre, 'map')`
- *     (the policy ignores map moves for 60 s after a fix, so navigating never steals the ring);
+ *   - the map centre after every pan/zoom → `notify(centre, 'map')`; the policy decides: within
+ *     60 s of a fix a centre less than 5 km from it is a glance around and is ignored (the fix's
+ *     ring covers it — tracking or not), a farther centre is a new place and counts, so panning
+ *     to another city on a phone with a live watch fetches that city's streets;
  *   - the map centre once at start (the saved camera is where the user was);
  *   - a `tick(env)` every 10 s, on `online`, and right after the centre tile changes.
  * The environment (`browserEnv`) says offline / `navigator.connection.saveData` — nothing is
  * fetched then. The pack cache itself lives in the route worker (IndexedDB `unfog-packs`) behind
  * RouteApi's `packs*` methods. One call from main.ts: `startPrefetchDriver(ctx)`.
+ *
+ * Invariant: the driver never moves the map — it subscribes to `moveend` and reads the centre;
+ * it calls no camera method (see the invariant note in src/routing/prefetch.ts).
  */
 import type { LonLat } from '../routing/api';
 import { Prefetcher, browserEnv, type PrefetchCache, type PrefetchConfig, type PrefetchEnv, type PrefetchRound } from '../routing/prefetch';
@@ -36,8 +41,6 @@ export interface PrefetchDriverDeps {
   /** Subscribe to the end of a map move; returns the unsubscribe. */
   onMapMove(cb: () => void): () => void;
   mapCentre(): LonLat;
-  /** A tracking session is running: map pans are then a glance around, not a new place. */
-  tracking(): boolean;
   env?: () => PrefetchEnv;
   tickMs?: number;
   config?: PrefetchConfig;
@@ -78,9 +81,8 @@ export function createPrefetchDriver(deps: PrefetchDriverDeps): PrefetchDriver {
   };
 
   const offFix = deps.onFix((lon, lat) => notify([lon, lat], 'position'));
-  const offMove = deps.onMapMove(() => {
-    if (!deps.tracking()) notify(deps.mapCentre(), 'map');
-  });
+  // Every move end reaches the policy; prefetch.ts's far-pan rule sorts a glance around from a new place.
+  const offMove = deps.onMapMove(() => notify(deps.mapCentre(), 'map'));
   const onOnline = () => void tick();
   const target = deps.onlineTarget === undefined ? (typeof window !== 'undefined' ? window : null) : deps.onlineTarget;
   target?.addEventListener('online', onOnline);
@@ -111,6 +113,5 @@ export function startPrefetchDriver(ctx: AppContext): PrefetchDriver | null {
       return () => ctx.map.map.off('moveend', cb);
     },
     mapCentre: () => ctx.map.center(),
-    tracking: () => Boolean(ctx.tracking?.active),
   });
 }

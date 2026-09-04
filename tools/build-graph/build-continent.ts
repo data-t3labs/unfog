@@ -9,7 +9,11 @@
  *             each border cell's rebuild → <work>/borders/<cell>/<slug>.json (child processes)
  *   merge     per border cell: union the ways of every contributing extract, rebuild, keep the cell's
  *             rebuild tiles → <work>/merged/<cell>/
- *   pack      z6 packs (<work>/packs/6-<x>-<y>.ufp) + packs-index.json; merged tiles override extract tiles
+ *   pack      z6 packs (<work>/packs/6-<x>-<y>.ufp) + packs-index.json; merged tiles override extract tiles;
+ *             then `regions`
+ *   regions   src/routing/pack-regions.json — the Data screen's region table (name / country / bbox per
+ *             extract, a z10 dominance grid per multi-extract cell) from the extract manifests
+ *             (region-table.ts); commit it with the pack run it belongs to
  *   publish   upload packs + packs-index.json as assets of one GitHub release (gh CLI)
  *   mirror    re-plan tools/build-graph/pages-shards.json from the published index (commit + push it
  *             when it changed), trigger every unfog-graph-N shard workflow (gh), wait for the runs
@@ -33,6 +37,7 @@ import { CONTINENTS, extractSpec, fetchExtract, type ExtractSpec } from './fetch
 import { dedupeWays, planBorders, rebuildCell, wayCells, wayTileIndex, writeTiles, type BorderPlan, type ExtractTiles } from './merge-tiles';
 import { groupByCell, packInfoOf, readPacksIndex, tilesFromManifestDir, writePack, writePacksIndex, type TileFile } from './pack-tiles';
 import { loadPbfWays } from './pbf-ways';
+import { buildRegionTable, extractTilesFromManifest, writeRegionTable } from './region-table';
 import { planShards, shardPlanFile, summarizeShards } from './shard-planner.mjs';
 
 // ---------------------------------------------------------------------------------------------
@@ -104,7 +109,7 @@ const hash = (v: unknown): string => createHash('sha1').update(JSON.stringify(v)
 // ---------------------------------------------------------------------------------------------
 // args
 // ---------------------------------------------------------------------------------------------
-const USAGE = `usage: continent.js <fetch|build|borders|merge|pack|publish|mirror|all|status|border-extract> [options]
+const USAGE = `usage: continent.js <fetch|build|borders|merge|pack|regions|publish|mirror|all|status|border-extract> [options]
   --continent <id>   (north-america)     --work <dir>   (tools/build-graph/cache/<continent>)
   --geofabrik <dir>  (tools/build-graph/cache/geofabrik)
   --only a,b,c       restrict fetch/build/borders to these extract ids (e.g. us/washington,british-columbia)
@@ -402,7 +407,20 @@ function cmdPack(ctx: Ctx): PacksIndex {
   saveState(ctx);
   const f = writePacksIndex(outDir, index);
   log(ctx, `pack: ${groups.length} packs (${written} rewritten), ${tiles.length - merged} extract tiles + ${merged} merged, ${mb(total)} total → ${f}`);
+  cmdRegions(ctx);
   return index;
+}
+
+/** The app's region table (src/routing/pack-regions.json) from the built extracts' manifests. */
+function cmdRegions(ctx: Ctx): void {
+  const built = builtExtracts(ctx);
+  if (!built.length) throw new Error('regions: no built extracts (run build first)');
+  const extracts = built.map((e) => extractTilesFromManifest(join(ctx.work, 'extracts', e.slug)));
+  const table = buildRegionTable(extracts, { builtAt: ts() });
+  const file = join(ctx.repoRoot, 'src', 'routing', 'pack-regions.json');
+  writeRegionTable(file, table);
+  const multi = Object.keys(table.cells).length;
+  log(ctx, `regions: ${extracts.length} extracts, ${multi} multi-extract cells with a z${table.gridZoom} grid, ${mb(statSync(file).size)} → ${file}`);
 }
 
 function gh(args: string[], dryRun: boolean, ctx: Ctx): string {
@@ -621,6 +639,7 @@ async function main(): Promise<void> {
     case 'border-extract': cmdBorderExtract(ctx, rest[0]); return;
     case 'merge': cmdMerge(ctx); break;
     case 'pack': cmdPack(ctx); break;
+    case 'regions': cmdRegions(ctx); break;
     case 'publish': cmdPublish(ctx); break;
     case 'mirror': await cmdMirror(ctx); break;
     case 'all':

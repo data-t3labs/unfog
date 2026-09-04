@@ -114,6 +114,11 @@ export interface PackCacheCell {
   lastUsed: number;
   /** Where the streets came from, e.g. "Geofabrik us/new-york 2026-09-01" (from packs-index.json; absent when the index is gone). */
   source?: string;
+  /**
+   * The cached tiles grouped by z10 sub-cell (pack-format.ts LABEL_GRID_ZOOM): [x, y, tiles, lastUsed],
+   * sorted by key — what src/app/pack-label.ts needs to name the ONE region the cached streets are in.
+   */
+  sub?: Array<[x: number, y: number, tiles: number, lastUsed: number]>;
 }
 
 export interface PackCacheStatus {
