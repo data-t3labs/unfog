@@ -111,7 +111,7 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   gap goes at the mode's speed. `RouteCandidate.parts` carries the kinds; NoRouteError is gone. No tile at all still throws
   NoCoverageError, and the sheet offers "Route anyway (straight line)" (`RouteApi.directLine`) next to the downloads. Fog clears
   along straight parts only when the user records there — a route is a suggestion. Loops are unchanged (SnapError within 5 km).
-- Loop mode ("Explore from here", shipped 2026-09-02): heading fan of 8, 2 via-points on a circle of radius ~0.22·T, own-route arcs ×5, ±25 % length window, keep 3 best; UI chips 2/3/5/8 km + 1–15 km slider.
+- Loop mode ("Explore from here", shipped 2026-09-02): heading fan of 8, 2 via-points on a circle of radius ~0.22·T, own-route arcs ×5, ±25 % length window, keep 3 best; UI chips 2/3/5/8 km + 1–15 km slider. **Sparse networks** (2026-09-04, route-quality sweep 3: 10 of 20 Salt Spring requests and Second Beach 2 km found NO loop — the strict via circle is crow-flies, so on a rural network it lands in the water, on a ridge or on a dead-end lane): when that fan returns nothing at all, a fallback cuts its vias off a ROAD-distance ring (one bounded Dijkstra from the origin, vias mid-arc at exactly r metres of road, chosen by bearing) — two-via triangles at r ≈ 0.24–0.42·T, then a single turnaround at 0.38–0.48·T the return leg walks round (own-route arcs ×5), and last, only when neither made anything that is actually a loop, an honest out-and-back whose via may sit on a dead-end lane (`RouteCandidate.kind: 'outback'`, sheet row "Out and back · 3.1 km"). Window ±40 % and compactness floor 0.08 for the fallback only; leg slacks 1.6/3/6; 1.2 s cap. A request that already had a loop never reaches it, so NYC (35) and Vancouver (19 of 20) loop rows are byte-identical; Salt Spring goes 10/20 → 20/20 non-empty, per-request p90 ≤ 45 ms and max 63 ms over the three regions (cap 2 s).
 - Budget: < 2 s for a 10 km city route on an iPhone; graphs never materialise per-edge objects.
 
 - Route joins (sweep round 3, 2026-09-03): a cut within 1 cm of a shape point is that point (no duplicate vertices or a→b→a at
@@ -252,6 +252,32 @@ high-res graph of the places you are automatically — no clicks; at least North
   "Tracking" pill (paused / waiting-for-GPS variants); Settings carries the honest note that iOS only records while the app is
   open and on screen, pointing to Help → "Always recording" (Fog of World via Dropbox and Overland, pulled every time the app opens — src/sync, Data → Sources).
   The service-worker update no longer refuses Reload mid-session.
+
+### 2.7 Live smoke (`npm run smoke:live`)
+
+Every other suite runs against a local dev server or a local `vite preview` build, so none of them can
+tell whether what is **published** works; until 2026-09-04 each deploy was verified with curl (all
+service-worker precache URLs 200) plus an identical local build, because headless Chromium on the build
+Mac appeared unable to open any `*.github.io` page — navigations hung until they timed out while `curl`
+fetched the same URL in 0.2 s. The cause was never the app, the network or Chromium: **Little Snitch**
+(the macOS firewall on this machine) was holding those connections pending a per-application approval
+prompt, and a headless run has no window in which anyone can answer it, so the request hung forever.
+data approved the browser binaries in Little Snitch and every one of them — the headless shell, Chrome
+for Testing, Node's fetch — reached the site at once. The fix is the firewall rule; nothing in the app
+changed. (One unrelated fact misled the first diagnosis: `curl -6 https://data-t3labs.github.io/` really
+does fail from here, so the v6 path is dead — but v4 was only ever blocked by the firewall prompt.)
+
+`npm run smoke:live` therefore drives **the real origin directly**: real TLS, the real
+`packs-index.json`, real byte-range requests to the `unfog-graph-1..5` shard sites. No proxy, no URL
+rewriting, no local server — `tests/e2e/live.config.ts` has no `webServer` and none of the
+playwright.config.ts ports, so it never collides with a dev :5173 / preview :4174 run.
+`tests/e2e/live.spec.ts` asserts on the deployed bytes: boot with the real engines + fog overlay +
+layer control, the published worker's precache, the Help build hash, the Fog of World import and fog
+clearing, a route in Boston (outside every prebuilt region, so every street arrives as a byte range)
+with no download offer and the streets listed in Data → Routing data, the Google Maps hand-off href, an
+offline reload, and the landing page making no request off the origin. It is opt-in only: the spec
+registers no tests unless `UNFOG_LIVE_BASE` is set, which only the npm script does, so
+`npx playwright test` and CI never see it and never touch the network.
 
 ## 3. Waves
 

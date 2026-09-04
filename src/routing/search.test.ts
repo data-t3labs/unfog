@@ -9,7 +9,10 @@ import { NoveltyScorer } from './novelty';
 import { Searcher, TURN_MIN_DEG, hasImmediateUTurn } from './search';
 import { LAMBDA_SWEEP, MIN_GAIN_M, TURN_PENALTY_M, etaMinutes, findCandidates, isAbsurd, selectAlternatives, snapPoint, straightLineResult, sweep, type ScoredPath } from './candidates';
 import { SpatialIndex } from './spatial';
-import { LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR, compactness, cyclicComponents, findLoops, loopCoords, loopPct, offsetPoint, rankLoops, routeLoop } from './loop';
+import {
+  LOOP_FALLBACK_MIN_COMPACTNESS, LOOP_FALLBACK_WINDOW, LOOP_LENGTH_WINDOW, LOOP_MIN_COMPACTNESS, LOOP_RADIUS_FACTOR,
+  compactness, cyclicComponents, findLoops, loopCoords, loopPct, offsetPoint, rankLoops, routeLoop,
+} from './loop';
 
 let lattice: Lattice;
 let tiles: GraphTile[];
@@ -444,6 +447,84 @@ describe('loop mode', () => {
     const loop = routeLoop(se, o, [via], 'walk', 0)!;
     expect(loop).not.toBeNull();
     expect(loop.lengthM).toBeCloseTo(1850, 0);
+  });
+
+  // Route-quality sweep 3 (Salt Spring): 10 of 20 loop requests found NO loop, and Second Beach
+  // 2 km none either. On a sparse network the strict fan's via circle is crow-flies, so the vias
+  // land in the water, on a ridge or on a dead-end lane — the roads at the right ROAD distance are
+  // not at the right crow-flies distance. Every existing loop test runs on a full city lattice
+  // where the fan always finds something, so nothing covered a rural network.
+  it('a sparse rural network gets loops off the road-distance ring, and an honest out-and-back where no cycle exists', () => {
+    // One through road 5 km east–west with graph nodes every 250 m (ids 1..21, id 11 at x = 0);
+    // ONE alternative lane 250 m → 1000 m over the north side (the only cycle in the network); two
+    // short dead-end side lanes; and a 1.2 km dead-end lane north off x = −2000 (ids 50..54) whose
+    // far end is the second origin. The 2-core is the cycle alone, exactly as on Salt Spring.
+    const BASE: [number, number] = [-73.9453125 + 0.01, 40.75];
+    const KX = 111_320 * Math.cos((BASE[1] * Math.PI) / 180), KY = 110_574;
+    const P = (x: number, y: number): [number, number] => [BASE[0] + x / KX, BASE[1] + y / KY];
+    const ways: TestWay[] = [];
+    const road = (id: number, a: number, b: number, pa: [number, number], pb: [number, number]) =>
+      ways.push({ id, refs: [a, b], coords: [pa, pb], fwd: ALL_MODES, rev: ALL_MODES });
+    const mainX = (i: number) => -2500 + 250 * (i - 1);
+    for (let i = 1; i < 21; i++) road(100 + i, i, i + 1, P(mainX(i), 0), P(mainX(i + 1), 0));
+    road(200, 12, 30, P(250, 0), P(300, 150));
+    road(201, 30, 31, P(300, 150), P(950, 150));
+    road(202, 31, 15, P(950, 150), P(1000, 0));
+    road(300, 7, 40, P(-1000, 0), P(-1000, 300));
+    road(301, 17, 41, P(1500, 0), P(1500, -300));
+    for (let k = 0; k < 5; k++) road(400 + k, k === 0 ? 3 : 49 + k, 50 + k, P(-2000, 240 * k), P(-2000, 240 * (k + 1)));
+    const g = new Graph([...buildTestTiles(ways).values()].map((t) => decodeGraphTile(encodeGraphTile(t))));
+    const lk = new MapCellLookup();
+    const sp = new SpatialIndex(g), sc = new NoveltyScorer(g, lk), se = new Searcher(g, sc);
+    const ctx = { spatial: sp, scorer: sc, searcher: se };
+    // The fixture is the rural shape: only the six nodes of the one cycle are in the 2-core, so
+    // every via the strict fan could reach along the main road is on a dead-end tree.
+    const dead = g.deadEnds(ArcFlag.WALK);
+    expect(g.nodeCount - dead.reduce((a: number, b: number) => a + b, 0)).toBe(6);
+    const onRoad = P(0, 0);
+    for (const targetKm of [2, 3]) {
+      const res = findLoops(g, lk, { from: onRoad, mode: 'walk', targetKm }, ctx);
+      const T = targetKm * 1000;
+      expect(res.candidates.length, `${targetKm} km`).toBeGreaterThanOrEqual(1);
+      // The fallback answered (the strict generator's budget is 1.25 × T, the fallback's 1.4 × T).
+      expect(res.budgetM, `${targetKm} km came from the fallback`).toBe(Math.round(LOOP_FALLBACK_WINDOW[1] * T));
+      for (const c of res.candidates) {
+        expect(c.kind, `${targetKm} km is a loop, not an out-and-back`).toBeUndefined();
+        expect(c.lengthM).toBeGreaterThanOrEqual(LOOP_FALLBACK_WINDOW[0] * T);
+        expect(c.lengthM).toBeLessThanOrEqual(LOOP_FALLBACK_WINDOW[1] * T);
+        expect(compactness(c.coords)).toBeGreaterThanOrEqual(LOOP_FALLBACK_MIN_COMPACTNESS);
+        expect(distanceM(c.coords[0][0], c.coords[0][1], onRoad[0], onRoad[1])).toBeLessThan(5);
+        const end = c.coords[c.coords.length - 1];
+        expect(distanceM(end[0], end[1], onRoad[0], onRoad[1])).toBeLessThan(5);
+        expect(c.etaMin).toBe(Math.round((c.lengthM / 1000 / 4.8) * 60)); // walking pace
+        // It goes round the one cycle there is: both ends of the alternative lane are on it.
+        for (const corner of [P(300, 150), P(950, 150)]) {
+          expect(c.coords.some((p) => distanceM(p[0], p[1], corner[0], corner[1]) < 5), `${targetKm} km uses the alternative lane`).toBe(true);
+        }
+      }
+    }
+    // From the end of the 1.2 km dead-end lane no cycle is within reach at 2 km: the honest answer
+    // is the lane walked out and back, labelled so ("Out and back" in the sheet) rather than empty.
+    const laneEnd = P(-2000, 1200);
+    const back = findLoops(g, lk, { from: laneEnd, mode: 'walk', targetKm: 2 }, ctx);
+    expect(back.candidates.length).toBeGreaterThanOrEqual(1);
+    for (const c of back.candidates) {
+      expect(c.kind).toBe('outback');
+      expect(c.lengthM).toBeGreaterThanOrEqual(LOOP_FALLBACK_WINDOW[0] * 2000);
+      expect(c.lengthM).toBeLessThanOrEqual(LOOP_FALLBACK_WINDOW[1] * 2000);
+      expect(distanceM(c.coords[0][0], c.coords[0][1], laneEnd[0], laneEnd[1])).toBeLessThan(5);
+    }
+    // The city lattice never reaches any of this: the strict fan answers, so the strict window,
+    // the strict compactness floor and plain "Loop A/B/C" rows stand.
+    const city = findLoops(graph, lookup, { from: lattice.at(15, 15), mode: 'walk', targetKm: 2 }, { spatial, scorer, searcher });
+    expect(city.budgetM).toBe(Math.round(LOOP_LENGTH_WINDOW[1] * 2000));
+    expect(city.candidates.length).toBeGreaterThanOrEqual(1);
+    for (const c of city.candidates) {
+      expect(c.kind).toBeUndefined();
+      expect(c.lengthM).toBeGreaterThanOrEqual(LOOP_LENGTH_WINDOW[0] * 2000);
+      expect(c.lengthM).toBeLessThanOrEqual(LOOP_LENGTH_WINDOW[1] * 2000);
+      expect(compactness(c.coords)).toBeGreaterThanOrEqual(LOOP_MIN_COMPACTNESS);
+    }
   });
 });
 

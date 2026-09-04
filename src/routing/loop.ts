@@ -5,6 +5,16 @@
  * used by earlier legs of the same loop so the way back is not the way out (no turn penalty by
  * default — see LOOP_TURN_PENALTY_M). Loops are ranked by pctNew (never-visited metres per metre;
  * ties towards the target length) and deduplicated; ≤ maxCandidates are returned.
+ *
+ * When that strict fan finds NOTHING — a rural network, where the roads at the right ROAD distance
+ * are not at the right crow-flies distance, so the via circle lands in water, on a ridge or on a
+ * dead-end lane (Salt Spring sweep: 10 of 20 requests empty) — a sparse-network fallback runs
+ * instead: vias cut from a ROAD-distance ring (a bounded Dijkstra from the origin) by bearing,
+ * first as two-via triangles, then as a single turnaround the return leg walks round, and last —
+ * only when neither made anything that is actually a loop — as an honest out-and-back through a
+ * dead-end lane, marked `outback` so the sheet can say so. The fallback widens the window to
+ * ±40 % and drops the compactness floor; a request that already had a loop never reaches it, so
+ * city results are untouched.
  */
 import type { LonLat, LoopRequest, RouteCandidate, RouteResult } from './api';
 import type { CellLookup } from './cells';
@@ -15,8 +25,8 @@ import {
 import { MODE_BIT } from './graph-format';
 import type { Graph } from './graph';
 import { NoveltyScorer } from './novelty';
-import { Searcher, type PathResult } from './search';
-import { SpatialIndex, canEnterArc, canLeaveArc, isThroughArc, type Snap } from './spatial';
+import { MinHeap, Searcher, type PathResult } from './search';
+import { SpatialIndex, canEnterArc, canLeaveArc, isThroughArc, usableFlags, type Snap } from './spatial';
 
 export const LOOP_HEADINGS = 8;
 export const LOOP_LAMBDA = 1.5;
@@ -56,6 +66,162 @@ const LOOP_VIA_RETRIES = 2;
 export const LOOP_TURN_PENALTY_M = 0;
 const DEG = Math.PI / 180;
 
+// --- sparse-network fallback (route-quality sweep 3: 10 of 20 Salt Spring requests found no loop) -
+
+/**
+ * The fallback's length window, ±40 % instead of ±25 %. On a sparse network the cycles that exist
+ * are the ones the roads make, not the ones the target asks for: the Vesuvius 3 km case has one
+ * proper loop of 3.8 km (1.27 ×) and nothing else. Applies to the fallback only.
+ */
+export const LOOP_FALLBACK_WINDOW: [number, number] = [0.6, 1.4];
+/**
+ * Fallback compactness floor (LOOP_MIN_COMPACTNESS is 0.1): the real Salt Spring cycles sit at
+ * 0.11–0.41 and the strict floor only just excluded them (Fulford 3 km: 0.098). Below this the
+ * route is a strip out and back on parallel lanes, and it is labelled as one rather than dropped.
+ */
+export const LOOP_FALLBACK_MIN_COMPACTNESS = 0.08;
+/** Above this retraced fraction (or below the floor above) a fallback loop is an out-and-back, not a loop. */
+export const LOOP_FALLBACK_MAX_RETRACED = 0.45;
+/** An out-and-back retraces half of itself; more than this is out, back and out again. */
+export const LOOP_OUTBACK_MAX_RETRACED = 0.6;
+/** Rural legs wind: a third slack over LOOP_LEG_SLACKS (a Salt Spring leg can be 5 × its crow-flies distance). */
+export const LOOP_FALLBACK_LEG_SLACKS: readonly number[] = [1.6, 3, 6];
+/** A ring point counts for a heading only within this many degrees of it. */
+export const LOOP_FALLBACK_BEARING_DEG = 40;
+/** Two-via pass: the vias sit this far either side of the heading. */
+export const LOOP_FALLBACK_VIA_SPREAD_DEG = 50;
+/** The fallback stops after this long (the whole request must stay under ~2 s). */
+export const LOOP_FALLBACK_MS = 1200;
+/**
+ * Fallback passes in order: triangles off the road ring first, then a single turnaround the return
+ * leg walks round, then — only if neither made something that is actually a loop — the honest
+ * out-and-back, whose via may sit on a dead-end lane (`anyArc`). Radii are fractions of the target;
+ * none exceeds 0.5 · T, the radius of the graph box `RouteEngine.loop` loads.
+ */
+export const LOOP_FALLBACK_PASSES: ReadonlyArray<{ vias: 1 | 2; r: number; anyArc?: boolean }> = [
+  { vias: 2, r: 0.24 }, { vias: 2, r: 0.3 }, { vias: 2, r: 0.36 }, { vias: 2, r: 0.42 },
+  { vias: 1, r: 0.38 }, { vias: 1, r: 0.44 }, { vias: 1, r: 0.48 },
+  { vias: 1, r: 0.42, anyArc: true }, { vias: 1, r: 0.48, anyArc: true },
+];
+
+/** Bearing from `a` to `b` in degrees, 0 = north, clockwise (the convention `offsetPoint` takes). */
+export function bearingTo(a: LonLat, b: LonLat): number {
+  const kx = 111_320 * Math.cos(((a[1] + b[1]) / 2) * DEG), ky = 110_574;
+  return (Math.atan2((b[0] - a[0]) * kx, (b[1] - a[1]) * ky) / DEG + 360) % 360;
+}
+
+/** Smallest angle between two bearings, 0..180. */
+export function bearingGap(a: number, b: number): number {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+/** Point at fraction `t` of an arc's geometry by length (the meaning of `Snap.t`). */
+export function arcPointAt(graph: Graph, arc: number, t: number): LonLat {
+  const geom = graph.arcGeometry(arc);
+  if (geom.length < 2) return geom[0] ?? [0, 0];
+  const kx = 111_320 * Math.cos(geom[0][1] * DEG), ky = 110_574;
+  const seg: number[] = [];
+  let total = 0;
+  for (let i = 1; i < geom.length; i++) {
+    const l = Math.hypot((geom[i][0] - geom[i - 1][0]) * kx, (geom[i][1] - geom[i - 1][1]) * ky);
+    seg.push(l); total += l;
+  }
+  if (total <= 0) return geom[0];
+  let want = Math.max(0, Math.min(1, t)) * total;
+  for (let i = 0; i < seg.length; i++) {
+    if (want <= seg[i] || i === seg.length - 1) {
+      const f = seg[i] > 0 ? Math.max(0, Math.min(1, want / seg[i])) : 0;
+      return [geom[i][0] + (geom[i + 1][0] - geom[i][0]) * f, geom[i][1] + (geom[i + 1][1] - geom[i][1]) * f];
+    }
+    want -= seg[i];
+  }
+  return geom[geom.length - 1];
+}
+
+export interface RoadRing {
+  /** Road distance from the origin snap to every node within `maxM`; Infinity beyond. */
+  distM: Float64Array;
+  /** The nodes with a finite distance, nearest first. */
+  nodes: Int32Array;
+}
+
+/**
+ * Dijkstra on plain length from a snap, capped at `maxM` — the road distances the via ring is cut
+ * from. Unpenalised on purpose: the ring is a distance, not a route (the legs are still searched
+ * with the novelty penalty and the own-route avoid).
+ */
+export function roadRing(graph: Graph, origin: Snap, modeMask: number, maxM: number): RoadRing {
+  const distM = new Float64Array(graph.nodeCount).fill(Infinity);
+  const closed = new Uint8Array(graph.nodeCount);
+  const heap = new MinHeap(1024);
+  const nodes: number[] = [];
+  const seed = (arc: number, frac: number) => {
+    if (arc < 0 || !usableFlags(graph.arcFlags[arc], modeMask)) return;
+    const n = graph.arcTo[arc], d = graph.arcLen[arc] * frac;
+    if (d < distM[n]) { distM[n] = d; heap.push(d, n); }
+  };
+  seed(origin.arc, 1 - origin.t);
+  seed(graph.arcReverse[origin.arc], origin.t);
+  while (heap.size > 0) {
+    const n = heap.pop();
+    if (closed[n]) continue;
+    closed[n] = 1;
+    const d = distM[n];
+    if (d > maxM) break;
+    nodes.push(n);
+    for (let a = graph.arcStart[n]; a < graph.arcStart[n + 1]; a++) {
+      if (!usableFlags(graph.arcFlags[a], modeMask)) continue;
+      const v = graph.arcTo[a], nd = d + graph.arcLen[a];
+      if (nd <= maxM && nd < distM[v]) { distM[v] = nd; heap.push(nd, v); }
+    }
+  }
+  return { distM, nodes: Int32Array.from(nodes) };
+}
+
+/** A point of the road network at a chosen ROAD distance from the origin, with its bearing. */
+export interface RingPoint {
+  snap: Snap;
+  bearing: number;
+}
+
+/**
+ * Every place the network crosses road distance `radiusM`, one per segment: the arc's own point at
+ * that distance (mid-arc, not a junction), so a leg can be forbidden from doubling back on it.
+ */
+export function ringPoints(graph: Graph, ring: RoadRing, from: LonLat, modeMask: number, radiusM: number, ok: (arc: number) => boolean): RingPoint[] {
+  const out: RingPoint[] = [];
+  const seen = new Set<number>();
+  for (const u of ring.nodes) {
+    const du = ring.distM[u];
+    if (!(du < radiusM)) continue;
+    for (let a = graph.arcStart[u]; a < graph.arcStart[u + 1]; a++) {
+      if (!usableFlags(graph.arcFlags[a], modeMask)) continue;
+      const len = graph.arcLen[a];
+      if (len <= 0 || du + len < radiusM) continue;
+      const canon = graph.segmentId(a);
+      if (seen.has(canon)) continue;
+      seen.add(canon);
+      if (!ok(canon)) continue;
+      const frac = (radiusM - du) / len;
+      const t = canon === a ? frac : 1 - frac;
+      const point = arcPointAt(graph, canon, t);
+      out.push({ snap: { arc: canon, t, point, distM: 0 }, bearing: bearingTo(from, point) });
+    }
+  }
+  return out;
+}
+
+/** The ring point closest to a bearing, or null when the network goes nowhere near it. */
+export function nearestBearing(points: RingPoint[], want: number, maxGap = LOOP_FALLBACK_BEARING_DEG): RingPoint | null {
+  let best: RingPoint | null = null, bestGap = maxGap;
+  for (const p of points) {
+    const gap = bearingGap(p.bearing, want);
+    if (gap < bestGap) { bestGap = gap; best = p; }
+  }
+  return best;
+}
+
 /** Point at `distM` metres and `bearingDeg` (0 = north, clockwise) from `from`. */
 export function offsetPoint(from: LonLat, distM: number, bearingDeg: number): LonLat {
   const b = bearingDeg * DEG;
@@ -73,6 +239,12 @@ export interface LoopPath extends ScoredPath {
   uturnVias: number[];
   /** Per entry of `uturnVias`: the nodes the leg reached before giving up — the pocket itself. */
   uturnPockets: number[][];
+  /**
+   * Sparse-network fallback only: the route walks out and back rather than round (it retraces more
+   * than LOOP_FALLBACK_MAX_RETRACED of itself, or is thinner than the fallback compactness floor).
+   * Surfaces as `RouteCandidate.kind: 'outback'`; the sheet labels the row "Out and back".
+   */
+  outback?: boolean;
 }
 
 function straightM(a: LonLat, b: LonLat): number {
@@ -262,12 +434,76 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
     coordsOf.set(loop, coords);
     loops.push(loop);
   }
+  // Sparse network: the strict fan found nothing at all (Salt Spring, 10 of 20 requests). Nothing
+  // above changed, so every request that already had a loop keeps exactly the loops it had.
+  let fallback = false;
+  if (loops.length === 0) {
+    // The out-and-back passes drop `viaOk`'s through-arc rule: the turnaround of an out-and-back
+    // IS on a dead-end lane (the Beddis beach road, the Cusheon lake road) — that is the point.
+    const anyOk = (a: number) => comp[graph.arcFrom[a]] === originComp && canEnterArc(graph, a, modeMask) && canLeaveArc(graph, a, modeMask);
+    const ring = roadRing(graph, origin, modeMask, 0.55 * targetM);
+    const rings = new Map<string, RingPoint[]>();
+    const pointsAt = (radius: number, anyArc: boolean): RingPoint[] => {
+      const key = `${Math.round(radius)}:${anyArc ? 1 : 0}`;
+      let p = rings.get(key);
+      if (!p) { p = ringPoints(graph, ring, origin.point, modeMask, radius, anyArc ? anyOk : viaOk); rings.set(key, p); }
+      return p;
+    };
+    const inFallbackWindow = (l: LoopPath) => l.lengthM >= LOOP_FALLBACK_WINDOW[0] * targetM && l.lengthM <= LOOP_FALLBACK_WINDOW[1] * targetM;
+    const ringAttempt = (heading: number, radius: number, vias: 1 | 2, anyArc: boolean): LoopPath | null => {
+      const points = pointsAt(radius, anyArc);
+      if (points.length === 0) return null;
+      let stops: Snap[];
+      if (vias === 1) {
+        const v = nearestBearing(points, heading);
+        if (!v) return null;
+        stops = [v.snap];
+      } else {
+        const v1 = nearestBearing(points, (heading - LOOP_FALLBACK_VIA_SPREAD_DEG + 360) % 360);
+        const v2 = nearestBearing(points, (heading + LOOP_FALLBACK_VIA_SPREAD_DEG) % 360);
+        if (!v1 || !v2 || v1.snap.arc === v2.snap.arc) return null;
+        stops = [v1.snap, v2.snap];
+      }
+      return routeLoop(searcher, origin, stops, req.mode, heading, LOOP_FALLBACK_LEG_SLACKS, turnPenaltyM);
+    };
+    const found: Array<{ loop: LoopPath; coords: LonLat[] }> = [];
+    for (const pass of LOOP_FALLBACK_PASSES) {
+      const anyArc = pass.anyArc === true;
+      // The out-and-back passes are the last resort: skipped while a real loop exists.
+      if (anyArc && found.some((f) => !f.loop.outback)) break;
+      if (now() - t0 > LOOP_FALLBACK_MS) break;
+      for (let k = 0; k < LOOP_HEADINGS; k++) {
+        const heading = (360 / LOOP_HEADINGS) * k;
+        const first = ringAttempt(heading, pass.r * targetM, pass.vias, anyArc);
+        // A ring radius is a guess at a road distance; when the loop it makes is more than 15 %
+        // off the target the radius is rescaled by target/length and tried again. Both results
+        // are kept — the rescaled one is usually closer, but not always newer.
+        const tries = [first];
+        if (first && Math.abs(first.lengthM - targetM) > 0.15 * targetM) {
+          const scaled = Math.min(0.5, Math.max(0.15, pass.r * (targetM / first.lengthM))) * targetM;
+          if (Math.round(scaled) !== Math.round(pass.r * targetM)) tries.push(ringAttempt(heading, scaled, pass.vias, anyArc));
+        }
+        for (const loop of tries) {
+          if (!loop || !inFallbackWindow(loop)) continue;
+          const coords = loopCoords(graph, loop);
+          const retraced = loop.retracedM / Math.max(1, loop.lengthM);
+          loop.outback = retraced > LOOP_FALLBACK_MAX_RETRACED || compactness(coords) < LOOP_FALLBACK_MIN_COMPACTNESS;
+          if (loop.outback && retraced > LOOP_OUTBACK_MAX_RETRACED) continue;
+          found.push({ loop, coords });
+        }
+      }
+    }
+    const real = found.filter((f) => !f.loop.outback);
+    for (const f of real.length > 0 ? real : found) { coordsOf.set(f.loop, f.coords); loops.push(f.loop); }
+    fallback = loops.length > 0;
+  }
   const picked = pickDistinct(rankLoops(loops, targetM), [], max) as LoopPath[];
   // Rank labels: the newest loop is "Most new", every other one "Balanced" — a loop is never
   // "Direct" (the app labels loops A/B/C by position and ignores these).
   const names: RouteCandidate['name'][] = ['Most new', 'Balanced'];
   const candidates = picked.map((l, i) => ({
     name: names[Math.min(i, names.length - 1)],
+    ...(l.outback ? { kind: 'outback' as const } : {}),
     coords: coordsOf.get(l)!,
     lengthM: Math.round(l.lengthM),
     newM: Math.round(l.newM),
@@ -278,7 +514,7 @@ export function findLoops(graph: Graph, lookup: CellLookup, req: LoopRequest, ct
   return {
     candidates,
     shortestM: Math.round(targetM),
-    budgetM: Math.round(LOOP_LENGTH_WINDOW[1] * targetM),
+    budgetM: Math.round((fallback ? LOOP_FALLBACK_WINDOW[1] : LOOP_LENGTH_WINDOW[1]) * targetM),
     graphTiles: ctx.graphTiles ?? graph.tileKeys.length,
     ms: Math.round(now() - t0),
   };

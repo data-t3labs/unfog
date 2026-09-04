@@ -60,9 +60,11 @@ export interface RouteCandidate {
   /**
    * `gap` = the "Straight across" alternative to a Direct that goes round: its middle `straight`
    * part is not ground the route explores (newM 0, pctNew over the walked parts only) and not a
-   * walking route for a navigation app. Absent on ordinary candidates.
+   * walking route for a navigation app. `outback` = a loop that walks out and back rather than
+   * round: on a sparse rural network it is often the only round trip of that length the roads
+   * allow, and the sheet says so instead of calling it "Loop A". Absent on ordinary candidates.
    */
-  kind?: 'gap';
+  kind?: 'gap' | 'outback';
   /** Full geometry: every part concatenated, pin to pin. */
   coords: LonLat[];
   /** Metres, every part included. */
@@ -190,6 +192,8 @@ export interface RouteApi {
   /**
    * Round trips from `from` of about `targetKm` (each within ±25 %), ranked by pctNew — new metres
    * per metre — with ties (same integer pctNew) broken towards the length closest to the target.
+   * On a sparse rural network, where the strict generator finds nothing, a fallback answers within
+   * ±40 % instead, and marks a round trip that walks out and back `kind: 'outback'`.
    * May resolve with an empty list when no loop fits. Names are rank labels (see CandidateName).
    */
   loop(req: LoopRequest): Promise<RouteResult>;

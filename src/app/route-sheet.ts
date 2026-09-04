@@ -126,7 +126,12 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
   const km = (m: number) => fmtDistance(m, units());
   /** Loop target as a label: "3 km", "4.5 km". */
   const target = () => fmtDistanceTidy(prefs.loopKm * 1000, units());
-  const candName = (c: RouteCandidate, i: number) => (kind === 'loop' ? `Loop ${LOOP_LABELS[i] ?? i + 1}` : c.name);
+  /**
+   * Loop rows are "Loop A / B / C" by position — except a round trip the engine could only make by
+   * walking out and back (`kind: 'outback'`, sparse rural networks), which says so: on Salt Spring
+   * a 2 km "loop" from a beach road IS the beach road twice, and calling it Loop A would lie.
+   */
+  const candName = (c: RouteCandidate, i: number) => (kind !== 'loop' ? c.name : c.kind === 'outback' ? 'Out and back' : `Loop ${LOOP_LABELS[i] ?? i + 1}`);
   /** Metres of `straight` parts (the crow-flies legs the street map has no way over). */
   const straightM = (c: RouteCandidate) => (c.parts ?? []).filter((p) => p.kind === 'straight').reduce((s, p) => s + p.lengthM, 0);
   /** "4.9 km · 61 min", plus "· 2.8 km straight" on a "Straight across" candidate (non-breaking, so the row wraps before it, not inside it). */

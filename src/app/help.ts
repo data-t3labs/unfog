@@ -190,7 +190,7 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
         '"% new" is the share of the route on never-visited streets; "unexplored" is that distance.',
         'Most new maximises unexplored distance; Balanced trades a little; Direct is the shortest and is always shown.',
         'When the streets go a long way round something the straight line crosses — an inlet with no bridge for walkers, a river without a walkway — a "Straight across" route is offered too: streets to the edge, a dashed straight leg across (a ferry, or open water — your call), streets again on the other side, and Google Maps gets the walking parts either side of it.',
-        'No destination in mind? "Where to?" → "Explore a loop from here" gives round trips of a length you choose.',
+        'No destination in mind? "Where to?" → "Explore a loop from here" gives round trips of a length you choose. Where the roads make no ring of that length — a country lane, a beach road — you get the honest answer instead: a row named "Out and back", the same way there and back.',
         'Street data comes by itself: as you move around (and wherever you plan a route), Unfog downloads the streets of that area in the background — Wi-Fi or mobile, paused when Low Data Mode is on — and keeps them for routes offline. Data → Routing data shows what is on your phone; nothing is lost by clearing it. Where no streets are known yet, routes are straight lines you can still follow, and "Download this area" fetches a place outside the automatic coverage (North America today).',
       ]),
     ),
