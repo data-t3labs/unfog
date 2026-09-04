@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DROPBOX_PKCE_KEY,
+  DROPBOX_REVOKE_URL,
   DROPBOX_TOKENS_KEY,
   DropboxClient,
   DropboxError,
@@ -279,7 +280,7 @@ describe('DropboxClient', () => {
     expect(store.read<DropboxTokens>(DROPBOX_TOKENS_KEY, null as never).accessToken).toBe('at-3');
   });
 
-  it('without a refresh token an expired sign-in is a non-retryable auth error; disconnect forgets everything', async () => {
+  it('without a refresh token an expired sign-in is a non-retryable auth error; disconnect forgets everything (nothing to revoke)', async () => {
     const store = memoryKV({ [DROPBOX_TOKENS_KEY]: { accessToken: 'only', expiresAt: 500 } });
     const ff = fakeFetch({});
     const c = new DropboxClient({ appKey: 'k1', store, fetchFn: ff.fn, now: () => 1000 });
@@ -288,6 +289,33 @@ describe('DropboxClient', () => {
     c.disconnect();
     expect(c.connected()).toBe(false);
     await expect(c.listFolder('/x')).rejects.toMatchObject({ tag: 'not_connected' });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ff.calls).toHaveLength(0); // an expired token without a refresh token cannot be revoked
+  });
+
+  // New case (review-round2 LOW-2): Disconnect used to forget the tokens locally only.
+  it('disconnect revokes the token at Dropbox in the background (refreshing an expired one first) and never re-writes the store', async () => {
+    const store = memoryKV({ [DROPBOX_TOKENS_KEY]: TOKENS });
+    let ff = fakeFetch({ 'auth/token/revoke': () => jsonRes(null) });
+    let c = new DropboxClient({ appKey: 'k1', store, fetchFn: ff.fn, now: () => 1 });
+    c.disconnect();
+    expect(store.read(DROPBOX_TOKENS_KEY, null)).toBeNull();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ff.calls.map((x) => x.url)).toEqual([DROPBOX_REVOKE_URL]);
+    expect(ff.calls[0].init.method).toBe('POST');
+    expect(header(ff.calls[0].init, 'Authorization')).toBe('Bearer at-1');
+    expect(store.read(DROPBOX_TOKENS_KEY, null)).toBeNull();
+    // Expired access token + refresh token: refresh, revoke the fresh one; a failing revoke is ignored.
+    store.write(DROPBOX_TOKENS_KEY, { ...TOKENS, expiresAt: 0 });
+    ff = fakeFetch({ '/oauth2/token': () => jsonRes({ access_token: 'at-fresh', expires_in: 14400 }), 'auth/token/revoke': () => new Response('down', { status: 503 }) });
+    c = new DropboxClient({ appKey: 'k1', store, fetchFn: ff.fn, now: () => 1 });
+    c.disconnect();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ff.calls.map((x) => x.url.replace(/^https:\/\/[^/]+/, ''))).toEqual(['/oauth2/token', '/2/auth/token/revoke']);
+    expect(body(ff.calls[0].init)).toContain('grant_type=refresh_token');
+    expect(header(ff.calls[1].init, 'Authorization')).toBe('Bearer at-fresh');
+    expect(store.read(DROPBOX_TOKENS_KEY, null)).toBeNull(); // the refresh did not resurrect the record
+    expect(c.connected()).toBe(false);
   });
 
   it('currentAccount reads users/get_current_account', async () => {

@@ -9,6 +9,7 @@ import type { AppContext } from './context';
 import { fmtBytes, fmtRelative } from './format';
 import { packTitle } from './pack-label';
 import { clear, el, toast } from './ui';
+import { PACKS_CLEARED_EVENT } from './prefetch-driver';
 
 export interface PacksSection {
   readonly el: HTMLElement;
@@ -41,6 +42,7 @@ export function createPacksSection(ctx: AppContext): PacksSection {
     clearBtn.disabled = true;
     try {
       await engines.route.packsClear();
+      window.dispatchEvent(new Event(PACKS_CLEARED_EVENT)); // the prefetcher refills the ring at once (review MED-2)
       toast('Routing data cleared — it downloads again as you go');
     } catch (e) {
       toast(`Could not clear: ${String((e as Error)?.message ?? e)}. Try again.`, { kind: 'error' });

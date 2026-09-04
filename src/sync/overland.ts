@@ -14,7 +14,10 @@
  * 30-minute pause without moving 500 m draws nothing new either way.
  *
  * The cursor is saved after each page is on the map, so a pull that dies midway repeats one
- * page at most (idempotent).
+ * page at most (idempotent). Pages are small (25 batches) because the receiver runs on
+ * Cloudflare's Free plan, which allows 50 KV calls per request — one per batch; a night's
+ * backlog is simply several pages. The cursor is the receiver's own token: it never contains
+ * the bearer token (it travels in the pull URL, which request logs keep).
  */
 import type { GridApi } from '../grid/api';
 import type { Track } from '../grid/types';
@@ -26,8 +29,10 @@ export const OVERLAND_KEY = 'unfog.overland';
 export const OVERLAND_SOURCE = 'overland';
 /** Fixes worse than this are dropped (matches src/record/session.ts MAX_ACCURACY_M). */
 export const OVERLAND_MAX_ACCURACY_M = 50;
-/** Batches per pull page. */
-const PAGE_LIMIT = 100;
+/** Batches per pull page (= the receiver's PULL_MAX_LIMIT; it clamps anything larger). */
+export const PAGE_LIMIT = 25;
+/** Pages per pull before giving up on a receiver that keeps saying `hasMore` (30 days × 288 batches = 346 pages). */
+const MAX_PAGES = 500;
 const TOKEN_RE = /^[A-Za-z0-9_-]{8,128}$/;
 
 /** A compact point as the receiver serves it. */
@@ -284,7 +289,7 @@ export class OverlandSource implements SyncSource {
       }
       if (typeof res.cursor === 'string' && res.cursor !== '') this.patch({ cursor: res.cursor });
       if (!res.hasMore) break;
-      if (page > 200) throw new SyncError('The receiver keeps saying there is more — giving up for now', true);
+      if (page + 1 >= MAX_PAGES) throw new SyncError('The receiver keeps saying there is more — giving up for now', true);
     }
     const s = this.state();
     this.patch({ lastPull: { at: this.now(), batches, points, tracks: touched.size }, totalBatches: s.totalBatches + batches, totalPoints: s.totalPoints + points });

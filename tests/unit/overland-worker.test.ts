@@ -4,23 +4,32 @@
  * tests/unit/** and the Worker is not part of src/.
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_APP_ORIGIN, batchKey, compactBatch, handleRequest, keyEpoch, type Env, type KvLike, type KvListResult } from '../../workers/overland/src/worker';
+import { DEFAULT_APP_ORIGIN, DELETE_CHUNK, PULL_MAX_LIMIT, batchKey, batchSuffix, compactBatch, cursorSuffix, handleRequest, keyEpoch, type Env, type KvLike, type KvListResult } from '../../workers/overland/src/worker';
 
-/** Sorted in-memory KV with prefix / limit / cursor paging and recorded TTLs. */
+/** Sorted in-memory KV with prefix / limit / cursor paging, recorded TTLs and a per-call counter (every call is a Cloudflare subrequest). */
 class MemoryKV implements KvLike {
   readonly map = new Map<string, { value: string; ttl?: number }>();
   lists = 0;
+  /** KV calls since the last reset(): the Free plan allows 50 per Worker invocation. */
+  ops = 0;
+  reset(): void {
+    this.ops = 0;
+  }
   async get(key: string): Promise<string | null> {
+    this.ops++;
     return this.map.get(key)?.value ?? null;
   }
   async put(key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
+    this.ops++;
     this.map.set(key, { value, ttl: options?.expirationTtl });
   }
   async delete(key: string): Promise<void> {
+    this.ops++;
     this.map.delete(key);
   }
   async list(options: { prefix?: string; limit?: number; cursor?: string } = {}): Promise<KvListResult> {
     this.lists++;
+    this.ops++;
     const all = [...this.map.keys()].filter((k) => k.startsWith(options.prefix ?? '')).sort();
     const start = options.cursor ? Number(options.cursor) : 0;
     const limit = options.limit ?? 1000;
@@ -69,13 +78,18 @@ let clock = Date.UTC(2026, 8, 3, 20, 0, 0);
 const now = () => clock;
 
 describe('Overland receiver — pure helpers', () => {
-  it('batchKey pads for chronological sorting and keyEpoch reads it back', () => {
+  it('batchKey pads for chronological sorting and keyEpoch reads it back (full key or suffix); cursorSuffix strips an old token prefix', () => {
     const k = batchKey(TOKEN, 1_757_000_000_000, 7);
     expect(k).toBe(`${TOKEN}/1757000000000-00007`);
+    expect(batchSuffix(1_757_000_000_000, 7)).toBe('1757000000000-00007');
     expect(keyEpoch(k)).toBe(1_757_000_000_000);
+    expect(keyEpoch('1757000000000-00007')).toBe(1_757_000_000_000);
     expect(keyEpoch('junk')).toBeNull();
     expect(batchKey(TOKEN, 1_757_000_000_000, 100_007)).toBe(`${TOKEN}/1757000000000-00007`);
     expect(batchKey(TOKEN, 5, 1) < batchKey(TOKEN, 6, 0)).toBe(true);
+    expect(cursorSuffix(`${TOKEN}/1757000000000-00007`, `${TOKEN}/`)).toBe('1757000000000-00007');
+    expect(cursorSuffix('1757000000000-00007', `${TOKEN}/`)).toBe('1757000000000-00007');
+    expect(cursorSuffix('', `${TOKEN}/`)).toBe('');
   });
 
   it('compactBatch keeps t/lon/lat, optional acc/speed (never -1), sorts by time, drops the unusable', () => {
@@ -123,7 +137,7 @@ describe('Overland receiver — handlers', () => {
     expect(post.headers.get('Access-Control-Allow-Origin')).toBeNull();
   });
 
-  it('auth: missing / unknown / malformed tokens → 401; no tokens configured → 503; ?token= works', async () => {
+  it('auth: missing / unknown / malformed tokens → 401; no tokens configured → 503; a token in the URL is not auth (it would be logged)', async () => {
     const kv = new MemoryKV();
     expect((await handleRequest(req('POST', '/', { token: null, body: {} }), env(kv), now)).status).toBe(401);
     expect((await handleRequest(req('POST', '/', { token: 'not-in-the-list-1', body: {} }), env(kv), now)).status).toBe(401);
@@ -132,7 +146,7 @@ describe('Overland receiver — handlers', () => {
     expect(none.status).toBe(503);
     expect(await none.json()).toMatchObject({ result: 'error', error: expect.stringMatching(/OVERLAND_TOKENS/) });
     const q = await handleRequest(req('GET', '/status', { token: null, query: { token: TOKEN } }), env(kv), now);
-    expect(q.status).toBe(200);
+    expect(q.status).toBe(401);
   });
 
   it('POST stores a compact batch under <token>/<epoch>-<seq> with a 30-day TTL and answers exactly {"result":"ok"}', async () => {
@@ -166,14 +180,15 @@ describe('Overland receiver — handlers', () => {
     expect([...kv.map.keys()].filter((k) => k.startsWith('other-token-000/'))).toHaveLength(1);
   });
 
-  it('GET /pull returns batches after the cursor oldest first, pages with limit/hasMore, and never crosses tokens', async () => {
+  it('GET /pull returns batches after the cursor oldest first, pages with limit/hasMore, never crosses tokens, and keeps the token out of keys and cursors', async () => {
     const kv = new MemoryKV();
     const keys: string[] = [];
     for (let i = 0; i < 5; i++) {
       clock = Date.UTC(2026, 8, 3, 20, i, 0);
       await handleRequest(req('POST', '/', { body: overlandBatch([`2026-09-03T19:5${i}:00Z`]) }), env(kv), now);
-      keys.push([...kv.map.keys()].sort().filter((k) => k.startsWith(`${TOKEN}/`))[i]);
+      keys.push([...kv.map.keys()].sort().filter((k) => k.startsWith(`${TOKEN}/`))[i].slice(TOKEN.length + 1));
     }
+    expect(keys[0]).toMatch(/^\d{13}-\d{5}$/);
     await handleRequest(req('POST', '/', { token: 'other-token-000', body: overlandBatch(['2026-09-03T19:59:00Z']) }), env(kv), now);
     const all = (await (await handleRequest(req('GET', '/pull'), env(kv), now)).json()) as { result: string; batches: Array<{ key: string; received: number; points: Array<{ t: number }> }>; cursor: string; hasMore: boolean };
     expect(all.result).toBe('ok');
@@ -182,9 +197,16 @@ describe('Overland receiver — handlers', () => {
     expect(all.batches[0].received).toBe(Date.UTC(2026, 8, 3, 20, 0, 0));
     expect(all.cursor).toBe(keys[4]);
     expect(all.hasMore).toBe(false);
+    expect(JSON.stringify(all)).not.toContain(TOKEN); // the cursor goes into the next pull's URL
     // After a cursor: only the newer ones.
     const after = (await (await handleRequest(req('GET', '/pull', { query: { since: keys[2] } }), env(kv), now)).json()) as typeof all;
     expect(after.batches.map((b) => b.key)).toEqual([keys[3], keys[4]]);
+    // A cursor stored by an older app (the full `<token>/…` key) still works, and is answered in the new form.
+    const old = (await (await handleRequest(req('GET', '/pull', { query: { since: `${TOKEN}/${keys[2]}` } }), env(kv), now)).json()) as typeof all;
+    expect(old.batches.map((b) => b.key)).toEqual([keys[3], keys[4]]);
+    expect(old.cursor).toBe(keys[4]);
+    const oldNone = (await (await handleRequest(req('GET', '/pull', { query: { since: `${TOKEN}/${keys[4]}` } }), env(kv), now)).json()) as typeof all;
+    expect(oldNone).toEqual({ result: 'ok', batches: [], cursor: keys[4], hasMore: false });
     // Paging: limit 2 → the first two + hasMore; then from that cursor.
     const p1 = (await (await handleRequest(req('GET', '/pull', { query: { limit: '2' } }), env(kv), now)).json()) as typeof all;
     expect(p1.batches.map((b) => b.key)).toEqual([keys[0], keys[1]]);
@@ -201,6 +223,55 @@ describe('Overland receiver — handlers', () => {
     expect(none).toEqual({ result: 'ok', batches: [], cursor: keys[4], hasMore: false });
   });
 
+  // New case (review-round2 CRIT-1): the Free plan allows 50 KV calls per invocation; a night's
+  // backlog must drain in small pages, and a wipe in chunks, with no single request over budget.
+  it('a backlog of 120 batches drains in 5 pulls of ≤ 25 with no request over 26 KV calls; DELETE wipes 40 per call and says `more`', async () => {
+    const kv = new MemoryKV();
+    for (let i = 0; i < 120; i++) {
+      clock = Date.UTC(2026, 8, 3, 0, 0, 0) + i * 5 * 60_000;
+      await handleRequest(req('POST', '/', { body: overlandBatch([new Date(clock - 60_000).toISOString()]) }), env(kv), now);
+    }
+    expect(kv.map.size).toBe(120);
+    type Page = { batches: Array<{ key: string }>; cursor: string; hasMore: boolean };
+    const seen: string[] = [];
+    let since = '';
+    let pulls = 0;
+    let maxOps = 0;
+    for (;;) {
+      kv.reset();
+      // The client asks for 100 (an old app) — the receiver clamps to PULL_MAX_LIMIT.
+      const page = (await (await handleRequest(req('GET', '/pull', { query: { since, limit: '100' } }), env(kv), now)).json()) as Page;
+      pulls++;
+      maxOps = Math.max(maxOps, kv.ops);
+      expect(page.batches.length).toBeLessThanOrEqual(PULL_MAX_LIMIT);
+      seen.push(...page.batches.map((b) => b.key));
+      since = page.cursor;
+      if (!page.hasMore) break;
+      expect(pulls).toBeLessThan(20);
+    }
+    expect(pulls).toBe(5); // 25 + 25 + 25 + 25 + 20
+    expect(maxOps).toBeLessThanOrEqual(26); // 1 list + 25 gets
+    expect(seen).toHaveLength(120);
+    expect(new Set(seen).size).toBe(120);
+    expect(seen).toEqual([...seen].sort());
+    expect(seen.every((k) => /^\d{13}-\d{5}$/.test(k))).toBe(true);
+    kv.reset();
+    expect((await handleRequest(req('GET', '/status'), env(kv), now)).status).toBe(200);
+    expect(kv.ops).toBeLessThanOrEqual(2);
+    // Wipe: three chunks of 40, each 1 list + 40 deletes.
+    const dels: Array<{ deleted: number; more: boolean; ops: number }> = [];
+    for (let i = 0; i < 10; i++) {
+      kv.reset();
+      const r = (await (await handleRequest(req('DELETE', '/'), env(kv), now)).json()) as { deleted: number; more: boolean };
+      dels.push({ ...r, ops: kv.ops });
+      if (!r.more) break;
+    }
+    expect(dels.map((d) => d.deleted)).toEqual([DELETE_CHUNK, DELETE_CHUNK, DELETE_CHUNK]);
+    expect(dels.map((d) => d.more)).toEqual([true, true, false]);
+    expect(Math.max(...dels.map((d) => d.ops))).toBeLessThanOrEqual(DELETE_CHUNK + 1);
+    expect(kv.map.size).toBe(0);
+  });
+
   it('GET /status counts batches and reports the newest time; DELETE wipes only this token', async () => {
     const kv = new MemoryKV();
     const empty = (await (await handleRequest(req('GET', '/status'), env(kv), now)).json()) as { result: string; batches: number; latest: number | null };
@@ -212,8 +283,8 @@ describe('Overland receiver — handlers', () => {
     await handleRequest(req('POST', '/', { token: 'other-token-000', body: overlandBatch(['2026-09-03T21:04:30Z']) }), env(kv), now);
     const st = (await (await handleRequest(req('GET', '/status'), env(kv), now)).json()) as typeof empty;
     expect(st).toMatchObject({ result: 'ok', batches: 2, latest: Date.UTC(2026, 8, 3, 21, 5, 0) });
-    const del = (await (await handleRequest(req('DELETE', '/'), env(kv), now)).json()) as { result: string; deleted: number };
-    expect(del).toEqual({ result: 'ok', deleted: 2 });
+    const del = (await (await handleRequest(req('DELETE', '/'), env(kv), now)).json()) as { result: string; deleted: number; more: boolean };
+    expect(del).toEqual({ result: 'ok', deleted: 2, more: false });
     expect(kv.map.size).toBe(1);
     expect([...kv.map.keys()][0]).toMatch(/^other-token-000\//);
   });

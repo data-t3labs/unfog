@@ -415,9 +415,16 @@ export class PackSource {
         const now = this.now();
         const records: CachedTile[] = r.entries.map((e) => ({ key: tileKeyOf(e.tx, e.ty), x: e.tx, y: e.ty, cell, bytes: sliceEntry(body, r, e).slice(), size: e.length, lastUsed: now, builtAt: g.info.builtAt }));
         if (db) {
-          const tx = db.transaction('tiles', 'readwrite');
-          for (const rec of records) await tx.store.put(rec);
-          await tx.done;
+          try {
+            const tx = db.transaction('tiles', 'readwrite');
+            for (const rec of records) await tx.store.put(rec);
+            await tx.done;
+          } catch {
+            // IndexedDB refused (quota, a closed connection): these tiles are not on the device —
+            // report them failed like a network error, so a route uses what is cached instead of throwing.
+            result.failed.push(...records.map((rec) => rec.key));
+            return;
+          }
         }
         for (const rec of records) { cached.add(rec.key); result.fetched++; result.bytes += rec.size; this.perf.fetchedTiles++; }
       }));

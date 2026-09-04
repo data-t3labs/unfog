@@ -141,10 +141,22 @@ export interface PrefetchRound {
 export class Prefetcher {
   readonly state = initialPrefetchState();
   private lastFetchedCentre: [number, number] | null = null;
+  /**
+   * A tile the last round left in the cache (centre first). A same-centre tick checks it is still
+   * there: when it is not — Data → Clear emptied the cache, or a corrupt tile was evicted — the
+   * "unchanged" memo is stale and the ring is refilled.
+   */
+  private probe: [number, number] | null = null;
   private running: Promise<PrefetchRound> | null = null;
   readonly stats = { rounds: 0, fetched: 0, bytes: 0, evicted: 0, failed: 0 };
 
   constructor(private readonly cache: PrefetchCache, readonly cfg: PrefetchConfig = DEFAULT_PREFETCH) {}
+
+  /** The cache changed under the prefetcher (Data → Clear): re-plan the current ring on the next tick. */
+  invalidate(): void {
+    this.state.pending = true;
+    this.probe = null;
+  }
 
   /** New position fix or map centre. Cheap; the work happens in tick(). Returns true when the centre tile changed. */
   notify(lon: number, lat: number, kind: 'position' | 'map', now = Date.now()): boolean {
@@ -164,7 +176,12 @@ export class Prefetcher {
   }
 
   private async round(env: PrefetchEnv): Promise<PrefetchRound> {
-    const decision = decidePrefetch(this.state, env, this.cfg, this.lastFetchedCentre);
+    let decision = decidePrefetch(this.state, env, this.cfg, this.lastFetchedCentre);
+    if (decision.action === 'skip' && decision.reason === 'unchanged' && this.probe && !(await this.cache.hasTile(this.probe[0], this.probe[1]))) {
+      // A tile this ring had is gone: the cache was cleared under us. Refill (throttle permitting).
+      this.invalidate();
+      decision = decidePrefetch(this.state, env, this.cfg, this.lastFetchedCentre);
+    }
     const out: PrefetchRound = { decision, fetched: 0, bytes: 0, failed: 0, uncovered: 0, evicted: 0 };
     if (decision.action !== 'fetch') return out;
     this.state.lastRoundAt = env.now;
@@ -172,11 +189,18 @@ export class Prefetcher {
     const missing: Array<[number, number]> = [];
     for (const [x, y] of decision.tiles) if (!(await this.cache.hasTile(x, y))) missing.push([x, y]);
     const batch = missing.slice(0, this.cfg.maxTilesPerRound);
+    const notInCache = new Set<string>();
     if (batch.length) {
       const r = await this.cache.fetchTiles(batch);
       out.fetched = r.fetched; out.bytes = r.bytes; out.failed = r.failed.length; out.uncovered = r.uncovered.length;
       this.stats.fetched += r.fetched; this.stats.bytes += r.bytes; this.stats.failed += r.failed.length;
+      for (const k of r.failed) notInCache.add(k);
+      for (const k of r.uncovered) notInCache.add(k);
     }
+    // The probe: the first ring tile that was already cached or has just been fetched.
+    const fetchedNow = new Set(batch.map(([x, y]) => `${x}/${y}`));
+    const wasMissing = new Set(missing.map(([x, y]) => `${x}/${y}`));
+    this.probe = decision.tiles.find(([x, y]) => { const k = `${x}/${y}`; return !notInCache.has(k) && (!wasMissing.has(k) || fetchedNow.has(k)); }) ?? null;
     this.state.pending = missing.length > batch.length || out.failed > 0;
     this.lastFetchedCentre = decision.centre;
     const protect = new Set(decision.tiles.map(([x, y]) => `${x}/${y}`));

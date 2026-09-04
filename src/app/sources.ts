@@ -271,6 +271,7 @@ export function createSourcesSection(ctx: AppContext, sync: Sync | null = getSyn
           'Tracking Enabled on; Continuous Tracking Mode: Standard (or Both); Send Interval: 5 min; Locations per Batch: 100.',
           'Leave "Consider HTTP 2XX Successful" off — the receiver answers {"result":"ok"} the way Overland expects.',
           'Walk a little, then tap Test here: it should say how many batches the receiver holds.',
+          'Leave Track my movement off (Help → Settings) while Overland records for you: the same walk would otherwise count twice in the heat layer.',
         ]),
       ),
       el(

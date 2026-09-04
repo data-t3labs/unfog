@@ -49,22 +49,37 @@ while open. Points land on the map as one track per day ("Overland 2026-09-03").
 
 ## API
 
-Bearer token per phone (`Authorization: Bearer <token>`; `?token=` also accepted).
+Bearer token per phone, in the header only: `Authorization: Bearer <token>` (Overland sends it that
+way). A token in the URL is refused — Cloudflare's request logs and `wrangler tail` keep URLs.
 
 | Method | Path | Purpose | Reply |
 |---|---|---|---|
 | POST | `/` | Overland batch (`{"locations": [GeoJSON Feature…]}`) | `{"result":"ok"}` |
-| GET | `/pull?since=<key>&limit=100` | batches after the cursor, oldest first | `{result, batches:[{key, received, points:[{t, lon, lat, acc?, speed?}]}], cursor, hasMore}` |
+| GET | `/pull?since=<cursor>&limit=25` | up to 25 batches after the cursor, oldest first | `{result, batches:[{key, received, points:[{t, lon, lat, acc?, speed?}]}], cursor, hasMore}` |
 | GET | `/status` | how many batches are stored, newest time | `{result, batches, latest}` |
-| DELETE | `/` | wipe this token's batches | `{result, deleted}` |
+| DELETE | `/` | delete up to 40 of this token's batches; repeat while `more` | `{result, deleted, more}` |
 | GET | `/` | banner (no auth) | text |
+
+`key` and `cursor` are `<epochMs13>-<seq5>` — the token is never part of them, because the cursor
+goes into the next pull's URL. (A cursor saved by an older app, `<token>/<epochMs13>-<seq5>`, is
+still accepted.) Unfog keeps pulling pages while `hasMore` is true, so a night's backlog arrives
+in a few requests.
 
 Storage: key `<token>/<epochMs13>-<seq5>`, value `{v:1, received, device, points}`, expiring after
 `BATCH_TTL_DAYS` (30). Points keep only what Unfog uses: time (ms), lon, lat, horizontal accuracy,
 speed. Nothing else about the phone is stored.
 
+Wipe everything for a token (repeat until `"more":false`):
+
+```sh
+curl -X DELETE -H "Authorization: Bearer $TOKEN" https://unfog-overland.<account>.workers.dev/
+```
+
 ## Free-plan limits that matter
 
+- Subrequests: 50 per request, and every KV call is one. That is why `/pull` serves at most 25
+  batches (plus up to 20 list pages) and `DELETE` removes 40 per call — a request that went over
+  would fail outright and nothing would ever drain.
 - KV: 1 000 writes/day (one per batch), 100 000 reads/day, 1 GB. A phone sending every 5 minutes
   writes at most 288 a day.
 - Workers: 100 000 requests/day.

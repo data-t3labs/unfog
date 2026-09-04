@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ApplyResult, GridApi, TrackSummary } from '../grid/api';
 import type { GridStats, Track } from '../grid/types';
 import { dayKey } from '../import/util';
-import { OVERLAND_KEY, OverlandSource, describeAge, maskToken, mergeIntoDayTracks, normalizeReceiverUrl, overlandDayId, validToken, type FetchFn, type OverlandPoint, type OverlandState } from './overland';
+import { OVERLAND_KEY, OverlandSource, PAGE_LIMIT, describeAge, maskToken, mergeIntoDayTracks, normalizeReceiverUrl, overlandDayId, validToken, type FetchFn, type OverlandPoint, type OverlandState } from './overland';
 import { SyncError } from './scheduler';
 import { memoryKV } from './state';
 
@@ -132,7 +132,8 @@ describe('OverlandSource', () => {
 
   it('pulls pages after the cursor, folds points into day tracks (merged across batches), advances the cursor per page; a re-pull adds nothing', async () => {
     const { grid, marks, tracks } = fakeGrid();
-    const k = (i: number) => `tok-12345678/${String(T0 + i * 60_000).padStart(13, '0')}-0000${i}`;
+    // The receiver's keys/cursors carry no token (review-round2 MED-3: the cursor is in the pull URL).
+    const k = (i: number) => `${String(T0 + i * 60_000).padStart(13, '0')}-0000${i}`;
     const rx = fakeReceiver({
       '': { batches: [{ key: k(1), points: [pt(0), pt(1)] }, { key: k(2), points: [pt(2, { acc: 200 }), pt(3)] }], cursor: k(2), hasMore: true },
       [k(2)]: { batches: [{ key: k(3), points: [pt(4), { ...pt(0), t: T0 + 2 * 86_400_000 }] }], cursor: k(3), hasMore: false },
@@ -149,7 +150,9 @@ describe('OverlandSource', () => {
     expect(s.lastPull).toMatchObject({ batches: 3, points: 5, tracks: 2 });
     expect(s.totalPoints).toBe(5);
     expect(rx.calls.map((c) => new URL(c.url).searchParams.get('since'))).toEqual(['', k(2)]);
+    expect(rx.calls.map((c) => new URL(c.url).searchParams.get('limit'))).toEqual([String(PAGE_LIMIT), String(PAGE_LIMIT)]);
     expect(rx.calls[0].auth).toBe('Bearer tok-12345678');
+    for (const c of rx.calls) expect(c.url).not.toContain('tok-12345678'); // the token travels in the header only
     // Second pull: the cursor yields nothing → no marks.
     const r2 = await source.pull('interval', progress);
     expect(r2).toEqual({ added: 0, items: 0 });

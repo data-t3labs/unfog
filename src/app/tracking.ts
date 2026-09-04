@@ -161,6 +161,13 @@ export function createTracking(ctx: AppContext, hooks: RecorderEvents): Tracking
       return false;
     },
     async resume() {
+      // The real grid did not start and the app fell back to the in-page mock (src/app/engines.ts):
+      // a "save" there vanishes on reload and a new session would be lost the same way. Leave the
+      // unfinished session for a boot with the real grid and record nothing; the pill says paused.
+      if (ctx.engines.gridMock && !ctx.engines.forceMock) {
+        renderPill();
+        return;
+      }
       const saved = await saveUnfinishedSession(ctx.engines.grid);
       if (saved) await ctx.dataChanged();
       if (getSettings().tracking && location.supported) await startSession();

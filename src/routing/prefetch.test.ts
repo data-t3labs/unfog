@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createPrefetchDriver } from '../app/prefetch-driver';
+import { PACKS_CLEARED_EVENT, createPrefetchDriver } from '../app/prefetch-driver';
 import { graphTileBounds, lonLatToGraphTile } from './graph-format';
 import { DEFAULT_PREFETCH, Prefetcher, decidePrefetch, initialPrefetchState, mapMoveCounts, planEviction, ringTiles, type PrefetchCache, type PrefetchEnv } from './prefetch';
 
@@ -187,6 +187,30 @@ describe('Prefetcher', () => {
     expect(p.state.pending).toBe(false); // uncovered is not pending work
   });
 
+  // New case (review-round2 MED-2): the "unchanged" memo must not outlive the cache it describes.
+  it('refills the ring after the cache is emptied under it (Data → Clear) without the centre tile changing; invalidate() does the same at once', async () => {
+    const cache = fakeCache(() => true);
+    const p = new Prefetcher(cache);
+    const [lon, lat] = centreOf(1206, 1539);
+    p.notify(lon, lat, 'position', 0);
+    expect((await p.tick(env({ now: 0 }))).fetched).toBe(25);
+    expect((await p.tick(env({ now: 20_000 }))).decision).toEqual({ action: 'skip', reason: 'unchanged' });
+    // The worker's PackSource.clear() emptied the store; nobody told the prefetcher.
+    cache.tiles.clear();
+    p.notify(lon + 1e-4, lat, 'position', 60_000); // a fix in the same tile: no centre change
+    const r = await p.tick(env({ now: 60_000 }));
+    expect(r.decision.action).toBe('fetch');
+    expect(r.fetched).toBe(25);
+    expect(cache.tiles.size).toBe(25);
+    expect((await p.tick(env({ now: 80_000 }))).decision).toEqual({ action: 'skip', reason: 'unchanged' });
+    // Told explicitly (the Data screen's Clear): the next tick refills even before any tile is checked.
+    cache.tiles.clear();
+    p.invalidate();
+    expect((await p.tick(env({ now: 100_000 }))).fetched).toBe(25);
+    // A probe check costs one hasTile per same-centre tick, not a round: the stats show only the real rounds.
+    expect(p.stats.rounds).toBe(3);
+  });
+
   it('a large ring is fetched in rounds of maxTilesPerRound', async () => {
     const cache = fakeCache(() => true);
     const p = new Prefetcher(cache, { ...DEFAULT_PREFETCH, maxTilesPerRound: 10, minIntervalMs: 0 });
@@ -202,14 +226,15 @@ describe('Prefetcher', () => {
 });
 
 describe('createPrefetchDriver (src/app/prefetch-driver.ts)', () => {
-  it('starts on the map centre, rounds at once on a fix in a new tile, ignores a glance near a fresh fix, honours a far pan, and stops cleanly', async () => {
+  it('starts on the map centre, rounds at once on a fix in a new tile, ignores a glance near a fresh fix and a coarse fix, honours a far pan, refills on packs-cleared, and stops cleanly', async () => {
     const cache = fakeCache(() => true);
     const route = { packsHasTile: cache.hasTile, packsFetchTiles: cache.fetchTiles, packsListCached: cache.listCached, packsEvict: cache.evict };
-    let fix: ((lon: number, lat: number) => void) | null = null;
+    let fix: ((lon: number, lat: number, accuracy?: number) => void) | null = null;
     let move: (() => void) | null = null;
     let centre = centreOf(500, 600);
     let online = true;
     let unsubscribed = 0;
+    const target = new EventTarget();
     const driver = createPrefetchDriver({
       route,
       onFix: (cb) => { fix = cb; return () => { fix = null; unsubscribed++; }; },
@@ -217,16 +242,34 @@ describe('createPrefetchDriver (src/app/prefetch-driver.ts)', () => {
       mapCentre: () => centre,
       env: () => ({ online, saveData: false, now: Date.now() }),
       tickMs: 3_600_000,
-      onlineTarget: null,
+      onlineTarget: target,
       config: { ...DEFAULT_PREFETCH, minIntervalMs: 0 },
     });
     // The saved map centre is where the user was: its ring is fetched right away.
     await driver.tick();
     expect(driver.prefetcher.state.centre).toEqual([500, 600]);
     expect(cache.tiles.size).toBe(25);
+    // A coarse fix (a cell tower 1.5 km out, review-round2 LOW-7) does not move the ring.
+    fix!(...centreOf(650, 650), 1500);
+    await driver.tick();
+    expect(driver.prefetcher.state.centre).toEqual([500, 600]);
+    expect(cache.tiles.size).toBe(25);
     // A fix in another tile → a round at once (no wait for the timer).
     const user = centreOf(700, 700);
-    fix!(...user);
+    fix!(...user, 12);
+    await driver.tick();
+    expect(cache.tiles.size).toBe(50);
+    // Data → Clear: the event refills the ring around the current centre without a centre change.
+    cache.tiles.clear();
+    target.dispatchEvent(new Event(PACKS_CLEARED_EVENT));
+    await driver.tick();
+    expect(cache.tiles.size).toBe(25);
+    for (const [x, y] of ringTiles(700, 700, 2)) expect(cache.tiles.has(`${x}/${y}`)).toBe(true);
+    // Back to the state the rest of the case expects (50 tiles: rings 500/600 + 700/700, centre on the user).
+    centre = centreOf(500, 600);
+    move!();
+    await driver.tick();
+    driver.prefetcher.notify(user[0], user[1], 'position');
     await driver.tick();
     expect(cache.tiles.size).toBe(50);
     // A glance around right after the fix (≈ 2 km, inside the ring) does not move the ring — with or

@@ -47,16 +47,21 @@ interface Entry {
   tag?: 'file' | 'folder' | 'deleted';
 }
 
-/** A Dropbox double: list pages by cursor, downloads by path, and injectable failures. */
-function fakeDropbox(opts: { entries: Entry[]; changes?: Record<string, Entry[]> } = { entries: [] }) {
+/**
+ * A Dropbox double: list pages by cursor (`entries` = the folder's first page, `changes[cursor]` =
+ * what `continue` from that cursor returns; a page whose cursor is in `hasMore` says has_more),
+ * downloads by path, and injectable failures.
+ */
+function fakeDropbox(opts: { entries: Entry[]; changes?: Record<string, Entry[]>; hasMore?: string[] } = { entries: [] }) {
   const calls: string[] = [];
-  const state = { failListWith: null as null | (() => Response), continueMode: 'ok' as 'ok' | 'reset' };
+  const downloads: string[] = [];
+  const state = { failListWith: null as null | (() => Response), continueMode: 'ok' as 'ok' | 'reset' | 'reset-once', failDownload: null as null | ((name: string) => Response | null) };
   const page = (entries: Entry[], cursor: string) =>
     new Response(
       JSON.stringify({
         entries: entries.map((e) => ({ '.tag': e.tag ?? 'file', name: e.name, path_lower: `${FOLDER_LOWER}/${e.name.toLowerCase()}`, path_display: `${DEFAULT_FOW_SYNC_FOLDER}/${e.name}`, id: `id:${e.name}`, rev: 'r', size: 1 })),
         cursor,
-        has_more: false,
+        has_more: opts.hasMore?.includes(cursor) ?? false,
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
@@ -67,7 +72,10 @@ function fakeDropbox(opts: { entries: Entry[]; changes?: Record<string, Entry[]>
     if (url.endsWith('users/get_current_account')) return new Response(JSON.stringify({ account_id: 'dbid:1', email: 'jacob@example.com' }), { status: 200 });
     if (url.endsWith('files/list_folder/continue')) {
       const { cursor } = JSON.parse(init.body as string) as { cursor: string };
-      if (state.continueMode === 'reset') return new Response(JSON.stringify({ error_summary: 'reset/', error: { '.tag': 'reset' } }), { status: 409 });
+      if (state.continueMode !== 'ok') {
+        if (state.continueMode === 'reset-once') state.continueMode = 'ok';
+        return new Response(JSON.stringify({ error_summary: 'reset/', error: { '.tag': 'reset' } }), { status: 409 });
+      }
       const changes = opts.changes?.[cursor] ?? [];
       return page(changes, `${cursor}+`);
     }
@@ -81,13 +89,16 @@ function fakeDropbox(opts: { entries: Entry[]; changes?: Record<string, Entry[]>
     if (url.endsWith('files/download')) {
       const arg = JSON.parse((init.headers as Record<string, string>)['Dropbox-API-Arg']) as { path: string };
       const name = arg.path.slice(arg.path.lastIndexOf('/') + 1);
+      downloads.push(name);
+      const fail = state.failDownload?.(name);
+      if (fail) return fail;
       if (name === TILE_A || name === TILE_B) return new Response(fixture(name).buffer as ArrayBuffer, { status: 200 });
       if (name === 'gone') return new Response(JSON.stringify({ error_summary: 'path/not_found/', error: { '.tag': 'path', path: { '.tag': 'not_found' } } }), { status: 409 });
       return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
     }
     return new Response('no route', { status: 404 });
   };
-  return { fn, calls, state };
+  return { fn, calls, downloads, state };
 }
 
 function makeSource(grid: GridApi, fetchFn: FetchFn, store = memoryKV({ [DROPBOX_TOKENS_KEY]: TOKENS }), appKey = 'k1') {
@@ -173,6 +184,42 @@ describe('FowDropboxSource', () => {
     expect(grid.cells.size).toBe(3757);
     expect(store.read<FowDropboxState>(FOW_DROPBOX_KEY, null as never).cursor).toBe('cur-2');
     expect(db.calls.filter((c) => c.endsWith('files/list_folder'))).toHaveLength(2);
+  });
+
+  // New cases (review-round2 HIGH-1 / LOW-6): progress is per Dropbox page — the existing cases
+  // never exercise a pull that dies or resets between pages.
+  it('a pull that dies on page 2 keeps page 1 on the map with its cursor; the retry continues there without re-downloading page 1 and counts nothing twice', async () => {
+    const grid = fakeGrid();
+    const db = fakeDropbox({ entries: [{ name: TILE_A }], changes: { 'cur-1': [{ name: TILE_B }] }, hasMore: ['cur-1'] });
+    const { source, store } = makeSource(grid, db.fn);
+    db.state.failDownload = (name) => (name === TILE_B ? new Response('{"error_summary":"internal"}', { status: 500 }) : null);
+    await expect(source.pull('open', onProgress)).rejects.toMatchObject({ retryable: true });
+    // Page 1 (tile A) was applied and its cursor saved before page 2 was tried.
+    expect(grid.cells.size).toBe(3757);
+    expect(db.downloads).toEqual([TILE_A, TILE_B]);
+    expect(store.read<FowDropboxState>(FOW_DROPBOX_KEY, null as never)).toMatchObject({ cursor: 'cur-1', totalFiles: 1, totalCellsAdded: 3757, lastPull: null });
+    // The retry (a suspended app reopened, or after the 429 delay): continue from cur-1 → only tile B.
+    db.state.failDownload = null;
+    const r = await source.pull('open', onProgress);
+    expect(r).toEqual({ added: 33_226, items: 1 });
+    expect(grid.cells.size).toBe(36_983);
+    expect(db.downloads).toEqual([TILE_A, TILE_B, TILE_B]);
+    expect(db.calls.filter((c) => c.endsWith('files/list_folder'))).toHaveLength(1);
+    const s = store.read<FowDropboxState>(FOW_DROPBOX_KEY, null as never);
+    expect(s).toMatchObject({ cursor: 'cur-1+', totalFiles: 2, totalCellsAdded: 36_983 });
+    expect(s.lastPull).toMatchObject({ files: 1, cellsAdded: 33_226 });
+  });
+
+  it('a "reset" while paging (page 2+) restarts the listing once inside the same pull instead of failing it', async () => {
+    const grid = fakeGrid();
+    const db = fakeDropbox({ entries: [{ name: TILE_A }], hasMore: ['cur-1'] });
+    const { source, store } = makeSource(grid, db.fn);
+    db.state.continueMode = 'reset-once';
+    const r = await source.pull('open', onProgress);
+    expect(r).toEqual({ added: 3757, items: 2 }); // tile A from the first listing, again from the re-list (no new cells)
+    expect(grid.cells.size).toBe(3757);
+    expect(db.calls.filter((c) => c.endsWith('files/list_folder'))).toHaveLength(2);
+    expect(store.read<FowDropboxState>(FOW_DROPBOX_KEY, null as never).cursor).toBe('cur-2');
   });
 
   it('a missing folder is a clear, non-retryable error naming the folder; the cursor stays unset', async () => {

@@ -11,6 +11,9 @@
  * Since feedback-2 the session is passive (src/app/tracking.ts owns start/stop): it runs whenever
  * "Track my movement" is on and the app is open. A session left behind by a previous run (iOS
  * killed the app, an update reloaded it) is saved as a track at the next boot — `saveUnfinishedSession`.
+ * When that save fails (IndexedDB refused, the grid worker is slow) the session is moved aside to
+ * `PENDING_SESSIONS_KEY` and retried at every boot; `SESSION_KEY` always belongs to the running
+ * session, and `Recorder.start()` puts aside anything it finds there rather than overwrite it.
  * The location watch pauses while the page is hidden (src/map/location.ts) and the grid breaks a
  * track on gaps > 500 m (src/grid/cell.ts), so a pause never draws a straight line.
  */
@@ -21,6 +24,10 @@ import type { Fix, LocationManager } from '../map/location';
 import { readJSON, removeKey, writeJSON } from '../app/settings';
 
 export const SESSION_KEY = 'unfog.session';
+/** Sessions a boot (or a Stop) could not write to the grid; retried at every boot. */
+export const PENDING_SESSIONS_KEY = 'unfog.sessions.pending';
+/** Pending sessions kept, newest last (localStorage is small; a day's walk is a few hundred KB). */
+export const MAX_PENDING_SESSIONS = 8;
 /** Checkpoint cadence: the fog follows the walk within ~5 s (plus one tile render). */
 export const CHECKPOINT_MS = 5_000;
 const MAX_ACCURACY_M = 50;
@@ -69,25 +76,51 @@ export function isSameLocalDay(a: number, b: number): boolean {
   return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate();
 }
 
+export function loadPendingSessions(): SessionState[] {
+  const list = readJSON<unknown>(PENDING_SESSIONS_KEY, []);
+  return Array.isArray(list) ? (list as SessionState[]).filter((s) => s && typeof s.id === 'string' && Array.isArray(s.points)) : [];
+}
+
+/**
+ * Put a session aside for a later boot — never under SESSION_KEY, which the next `start()` owns.
+ * Sessions with fewer than 2 points are nothing to keep; the list is deduped by id and capped.
+ */
+export function stashSession(s: SessionState): void {
+  if (s.points.length < 2) return;
+  const list = loadPendingSessions().filter((p) => p.id !== s.id);
+  list.push(s);
+  writeJSON(PENDING_SESSIONS_KEY, list.slice(-MAX_PENDING_SESSIONS));
+}
+
 /**
  * Save the session a previous run left behind (crash, iOS kill, update reload): marked under its
  * own id like a Stop would (the checkpoints already counted most of it — the store is incremental),
- * then forgotten. Returns the track, or null when there was nothing (or too little) to keep.
+ * then forgotten. Sessions whose save failed at an earlier boot are retried here too; whatever
+ * still fails stays pending. Returns a track that was written (the left-behind session's when
+ * there was one), or null when nothing was.
  */
 export async function saveUnfinishedSession(grid: GridApi): Promise<Track | null> {
-  const s = loadUnfinishedSession();
-  if (!s) return null;
-  const track = sessionTrack(s);
-  if (track.points.length >= 2) {
+  // First move the session out of SESSION_KEY: whatever happens next, a Recorder.start() must
+  // not find it there and overwrite it (stash, then remove — a kill in between leaves both, and
+  // the stash dedupes by id).
+  const left = loadUnfinishedSession();
+  if (left) stashSession(left);
+  removeKey(SESSION_KEY);
+  let saved: Track | null = null;
+  const remaining: SessionState[] = [];
+  for (const s of loadPendingSessions()) {
+    const track = sessionTrack(s);
     try {
       await grid.markTrack(track);
+      if (!saved || s.id === left?.id) saved = track;
     } catch (e) {
-      console.warn('[record] saving the unfinished session failed', e);
-      return null; // keep it for the next boot
+      console.warn(`[record] saving session ${s.id} failed — kept for the next boot`, e);
+      remaining.push(s);
     }
   }
-  removeKey(SESSION_KEY);
-  return track.points.length >= 2 ? track : null;
+  if (remaining.length) writeJSON(PENDING_SESSIONS_KEY, remaining);
+  else removeKey(PENDING_SESSIONS_KEY);
+  return saved;
 }
 
 export class Recorder {
@@ -119,6 +152,10 @@ export class Recorder {
    */
   async start(resume?: SessionState): Promise<void> {
     if (this.status !== 'idle') return;
+    // A session a previous run left behind and boot could not save (or did not try): put it
+    // aside for the next boot instead of overwriting it with this one.
+    const left = loadUnfinishedSession();
+    if (left && left.id !== resume?.id) stashSession(left);
     this.state = resume ?? {
       id: `session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       startMs: Date.now(),
@@ -153,7 +190,8 @@ export class Recorder {
       try {
         await this.grid.markTrack(track);
       } catch (e) {
-        console.warn('[record] final markTrack failed', e);
+        console.warn('[record] final markTrack failed — the session is kept for the next boot', e);
+        stashSession(state);
       }
     }
     removeKey(SESSION_KEY);

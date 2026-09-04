@@ -35,6 +35,8 @@ export const DROPBOX_AUTHORIZE_URL = 'https://www.dropbox.com/oauth2/authorize';
 export const DROPBOX_TOKEN_URL = 'https://api.dropboxapi.com/oauth2/token';
 export const DROPBOX_API = 'https://api.dropboxapi.com/2';
 export const DROPBOX_CONTENT = 'https://content.dropboxapi.com/2';
+/** Revokes the bearer access token and its refresh token (POST, no body). */
+export const DROPBOX_REVOKE_URL = `${DROPBOX_API}/auth/token/revoke`;
 /** A sign-in that has not returned after this long is stale. */
 const PKCE_MAX_AGE_MS = 15 * 60_000;
 /** Refresh the access token this long before it expires. */
@@ -402,9 +404,26 @@ export class DropboxClient {
     return this.tokens() !== null;
   }
 
+  /**
+   * Forget the tokens here and, best effort, at Dropbox: the offline refresh token would otherwise
+   * stay valid until the user removes Unfog under dropbox.com → Settings → Connected apps. The
+   * revoke runs in the background and never writes the store (which is already cleared).
+   */
   disconnect(): void {
+    const t = this.tokens();
     this.store.remove(DROPBOX_TOKENS_KEY);
     this.store.remove(DROPBOX_PKCE_KEY);
+    if (t) void this.revoke(t).catch(() => undefined);
+  }
+
+  private async revoke(t: DropboxTokens): Promise<void> {
+    let access = t.accessToken;
+    // `auth/token/revoke` needs a live access token; it takes the refresh token down with it.
+    if (this.now() >= t.expiresAt - REFRESH_MARGIN_MS) {
+      if (!t.refreshToken) return;
+      access = (await refreshAccessToken({ appKey: this.appKey, refreshToken: t.refreshToken, fetchFn: this.fetchFn, now: this.now })).accessToken;
+    }
+    await this.fetchFn(DROPBOX_REVOKE_URL, { method: 'POST', headers: { Authorization: `Bearer ${access}` } });
   }
 
   /** A usable access token: refreshed when within a minute of expiry (single-flight). */

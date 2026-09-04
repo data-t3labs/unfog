@@ -129,7 +129,7 @@ async function stubDropbox(page: Page): Promise<DropboxDouble> {
 }
 
 interface ReceiverDouble {
-  calls: Array<{ path: string; since: string | null; auth: string | undefined }>;
+  calls: Array<{ path: string; since: string | null; limit: string | null; auth: string | undefined; url: string }>;
 }
 
 /** A fake Overland receiver with two batches along N 7th St (today), then nothing. */
@@ -137,7 +137,8 @@ async function stubReceiver(page: Page): Promise<ReceiverDouble> {
   const d: ReceiverDouble = { calls: [] };
   const now = Date.now();
   const t0 = now - 60 * 60_000;
-  const key = (i: number) => `${TOKEN}/${String(t0 + i * 5 * 60_000).padStart(13, '0')}-0000${i}`;
+  // Keys/cursors as the Worker serves them: `<epochMs13>-<seq5>`, never the token (review-round2 MED-3).
+  const key = (i: number) => `${String(t0 + i * 5 * 60_000).padStart(13, '0')}-0000${i}`;
   const walk = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ t: t0 + (from + i) * 10_000, lon: BEDFORD_N7[0] - (from + i) * 0.0002, lat: BEDFORD_N7[1] + (from + i) * 0.00008, acc: 5, speed: 1.3 }));
   const batches = [
     { key: key(1), received: t0 + 5 * 60_000, points: walk(0, 8) },
@@ -148,7 +149,7 @@ async function stubReceiver(page: Page): Promise<ReceiverDouble> {
     if (r.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: CORS });
     const u = new URL(r.url());
     const auth = r.headers()['authorization'];
-    d.calls.push({ path: u.pathname, since: u.searchParams.get('since'), auth });
+    d.calls.push({ path: u.pathname, since: u.searchParams.get('since'), limit: u.searchParams.get('limit'), auth, url: r.url() });
     const json = (body: unknown, status = 200) => route.fulfill({ status, headers: { 'content-type': 'application/json', ...CORS }, body: JSON.stringify(body) });
     if (auth !== `Bearer ${TOKEN}`) return json({ result: 'error', error: 'unauthorized' }, 401);
     if (u.pathname === '/status') return json({ result: 'ok', batches: batches.length, latest: batches[1].received });
@@ -282,6 +283,7 @@ test.describe('Always recording — Data → Sources', () => {
     const after = (await stats(page)).visitedCells;
     expect(after).toBeGreaterThan(before + 10);
     expect(rx.calls.filter((c) => c.path === '/pull').map((c) => c.since)).toEqual(['']);
+    expect(rx.calls.filter((c) => c.path === '/pull').map((c) => c.limit)).toEqual(['25']); // the receiver's KV budget (Free plan)
     await shot(page, 'ar1-overland');
 
     // Second pull: the cursor is the last key → nothing new, the track untouched.
@@ -289,7 +291,8 @@ test.describe('Always recording — Data → Sources', () => {
     await expect(ov.locator('.st').first()).toContainText('nothing new', { timeout: 30_000 });
     const pulls = rx.calls.filter((c) => c.path === '/pull');
     expect(pulls).toHaveLength(2);
-    expect(pulls[1].since).toMatch(new RegExp(`^${TOKEN}/\\d{13}-00002$`));
+    expect(pulls[1].since).toMatch(/^\d{13}-00002$/);
+    for (const c of rx.calls) expect(c.url).not.toContain(TOKEN); // the token is in the header, never the URL
     expect((await stats(page)).visitedCells).toBe(after);
     expect((await tracks(page)).filter((t) => t.source === 'overland')).toHaveLength(1);
     // Stats lists the source.

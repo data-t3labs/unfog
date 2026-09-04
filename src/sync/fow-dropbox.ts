@@ -8,8 +8,10 @@
  * files → `importFowFilesChunked`, off-thread via the import worker when one is given) and
  * `grid.applyPayload` — FoW cells are max(count, 1), so re-pulling a tile never double counts.
  *
- * The cursor is saved only after every chunk of a pull has been applied: a pull that dies midway
- * re-lists the same entries next time.
+ * The unit of progress is one Dropbox list page (≤ ~200 entries): its tiles are downloaded and
+ * applied, then the page's cursor is saved, before the next page is asked for. A first pull over a
+ * multi-year Sync folder (thousands of tiles) can therefore be killed by iOS, or rate-limited,
+ * and the next pull resumes after the last completed page instead of starting over.
  */
 import * as Comlink from 'comlink';
 import type { GridApi } from '../grid/api';
@@ -17,7 +19,7 @@ import type { ImportPayload } from '../grid/types';
 import { importFowFilesChunked, isFowTileName } from '../import/fow';
 import type { InputFile } from '../import/util';
 import type { ImportOutcome, ImportProgress } from '../app/import-types';
-import { DropboxClient, DropboxError, beginDropboxAuth, completeDropboxAuth, dropboxAppKey, toSyncError, type DropboxAccount, type DropboxEntry, type DropboxTokens, type FetchFn } from './dropbox';
+import { DropboxClient, DropboxError, beginDropboxAuth, completeDropboxAuth, dropboxAppKey, toSyncError, type DropboxAccount, type DropboxEntry, type DropboxTokens, type FetchFn, type ListFolderResult } from './dropbox';
 import { SyncError, type PullResult, type SyncReason, type SyncSource } from './scheduler';
 import { localKV, type KeyValue } from './state';
 
@@ -26,6 +28,12 @@ export const FOW_DROPBOX_KEY = 'unfog.fowDropbox';
 export const DEFAULT_FOW_SYNC_FOLDER = '/Apps/Fog of World/Sync';
 /** Downloads in flight at once. */
 const DOWNLOAD_CONCURRENCY = 3;
+/** Entries per Dropbox list page — the unit of progress (Dropbox honours `limit` approximately). */
+const LIST_PAGE_LIMIT = 200;
+/** Tiles downloaded + applied together, in case a page comes back larger than asked. */
+const APPLY_BATCH = 200;
+/** Guard against a Dropbox that never stops saying `has_more` (a 3 000-tile folder is 15 pages). */
+const MAX_PAGES = 1000;
 
 export interface FowDropboxPull {
   at: number;
@@ -172,30 +180,15 @@ export class FowDropboxSource implements SyncSource {
     this.patch({ cursor: null, account: null, connectedAt: null });
   }
 
-  /** Changed tile entries since the cursor (or everything on the first pull) + the new cursor. */
-  private async listChanges(progress: (m: string) => void): Promise<{ tiles: DropboxEntry[]; cursor: string }> {
+  /** One list page: `list_folder/continue` from the cursor, or the folder's first page. */
+  private async listPage(cursor: string | null): Promise<ListFolderResult> {
     const db = this.dropbox();
     const s = this.state();
-    const tiles: DropboxEntry[] = [];
-    let cursor = s.cursor;
-    let page;
     try {
-      page = cursor ? await db.listFolderContinue(cursor) : await db.listFolder(s.folder);
+      return cursor ? await db.listFolderContinue(cursor) : await db.listFolder(s.folder, LIST_PAGE_LIMIT);
     } catch (e) {
-      if (e instanceof DropboxError && e.reset && cursor) {
-        // Dropbox forgot the cursor: start over (harmless — FoW cells are max(count, 1)).
-        this.patch({ cursor: null });
-        cursor = null;
-        page = await db.listFolder(s.folder);
-      } else if (e instanceof DropboxError && e.notFound) {
-        throw new SyncError(`Folder ${s.folder} was not found in your Dropbox. In Fog of World: Settings → Sync → Dropbox → Sync Now, then pull again.`, false);
-      } else throw e;
-    }
-    for (;;) {
-      for (const e of page.entries) if (e.tag === 'file' && isFowTileName(e.name)) tiles.push(e);
-      progress(`Checking Dropbox… ${tiles.length} changed tile${tiles.length === 1 ? '' : 's'}`);
-      if (!page.hasMore) return { tiles, cursor: page.cursor };
-      page = await db.listFolderContinue(page.cursor);
+      if (e instanceof DropboxError && e.notFound) throw new SyncError(`Folder ${s.folder} was not found in your Dropbox. In Fog of World: Settings → Sync → Dropbox → Sync Now, then pull again.`, false);
+      throw e;
     }
   }
 
@@ -224,44 +217,85 @@ export class FowDropboxSource implements SyncSource {
     return files.filter((f) => f.bytes.length > 0);
   }
 
+  /** Run downloaded tile files through the importer and onto the grid. */
+  private async applyFiles(files: InputFile[], progress: (m: string) => void, applied: { n: number }): Promise<{ cellsAdded: number; notes: string[] }> {
+    const before = await this.grid.getStats();
+    const notes: string[] = [];
+    let appliedHere = 0;
+    const onOutcome = async (o: ImportOutcome): Promise<void> => {
+      if (o.kind !== 'payload') {
+        if (o.kind === 'error') notes.push(`${o.name}: ${o.message}`);
+        return;
+      }
+      appliedHere++;
+      applied.n++;
+      progress(`Adding to the map… (${applied.n})`);
+      const p: ImportPayload = o.payload;
+      if (p.meta.note) notes.push(p.meta.note);
+      // Hand the tile buffers on to the grid worker without copying (same as the Data screen).
+      const buffers = (p.cellTiles ?? []).map((t) => t.counts.buffer as ArrayBuffer);
+      await this.grid.applyPayload(buffers.length ? Comlink.transfer(p, buffers) : p);
+    };
+    const outcomes = await this.importer(files, (p) => progress(p.message ?? 'Importing…'), onOutcome);
+    if (appliedHere === 0) {
+      // An importer without streaming (the mock): apply the returned list.
+      for (const o of outcomes) await onOutcome(o);
+    }
+    const after = await this.grid.getStats();
+    // A stats delta (a recorder checkpoint landing inside this window would inflate it slightly).
+    return { cellsAdded: Math.max(0, after.visitedCells - before.visitedCells), notes };
+  }
+
   async pull(_reason: SyncReason, progress: (m: string) => void): Promise<PullResult> {
     if (!this.connected()) throw new SyncError('Not connected to Dropbox', false);
     try {
-      const { tiles, cursor } = await this.listChanges(progress);
-      if (tiles.length === 0) {
-        this.patch({ cursor, lastPull: { at: this.now(), files: 0, cellsAdded: 0 } });
-        return { added: 0, items: 0 };
-      }
-      const files = await this.downloadAll(tiles, progress);
-      const before = await this.grid.getStats();
+      let cursor = this.state().cursor;
+      let files = 0;
+      let cellsAdded = 0;
+      let seen = 0;
+      let resets = 0;
       const notes: string[] = [];
-      let applied = 0;
-      const onOutcome = async (o: ImportOutcome): Promise<void> => {
-        if (o.kind !== 'payload') {
-          if (o.kind === 'error') notes.push(`${o.name}: ${o.message}`);
-          return;
+      const applied = { n: 0 };
+      for (let pageN = 0; ; pageN++) {
+        let page: ListFolderResult;
+        try {
+          page = await this.listPage(cursor);
+        } catch (e) {
+          if (e instanceof DropboxError && e.reset && cursor && resets++ === 0) {
+            // Dropbox forgot the cursor (first call or mid-way): start over once — harmless, FoW cells are max(count, 1).
+            this.patch({ cursor: null });
+            cursor = null;
+            continue;
+          }
+          throw e;
         }
-        applied++;
-        progress(`Adding to the map… (${applied})`);
-        const p: ImportPayload = o.payload;
-        if (p.meta.note) notes.push(p.meta.note);
-        // Hand the tile buffers on to the grid worker without copying (same as the Data screen).
-        const buffers = (p.cellTiles ?? []).map((t) => t.counts.buffer as ArrayBuffer);
-        await this.grid.applyPayload(buffers.length ? Comlink.transfer(p, buffers) : p);
-      };
-      const outcomes = await this.importer(files, (p) => progress(p.message ?? 'Importing…'), onOutcome);
-      if (applied === 0) {
-        // An importer without streaming (the mock): apply the returned list.
-        for (const o of outcomes) await onOutcome(o);
+        const tiles = page.entries.filter((e) => e.tag === 'file' && isFowTileName(e.name));
+        seen += tiles.length;
+        progress(`Checking Dropbox… ${seen} changed tile${seen === 1 ? '' : 's'}`);
+        let pageFiles = 0;
+        let pageCells = 0;
+        for (let i = 0; i < tiles.length; i += APPLY_BATCH) {
+          const got = await this.downloadAll(tiles.slice(i, i + APPLY_BATCH), progress);
+          if (got.length === 0) continue;
+          const r = await this.applyFiles(got, progress, applied);
+          pageFiles += got.length;
+          pageCells += r.cellsAdded;
+          notes.push(...r.notes);
+        }
+        files += pageFiles;
+        cellsAdded += pageCells;
+        // Progress checkpoint: this page is on the map; a pull that dies now resumes after it.
+        cursor = page.cursor;
+        const s = this.state();
+        this.patch({ cursor, totalFiles: s.totalFiles + pageFiles, totalCellsAdded: s.totalCellsAdded + pageCells });
+        if (!page.hasMore) break;
+        if (pageN + 1 >= MAX_PAGES) throw new SyncError('Dropbox keeps saying there is more — giving up for now', true);
       }
-      const after = await this.grid.getStats();
-      const cellsAdded = Math.max(0, after.visitedCells - before.visitedCells);
       const note = notes.length ? notes.join('; ') : undefined;
-      const s = this.state();
-      const lastPull: FowDropboxPull = { at: this.now(), files: files.length, cellsAdded };
+      const lastPull: FowDropboxPull = { at: this.now(), files, cellsAdded };
       if (note) lastPull.note = note;
-      this.patch({ cursor, lastPull, totalFiles: s.totalFiles + files.length, totalCellsAdded: s.totalCellsAdded + cellsAdded });
-      const result: PullResult = { added: cellsAdded, items: files.length };
+      this.patch({ lastPull });
+      const result: PullResult = { added: cellsAdded, items: files };
       if (note) result.note = note;
       return result;
     } catch (e) {

@@ -6,16 +6,23 @@
  * "current": …, "trip": …} with `Authorization: Bearer <token>`; the batch is deleted on the
  * phone only when the reply body is exactly {"result":"ok"}, otherwise it is kept and re-sent.
  *
- * Routes (bearer token per user; `?token=` also accepted for tools that cannot set headers):
+ * Routes (bearer token per user, `Authorization: Bearer <token>` — Overland sends it that way;
+ * a token in the URL would land in request logs, so `?token=` is not accepted):
  *   POST   /            store one batch under `<token>/<epochMs13>-<seq5>` (30-day TTL) → {"result":"ok"}
- *   GET    /pull?since=<key>&limit=<n>   batches after the cursor, oldest first:
+ *   GET    /pull?since=<cursor>&limit=<n>   batches after the cursor, oldest first, at most 25:
  *                       {result:"ok", batches:[{key, received, points:[{t, lon, lat, acc?, speed?}]}], cursor, hasMore}
+ *                       `key` and `cursor` are the `<epochMs13>-<seq5>` part only — never the token,
+ *                       because the cursor travels in the next pull's URL (an old `<token>/…` cursor
+ *                       is still accepted).
  *   GET    /status      {result:"ok", batches:<count>, latest:<epochMs|null>}  (the app's "Test")
- *   DELETE /            wipe the token's batches → {result:"ok", deleted:<n>}
+ *   DELETE /            delete up to 40 of the token's batches → {result:"ok", deleted:<n>, more:<bool>};
+ *                       repeat while `more`
  *   GET    /            plain-text banner (no auth) so a deploy can be checked in a browser
  * CORS: only the app origin(s) in APP_ORIGIN (comma-separated; default the GitHub Pages site).
  * Free-tier arithmetic: KV allows 1 000 writes/day — one per batch — so Overland's Send Interval
- * should be 5 min or longer; reads (100 000/day) and list calls cover many pulls a day.
+ * should be 5 min or longer; reads (100 000/day) and list calls cover many pulls a day. Every KV
+ * call is a subrequest and the Free plan allows 50 per invocation: a pull is ≤ MAX_LIST_PAGES list
+ * calls + PULL_MAX_LIMIT gets (45), a DELETE ≤ 1 list + DELETE_CHUNK deletes (41).
  *
  * No Cloudflare type package: the KV surface used here is declared structurally so the handlers
  * unit-test with a plain in-memory double (tests/unit/overland-worker.test.ts).
@@ -64,8 +71,15 @@ export interface StoredBatch {
 
 export const DEFAULT_APP_ORIGIN = 'https://data-t3labs.github.io';
 export const DEFAULT_TTL_DAYS = 30;
-export const PULL_DEFAULT_LIMIT = 100;
-export const PULL_MAX_LIMIT = 500;
+/**
+ * KV calls per invocation (Cloudflare Free plan: 50 subrequests, KV calls included). A pull
+ * lists up to MAX_LIST_PAGES pages (a full 30-day backlog is ~9 pages of 1 000) and gets one
+ * value per batch on the page; the two must stay under the plan's 50 together.
+ */
+export const PULL_DEFAULT_LIMIT = 25;
+export const PULL_MAX_LIMIT = 25;
+/** Batches deleted per DELETE call (1 list + DELETE_CHUNK deletes ≤ 50). */
+export const DELETE_CHUNK = 40;
 const LIST_PAGE = 1000;
 const MAX_LIST_PAGES = 20;
 const TOKEN_RE = /^[A-Za-z0-9_-]{8,128}$/;
@@ -73,14 +87,24 @@ const OK = '{"result":"ok"}';
 
 let seq = Math.floor(Math.random() * 100_000);
 
-export function batchKey(token: string, epochMs: number, n: number): string {
-  return `${token}/${String(Math.max(0, Math.floor(epochMs))).padStart(13, '0')}-${String(n % 100_000).padStart(5, '0')}`;
+/** The `<epochMs13>-<seq5>` part of a batch key: what `/pull` hands out as `key` / `cursor`. */
+export function batchSuffix(epochMs: number, n: number): string {
+  return `${String(Math.max(0, Math.floor(epochMs))).padStart(13, '0')}-${String(n % 100_000).padStart(5, '0')}`;
 }
 
-/** The epoch ms encoded in a batch key (null when the key is not ours). */
+export function batchKey(token: string, epochMs: number, n: number): string {
+  return `${token}/${batchSuffix(epochMs, n)}`;
+}
+
+/** The epoch ms encoded in a batch key or cursor (null when it is not ours). */
 export function keyEpoch(key: string): number | null {
-  const m = /\/(\d{13})-\d{5}$/.exec(key);
+  const m = /(?:^|\/)(\d{13})-\d{5}$/.exec(key);
   return m ? Number(m[1]) : null;
+}
+
+/** A pull cursor without the token: new clients send `<epoch>-<seq>`, older ones the full key. */
+export function cursorSuffix(since: string, prefix: string): string {
+  return since.startsWith(prefix) ? since.slice(prefix.length) : since;
 }
 
 /** Overland's GeoJSON batch → compact points (sorted by time); counts what was unusable. */
@@ -148,13 +172,11 @@ export function allowedTokens(env: Env): string[] {
     .filter((s) => TOKEN_RE.test(s));
 }
 
-/** The bearer token of a request (header first, then `?token=`), or null. */
+/** The bearer token of a request (the Authorization header only — a URL parameter would be logged), or null. */
 export function requestToken(req: Request): string | null {
   const auth = req.headers.get('Authorization') ?? '';
   const m = /^Bearer\s+(\S+)$/i.exec(auth.trim());
-  if (m) return m[1];
-  const q = new URL(req.url).searchParams.get('token');
-  return q && q.trim() ? q.trim() : null;
+  return m ? m[1] : null;
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -230,25 +252,28 @@ export async function handleRequest(req: Request, env: Env, now: () => number = 
     const auth = authenticate(req, env, cors);
     if (auth instanceof Response) return auth;
     const prefix = `${auth}/`;
-    const since = url.searchParams.get('since') ?? '';
+    const since = cursorSuffix(url.searchParams.get('since') ?? '', prefix);
     const limitRaw = Number(url.searchParams.get('limit'));
     const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(PULL_MAX_LIMIT, Math.floor(limitRaw)) : PULL_DEFAULT_LIMIT;
-    const { names, truncated } = await listKeys(kv, prefix, (all) => all.filter((n) => n > since).length > limit);
-    const after = names.filter((n) => n > since);
+    // Keys sort chronologically within the prefix, so comparing suffixes is comparing keys.
+    const isAfter = (name: string): boolean => name.slice(prefix.length) > since;
+    const { names, truncated } = await listKeys(kv, prefix, (all) => all.filter(isAfter).length > limit);
+    const after = names.filter(isAfter);
     const page = after.slice(0, limit);
     const hasMore = after.length > limit || truncated;
     const batches: Array<{ key: string; received: number; points: CompactPoint[] }> = [];
-    for (const key of page) {
-      const raw = await kv.get(key);
+    for (const name of page) {
+      const raw = await kv.get(name);
       if (!raw) continue; // expired between list and get
       try {
         const b = JSON.parse(raw) as StoredBatch;
-        batches.push({ key, received: b.received, points: Array.isArray(b.points) ? b.points : [] });
+        batches.push({ key: name.slice(prefix.length), received: b.received, points: Array.isArray(b.points) ? b.points : [] });
       } catch {
         /* skip a corrupt value */
       }
     }
-    return json({ result: 'ok', batches, cursor: page.length ? page[page.length - 1] : since, hasMore }, 200, cors);
+    const cursor = page.length ? page[page.length - 1].slice(prefix.length) : since;
+    return json({ result: 'ok', batches, cursor, hasMore }, 200, cors);
   }
 
   if (req.method === 'GET' && path === '/status') {
@@ -262,9 +287,11 @@ export async function handleRequest(req: Request, env: Env, now: () => number = 
   if (req.method === 'DELETE' && (path === '/' || path === '/overland')) {
     const auth = authenticate(req, env, cors);
     if (auth instanceof Response) return auth;
-    const { names } = await listKeys(kv, `${auth}/`);
-    for (const key of names) await kv.delete(key);
-    return json({ result: 'ok', deleted: names.length }, 200, cors);
+    // One chunk per call (the KV budget); the caller repeats while `more`.
+    const { names, truncated } = await listKeys(kv, `${auth}/`, (all) => all.length >= DELETE_CHUNK);
+    const chunk = names.slice(0, DELETE_CHUNK);
+    for (const key of chunk) await kv.delete(key);
+    return json({ result: 'ok', deleted: chunk.length, more: names.length > chunk.length || truncated }, 200, cors);
   }
 
   return json({ result: 'error', error: 'not found' }, 404, cors);
