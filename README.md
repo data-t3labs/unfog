@@ -54,6 +54,7 @@ npm test             # vitest
 npm run typecheck
 npm run build        # dist/
 npm run build-graph  # tools/build-graph — see docs/BUILD-PLAN.md §2.4
+npm run smoke:live   # opt-in smoke test of the DEPLOYED site — docs/BUILD-PLAN.md §2.7
 ```
 
 Design + architecture: `docs/BUILD-PLAN.md`. iPhone acceptance: `docs/iphone-checklist.md`.
