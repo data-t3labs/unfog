@@ -208,6 +208,11 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
       cands.appendChild(row);
     });
     goBtn.disabled = n === 0;
+    // The list may give (style.css: the sheet is capped), but never below its first row plus the fade — a
+    // shorter list clips the row's text (route-quality 4). Measured, not assumed: a "Straight across" row wraps.
+    const first = cands.firstElementChild as HTMLElement | null;
+    const fade = parseFloat(getComputedStyle(cands).getPropertyValue('--cands-fade')) || 0;
+    cands.style.setProperty('--cands-min', first ? `${first.offsetHeight + fade}px` : '0px');
     updateMore();
   }
 
@@ -250,7 +255,7 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
         ? link(appleMapsUrl(dest.lonlat, fromDevice ? undefined : origin ?? undefined), 'amaps', { title: 'Walking directions to the destination only — Apple Maps takes no checkpoints' }, 'Apple Maps')
         : null;
     const gpx = el('button', { class: 'btn small gpx', type: 'button', onclick: () => void saveGpx(c) }, 'Save GPX');
-    const note = gapM > 0 ? `Google Maps: ${n} part${n === 1 ? '' : 's'} on streets; the ${km(gapM)} straight leg is not a walking route.` : n > 1 ? `Google Maps: ${n} parts (9 checkpoints per trip).` : '';
+    const note = gapM > 0 ? `Google Maps: ${n} part${n === 1 ? '' : 's'}, either side of the dashed ${km(gapM)}.` : n > 1 ? `Google Maps: ${n} parts (9 checkpoints per trip).` : '';
     if (n === 1) handoff.appendChild(el('div', { class: 'row' }, google[0], apple, gpx));
     else handoff.append(el('div', { class: 'row' }, ...google), el('div', { class: 'row' }, apple, gpx));
     if (note) handoff.appendChild(el('p', { class: 'muted small note', text: note }));
@@ -410,8 +415,8 @@ export function createRouteSheet(ctx: AppContext): RouteSheet {
       lines.push(`${s.charAt(0).toUpperCase()}${s.slice(1)}.`);
     }
     const across = res.candidates.find((c) => c.kind === 'gap');
-    // Short: the status line sits above the candidate list, which the sheet's 55 % cap already squeezes.
-    if (across) lines.push(`Straight across crosses ${km(straightM(across))} the street map has no way over (dashed); the walk round is ${km(direct.lengthM)}.`);
+    // One line: the status sits above the candidate list, which the sheet's 55 % cap already squeezes.
+    if (across) lines.push(`The dashed ${km(straightM(across))} has no path on the street map.`);
     return lines.join(' ');
   }
 

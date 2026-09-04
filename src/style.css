@@ -241,10 +241,14 @@ html.dark .chip, html.dark .hint, html.dark .track-pill { box-shadow: var(--shad
    Google Maps parts left ~32 px). The sheet is a flex column whose candidate list is the one part that gives — it
    scrolls inside, with a fade at its foot while rows are below (`.more`, src/app/route-sheet.ts) — while the title,
    controls, Go and the hand-off row stay put; the sheet's own scroll is the last resort on tiny viewports / huge text. */
-.sheet.route { display: flex; flex-direction: column; max-height: min(calc(55dvh + var(--sab)), calc(100dvh - var(--top-pad) - 8px - 48px - 48px)); }
+.sheet.route { --cands-fade: 28px; display: flex; flex-direction: column; max-height: min(calc(55dvh + var(--sab)), calc(100dvh - var(--top-pad) - 8px - 48px - 48px)); }
 .sheet.route > * { flex: none; }
-.sheet.route .cands { flex: 0 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
-.sheet.route .cands.more { -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent); mask-image: linear-gradient(#000 calc(100% - 28px), transparent); }
+/* The list gives, but never below its first row plus the fade (`--cands-min`, set per result by route-sheet.ts from the
+   first row's real height): shorter, and the row's text overflows its box, centred, so the name sits above the list's edge
+   (route-quality 4: the wrapped "Straight across" row). A row itself never shrinks, for the same reason. */
+.sheet.route .cands { flex: 0 1 auto; min-height: var(--cands-min, 0px); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.sheet.route .cands > .cand { flex: none; }
+.sheet.route .cands.more { -webkit-mask-image: linear-gradient(#000 calc(100% - var(--cands-fade)), transparent); mask-image: linear-gradient(#000 calc(100% - var(--cands-fade)), transparent); }
 .sheet.route .route-status:empty { display: none; }
 .cands { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
 .cand { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 8px 12px; border-radius: 12px; border: 0; background: transparent; text-align: left; width: 100%; }

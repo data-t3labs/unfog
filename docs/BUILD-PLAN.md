@@ -131,9 +131,10 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   searches take 70–190). Novelty on the walked parts only (pctNew = new / (length − straight)); the straight leg is timed at
   walking pace. Direct stays last (and the budget/title still follow it); Most new / Balanced keep their slots; nothing changes
   for routes under the trigger, for two-component gaps or for loops. Sheet: teal row "Straight across · 5.3 km · 66 min ·
-  2.8 km straight", status "Straight across crosses 2.8 km the street map has no way over (dashed); the walk round is 12 km.";
-  Google Maps hand-off cuts at straight legs (`handoff.ts splitCandidate`)
-  and says the straight leg is not a walking route. Trade-off, documented in the route-quality-4 report: with the weight at 2.5 an
+  2.8 km straight", status "The dashed 2.8 km has no path on the street map."; Google Maps hand-off cuts at straight legs
+  (`handoff.ts splitCandidate`, note "Google Maps: 2 parts, either side of the dashed 2.8 km."). The candidate list never
+  shrinks below its first row plus the fade (`--cands-min`, measured per result; rows are `flex: none`) — shorter, a wrapped
+  row's text overflowed its box and the name sat above the list's edge. Trade-off, documented in the route-quality-4 report: with the weight at 2.5 an
   exit whose walk costs more than 2.5× the straight it saves is not taken (NYC pair 2: the leg starts 250 m from the pin and
   crosses Riverside Park because the Greenway there is a 2 km walk away in the graph).
 

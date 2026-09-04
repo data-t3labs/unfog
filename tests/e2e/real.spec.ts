@@ -1224,12 +1224,29 @@ test.describe('Unfog real engines', () => {
     expect(rows[0].lengthM).toBeLessThan(rows[rows.length - 1].lengthM / 2); // ≈ 5 km vs ≈ 12 km
     await expect(sheet.locator('.cand.on .name')).toHaveText('Straight across');
     await expect(sheet.locator('.cand.gap')).toHaveCount(1);
-    await expect(status).toContainText(/Straight across crosses \d[\d.,]* km the street map has no way over \(dashed\); the walk round is \d+ km\./);
+    // The selected row is the first row and must be wholly visible inside the (capped, scrolling) list:
+    // the list starts at scrollTop 0 and is at least one full row tall (lead's review of q4-gap.png).
+    // Measured on the row's CONTENT (name, sub-line), not its box: a flex-shrunk row keeps a 44 px box
+    // while its wrapped text overflows it, centred, so the name sat above the list's edge (q4-gap.png).
+    const boxes = await sheet.evaluate((s) => {
+      const cands = s.querySelector('.cands') as HTMLElement, row = s.querySelector('.cand') as HTMLElement;
+      const c = cands.getBoundingClientRect(), r = row.getBoundingClientRect();
+      const name = row.querySelector('.name')!.getBoundingClientRect(), st = row.querySelector('.st')!.getBoundingClientRect();
+      const fade = cands.classList.contains('more') ? parseFloat(getComputedStyle(cands).getPropertyValue('--cands-fade')) || 0 : 0;
+      return { list: { top: c.top, bottom: c.bottom, h: c.height, scrollTop: cands.scrollTop, client: cands.clientHeight, scroll: cands.scrollHeight, fade }, row: { top: r.top, bottom: r.bottom, h: r.height, nameTop: name.top, stBottom: st.bottom } };
+    });
+    test.info().annotations.push({ type: 'cands-box', description: JSON.stringify(boxes) });
+    expect(boxes.list.scrollTop, 'list starts at the top').toBe(0);
+    expect(boxes.row.nameTop, 'first row\'s name not clipped above the list').toBeGreaterThanOrEqual(boxes.list.top - 0.5);
+    expect(boxes.row.top, 'first row not clipped above the list').toBeGreaterThanOrEqual(boxes.list.top - 0.5);
+    expect(boxes.row.stBottom, 'first row\'s sub-line wholly visible above the fade').toBeLessThanOrEqual(boxes.list.bottom - boxes.list.fade + 0.5);
+    expect(boxes.row.bottom, 'first row wholly inside the list').toBeLessThanOrEqual(boxes.list.bottom + 0.5);
+    await expect(status).toContainText(/The dashed \d[\d.,]* km has no path on the street map\./);
     await expect(status.locator('.error')).toHaveCount(0);
     // Hand-off: the walking parts either side of the water, and a note that the straight leg is not a walking route.
     const handoff = sheet.locator('.handoff');
     await expect(handoff.locator('a.gmaps, a.part')).toHaveCount(2);
-    await expect(handoff.locator('.note')).toHaveText(/Google Maps: 2 parts on streets; the \d[\d.,]* km straight leg is not a walking route\./);
+    await expect(handoff.locator('.note')).toHaveText(/Google Maps: 2 parts, either side of the dashed \d[\d.,]* km\./);
     const hrefs = await handoff.locator('a.gmaps, a.part').evaluateAll((as) => as.map((a) => (a as HTMLAnchorElement).href));
     const dest1 = new URL(hrefs[0]).searchParams.get('destination'), origin2 = new URL(hrefs[1]).searchParams.get('origin');
     expect(dest1).not.toBe(origin2); // the parts do not chain: the water lies between them
