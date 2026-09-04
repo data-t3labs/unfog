@@ -191,6 +191,8 @@ export function createTracking(ctx: AppContext, hooks: RecorderEvents): Tracking
       if (recorder.status !== 'recording') return;
       await endSession();
       if (getSettings().tracking) await startSession();
+      // The sync scheduler (src/sync/scheduler.ts) pulls the always-recording sources after a rollover.
+      window.dispatchEvent(new CustomEvent('unfog:rollover'));
     },
   };
   return api;

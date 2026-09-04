@@ -39,6 +39,10 @@ Screenshots are the real app over sample walks in Williamsburg, Brooklyn (captur
   straight line you can still follow
 - Track my movement: one switch in Settings, then Unfog clears the fog as you move whenever it is
   open and on screen (the screen stays awake); sessions export as GPX for Fog of World's Import folder
+- Always recording without an iOS developer account: connect Dropbox and Unfog pulls the tiles Fog of
+  World changed every time it opens (OAuth PKCE in the browser, cursor-based, no server); or run the
+  free Cloudflare Worker in `workers/overland/` and the Overland iOS app logs your location in the
+  background for Unfog to pull (one track per day)
 - Backup / restore through the iOS share sheet; works offline once installed
 
 ## Development
@@ -53,6 +57,20 @@ npm run build-graph  # tools/build-graph — see docs/BUILD-PLAN.md §2.4
 ```
 
 Design + architecture: `docs/BUILD-PLAN.md`. iPhone acceptance: `docs/iphone-checklist.md`.
+
+### Always-recording setup (one time, by whoever deploys)
+
+- **Fog of World via Dropbox** needs a Dropbox app key: [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps)
+  → Create app → Scoped access → *Full Dropbox* (an App-folder app cannot see `/Apps/Fog of World`) →
+  Permissions: `files.metadata.read`, `files.content.read`, `account_info.read` → Settings → OAuth 2 →
+  Redirect URIs: `https://data-t3labs.github.io/unfog/` (and `http://localhost:5173/unfog/` for dev).
+  Put the App key in the repo as an Actions **variable** named `VITE_DROPBOX_APP_KEY` (Settings →
+  Secrets and variables → Actions → Variables); `.github/workflows/deploy.yml` passes it to
+  `npm run build`. Locally: `VITE_DROPBOX_APP_KEY=… npm run dev`. Without it the app still builds and
+  Data → Sources says "Not set up yet" with these steps. No secret is involved (PKCE).
+- **Overland** needs the receiver: see `workers/overland/README.md` (free Cloudflare account;
+  `wrangler login` → `kv namespace create` → `secret put OVERLAND_TOKENS` → `deploy`), then give the
+  phone the Worker URL and the token.
 
 ## Credits
 

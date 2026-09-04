@@ -48,6 +48,13 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
         el('button', { class: 'text-link', type: 'button', onclick: () => ctx.openHelp('always') }, 'Always recording'),
         '.',
       ),
+      el(
+        'p',
+        { class: 'muted small setting-note' },
+        'Fog of World via Dropbox and Overland record all day; set them up in ',
+        el('button', { class: 'text-link', type: 'button', onclick: () => { ctx.shell.showTab('data'); document.getElementById('sources')?.scrollIntoView({ block: 'start' }); } }, 'Sources'),
+        '.',
+      ),
       segRow('Basemap', [['bright', 'Map'], ['dark', 'Dark'], ['satellite', 'Satellite']], s.basemap, (v) => updateSettings({ basemap: v as AppSettings['basemap'] })),
       segRow('Units', [['metric', 'km'], ['imperial', 'miles']], s.units, (v) => updateSettings({ units: v as AppSettings['units'] })),
       segRow('Cleared core', [['1', 'Normal (≈20 m)'], ['0', 'Tight (≈7 m)']], String(s.coreRadius), (v) => updateSettings({ coreRadius: v === '0' ? 0 : 1 })),
@@ -143,13 +150,22 @@ export function createHelpScreen(ctx: AppContext): HelpScreen {
     always: section(
       'always',
       'Always recording',
-      p('iOS only lets a web app record while it is open and the screen is on. Lock the phone or switch apps and the trail pauses until you come back. No web app can do better, and Unfog will not pretend to.'),
-      p('For a record of everywhere you go:'),
-      bullets([
-        'Fog of World records in the background. Keep it as your recorder and import its Sync.zip now and then (Get your history out of Fog of World, above) — the map lines up exactly.',
-        'Overland, a free iOS app that logs your location in the background, is next: an import path for its logs is coming.',
+      p('iOS only lets a web app record while it is open and the screen is on. Lock the phone or switch apps and Unfog’s own tracking pauses until you come back. No web app can do better, and Unfog will not pretend otherwise.'),
+      p('Two apps can record for you all day instead: Fog of World records in the background already, and Overland is a free app that does nothing else. Unfog pulls what they recorded every time you open it (and every 15 minutes while it stays open). Set them up once in Data → Sources.'),
+      el('h4', { text: 'Fog of World via Dropbox' }),
+      steps([
+        'In Fog of World: Settings → Sync → Dropbox → sign in → Sync Now. Leave Auto Sync on, so Fog of World keeps its Sync folder in your Dropbox up to date by itself.',
+        'In Unfog: Data → Sources → Connect Dropbox → allow. You land back in Unfog.',
+        'From then on, every time you open Unfog it fetches only the tiles Fog of World changed and clears the fog to match. Pulling the same tile twice never double counts.',
       ]),
-      p('Either way nothing needs an account: you hand Unfog a file, and it reads it on the phone.', 'muted small'),
+      el('h4', { text: 'Overland' }),
+      steps([
+        'Overland (App Store: "Overland GPS Tracker", free) logs your location in the background and sends it to a small receiver that the person running Unfog sets up once, for free.',
+        'In Overland: Server URL and Access Token as given to you; Tracking Enabled on; Continuous Tracking Mode: Standard; Send Interval: 5 min.',
+        'In Unfog: Data → Sources → Overland → paste the same address and token → Save → Test. Each day’s points become one track ("Overland 2026-09-03") and clear the fog.',
+      ]),
+      p('What runs when: nothing runs while Unfog is closed. Pulls happen when you open Unfog, when it comes back on screen, after midnight while tracking, and every 15 minutes while it is open and online. If a pull fails, the Sources card says why and Unfog tries again later.', 'muted small'),
+      p('Nothing new leaves your phone: Unfog only reads from your Dropbox and your receiver. GPX and Google Timeline imports still work for anything else.', 'muted small'),
     ),
     location: section(
       'location',

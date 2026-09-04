@@ -1,0 +1,18 @@
+# Unfog Overland receiver — Cloudflare Worker (free plan). Deploy steps: README.md.
+name = "unfog-overland"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+workers_dev = true
+
+# `npx wrangler kv namespace create OVERLAND_KV` prints the id — paste it here.
+[[kv_namespaces]]
+binding = "OVERLAND_KV"
+id = "PASTE_THE_KV_NAMESPACE_ID_HERE"
+
+[vars]
+# Browser origins allowed to pull (comma separated). The app on GitHub Pages, plus localhost for `npm run dev`.
+APP_ORIGIN = "https://data-t3labs.github.io,http://localhost:5173"
+# Days a batch stays in KV before it expires on its own.
+BATCH_TTL_DAYS = "30"
+
+# The bearer token(s) are a secret, never a var:  npx wrangler secret put OVERLAND_TOKENS

@@ -401,3 +401,23 @@ ul.plain.bullets li { display: list-item; list-style: disc; margin-left: 18px; b
   .track-pill .dot, .spinner { animation: none; }
   .backdrop, .backdrop .sheet, .search-panel, .toast, .progress .bar, .switch, .switch .knob { transition: none; }
 }
+
+/* ---- Data → Sources: the always-recording cards (src/app/sources.ts) */
+.source-card { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.source-card .name { font-size: 0.941rem; font-weight: 600; }
+.source-card .status { font-size: 0.824rem; margin-top: 2px; color: var(--fg-2); }
+.source-card .status.ok { color: var(--green); }
+.source-card .status.warn { color: var(--accent-text); font-weight: 600; }
+.source-card .st { font-size: 0.765rem; color: var(--fg-2); margin-top: 4px; }
+.source-card .btn-row.left { margin-top: 10px; flex-wrap: wrap; }
+.source-card .btn-row.left .btn { flex: 0 0 auto; }
+.source-card .list { margin-top: 8px; }
+.steps.small { font-size: 0.824rem; }
+.setup-steps { margin-top: 8px; font-size: 0.824rem; }
+.setup-steps summary { cursor: pointer; color: var(--fg-2); font-weight: 600; padding: 4px 0; }
+.field { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 0.824rem; font-weight: 600; }
+.field-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.field-row .text-field { flex: 1; min-width: 0; }
+.text-field { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); color: var(--fg); font: inherit; font-size: 1rem; font-weight: 400; outline: none; -webkit-appearance: none; appearance: none; user-select: text; -webkit-user-select: text; }
+.text-field:focus { border-color: var(--accent); }
+.help-body h4 { margin: 12px 0 4px; font-size: 0.941rem; }

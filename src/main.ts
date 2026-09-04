@@ -17,6 +17,7 @@ import { createShell } from './app/shell';
 import { createStatsScreen } from './app/stats';
 import { createTracking, type TrackingController } from './app/tracking';
 import { el, toast } from './app/ui';
+import { createSync } from './sync/setup';
 import { LocationManager, describeLocationError } from './map/location';
 import { DEFAULT_CENTER, UnfogMap, savedCenter } from './map/map';
 import { overlayPerf } from './map/overlay';
@@ -193,6 +194,8 @@ async function boot(): Promise<void> {
   const search = createSearch(ctx);
   routeSheet = createRouteSheet(ctx);
   tracking = createTracking(ctx, recordHooks);
+  // Always recording (src/sync): Fog of World via Dropbox + Overland, pulled on open / rollover / every 15 min.
+  const sync = createSync(ctx);
   const dataScreen = createDataScreen(ctx);
   statsScreen = createStatsScreen(ctx);
   helpScreen = createHelpScreen(ctx);
@@ -217,6 +220,8 @@ async function boot(): Promise<void> {
     void tracking.resume().then(() => {
       const installCard = showInstallCardIfNeeded(ctx, () => tracking.offerIfNeeded());
       if (!installCard) tracking.offerIfNeeded();
+      // Finish a Dropbox sign-in the app was opened with (if any), then pull the sources.
+      void sync.boot();
     });
     window.setTimeout(() => dataScreen.maybeNag(), 4000);
     map.map.once('idle', () => {

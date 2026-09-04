@@ -25,7 +25,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      # Fog of World via Dropbox (src/sync/dropbox.ts): the Dropbox app key is a repository
+      # variable (Settings → Secrets and variables → Actions → Variables → VITE_DROPBOX_APP_KEY).
+      # Unset ⇒ the app builds fine and Data → Sources shows "Not set up yet" with the steps.
       - run: npm run build
+        env:
+          VITE_DROPBOX_APP_KEY: ${{ vars.VITE_DROPBOX_APP_KEY }}
       # Routing graph packs (coverage v2 hosting): release assets have no CORS headers, so the packs
       # live on the sibling Pages sites unfog-graph-N (same origin as the app; Range → 206) per
       # tools/build-graph/pages-shards.json. This step writes dist/graph/packs/packs-index.json with

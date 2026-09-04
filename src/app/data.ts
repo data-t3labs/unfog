@@ -15,6 +15,7 @@ import { icons } from './icons';
 import type { ImportOutcome, ImportProgress } from './import-types';
 import { createPacksSection } from './packs-data';
 import { requestPersistentStorage } from './pwa';
+import { createSourcesSection } from './sources';
 import { exportTrackGpx, shareOrDownload } from './share';
 import { readJSON, writeJSON } from './settings';
 import { BACKUP_NAG_KEY, LAST_BACKUP_KEY, LAST_IMPORT_KEY, REGION_DL_KEY, type LastBackup, type LastImport, type RegionDownloads } from './store-keys';
@@ -181,6 +182,9 @@ export function createDataScreen(ctx: AppContext): DataScreen {
     backupInfo.classList.toggle('warn', old);
   }
 
+  // ---- always-recording sources (Fog of World via Dropbox, Overland): src/app/sources.ts
+  const sourcesSection = createSourcesSection(ctx);
+
   // ---- routing data: the automatic pack cache (coverage v2), then the prebuilt regions + downloaded areas
   const packsSection = createPacksSection(ctx);
   const regionsList = el('div', { class: 'list' });
@@ -195,7 +199,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       return;
     }
     const dl = readJSON<RegionDownloads>(REGION_DL_KEY, {});
-    if (!regions.length && !downloads.length) regionsList.appendChild(el('p', { class: 'muted', text: 'No prebuilt regions published yet. Routing will offer to download an area when you plan a route.' }));
+    if (!regions.length && !downloads.length) regionsList.appendChild(el('p', { class: 'muted', text: 'No prebuilt regions published yet.' }));
     for (const r of regions) {
       const got = dl[r.id];
       // builtAt is an ISO date; tile counts are an internal unit and only truncate the line on a phone.
@@ -321,6 +325,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
       importProgress,
       importStatus,
       importResult,
+      sourcesSection.el,
       el('h3', { text: 'Backup' }),
       el('p', { class: 'muted', text: 'Deleting the Home Screen icon deletes this app’s data. Export a backup to Files or iCloud Drive now and then; importing a backup merges it back.' }),
       exportBtn,
@@ -338,7 +343,7 @@ export function createDataScreen(ctx: AppContext): DataScreen {
 
   async function refresh(): Promise<void> {
     renderBackupInfo();
-    await Promise.all([packsSection.refresh(), renderRegions(), renderSessions()]);
+    await Promise.all([packsSection.refresh(), renderRegions(), renderSessions(), sourcesSection.refresh()]);
   }
 
   return {
@@ -367,6 +372,8 @@ function sourceName(src: string): string {
       return 'GPX';
     case 'timeline':
       return 'Google Timeline';
+    case 'overland':
+      return 'Overland';
     case 'backup':
       return 'Unfog backup';
     default:

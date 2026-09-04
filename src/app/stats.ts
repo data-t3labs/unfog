@@ -96,6 +96,8 @@ function sourceLabel(src: string): string {
       return 'Google Timeline';
     case 'fow':
       return 'Fog of World';
+    case 'overland':
+      return 'Overland';
     case 'backup':
       return 'Unfog backups';
     default:

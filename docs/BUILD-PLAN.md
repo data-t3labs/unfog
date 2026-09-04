@@ -217,7 +217,7 @@ high-res graph of the places you are automatically — no clicks; at least North
   local midnight and on every launch — the persisted session of the previous run is saved as a track first
   (`saveUnfinishedSession`), so a crash / iOS kill / update reload loses ≤ one checkpoint. The map shows only a quiet
   "Tracking" pill (paused / waiting-for-GPS variants); Settings carries the honest note that iOS only records while the app is
-  open and on screen, pointing to Help → "Always recording" (Fog of World as the background recorder; Overland import coming).
+  open and on screen, pointing to Help → "Always recording" (Fog of World via Dropbox and Overland, pulled every time the app opens — src/sync, Data → Sources).
   The service-worker update no longer refuses Reload mid-session.
 
 ## 3. Waves

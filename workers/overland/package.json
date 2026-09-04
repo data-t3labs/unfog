@@ -1,0 +1,17 @@
+{
+  "name": "unfog-overland-receiver",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker + KV receiver for the Overland iOS app; the Unfog app pulls batches from it. Not a dependency of the app — its own package.",
+  "scripts": {
+    "login": "wrangler login",
+    "kv:create": "wrangler kv namespace create OVERLAND_KV",
+    "secret:tokens": "wrangler secret put OVERLAND_TOKENS",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
