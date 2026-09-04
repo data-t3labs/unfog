@@ -134,6 +134,15 @@ Raster tiles 512×512 for `fog://{z}/{x}/{y}?v={version}` and `heat://…`, rend
   the walk or bike network (Kruskal over per-mode union-find, shortest first, dangling ends trimmed) and flags them `ArcFlag.GLUE`:
   walk + bike (dismount per tags), never drive; the engine prices them at plain length with 0 new metres and `stats.km` excludes them.
   Result: NYC walk connectivity 31 % → 95 % for +18 % arcs and 0 km change. `--no-sidewalk-glue` / `--no-service-glue` opt out.
+- Connectivity on island regions (D5, 2026-09-03): Salt Spring (Overpass bbox −123.62,48.72,−123.4,48.9) measures walk 71.7 % /
+  bike 70.6 % / drive 77.6 % over 35 walk components, and that is the correct reading of OSM, not a build defect. `out geom`
+  returns whole ways touching the bbox, so the 1,917-node island network is joined in the tally by 438 + 193 nodes of Vancouver
+  Island across Sansum Narrows (Maple Bay, Cowichan Bay) and 33 nodes of a neighbouring island; on-island walk connectivity is
+  1917/2010 = 95 %. The remaining islands are trail clusters behind `access=private` roads (Nose Point / Maracaibo Estates,
+  Musgrave Landing — dropped like the OSRM foot profile does) and real OSM gaps (the Vesuvius dock walkway ends 25 m short of
+  Vesuvius Bay Road). No cross-component node pair lies within 2 m, so an endpoint "snap-join" would join nothing there and was
+  not added. `graph-output.test.ts` guards the island with landmark probes (three ferry terminals, Burgoyne Bay, Mount Maxwell,
+  Beddis in Ganges' walk + bike component) plus a pct bar 3 points under the measurement.
 - Topology: graph nodes = way endpoints + nodes shared by ≥2 kept ways; arcs = way runs between graph nodes; shape = intermediate nodes.
 - Tiling: arcs stored in the tile of their from-node; foreign endpoints included as FOREIGN nodes. Output `public/graph/<region>/`.
 
