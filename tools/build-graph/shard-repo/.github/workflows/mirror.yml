@@ -46,3 +46,24 @@ jobs:
       - if: steps.mirror.outputs.changed == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
+
+  # GitHub disables a public repository's scheduled workflows after 60 days without repository
+  # activity, and nothing else ever commits here. An empty commit once HEAD is 45 days old keeps the
+  # daily run alive (15 daily chances before the cutoff). Scheduled runs only, so the operator's
+  # dispatched runs are unchanged.
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          age=$(( ($(date +%s) - $(git log -1 --format=%ct)) / 86400 ))
+          echo "HEAD is $age days old"
+          if [ "$age" -ge 45 ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit --allow-empty -m 'Keepalive: scheduled workflows stop after 60 days without repository activity'
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi

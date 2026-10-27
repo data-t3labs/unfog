@@ -12,7 +12,9 @@ cells from the [`graphs-v1` release](https://github.com/data-t3labs/unfog/releas
 of `data-t3labs/unfog` — the storage of record — verifies their size and sha256 against the
 release's `packs-index.json`, and publishes them as a GitHub Pages artifact. Which cells belong to
 which shard is decided by `tools/build-graph/pages-shards.json` in `data-t3labs/unfog` (see its
-`docs/coverage-runbook.md` § Hosting).
+`docs/coverage-runbook.md` § Hosting). The workflow's scheduled run also pushes an empty
+"Keepalive" commit once the last commit is 45 days old, because GitHub disables scheduled
+workflows after 60 days without repository activity.
 
 Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), available under
 the [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/). Extracts by
